@@ -913,7 +913,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		const internalUrlOptions: InternalUrlExpansionOptions = {
 			skills: this.session.skills ?? [],
-			attachments: this.session.getImageAttachments?.() ?? [],
+			attachments: (await this.session.getImageAttachments?.(signal)) ?? [],
 			internalRouter: InternalUrlRouter.instance(),
 			cwd: this.session.cwd,
 			sessionFile: this.session.getSessionFile() ?? undefined,

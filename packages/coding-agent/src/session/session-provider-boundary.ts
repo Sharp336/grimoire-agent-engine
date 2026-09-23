@@ -49,7 +49,9 @@ export class SessionProviderBoundary {
 	}
 
 	/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`. */
-	getImageAttachments(): { label: string; uri: string; image: ImageContent; sourcePath: string }[] {
+	async getImageAttachments(
+		signal?: AbortSignal,
+	): Promise<{ label: string; uri: string; image: ImageContent; sourcePath: string }[]> {
 		for (let i = this.#host.agent.state.messages.length - 1; i >= 0; i--) {
 			const message = this.#host.agent.state.messages[i];
 			if (!message || (message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) {
@@ -57,22 +59,28 @@ export class SessionProviderBoundary {
 			}
 			const images = message.content.filter((part): part is ImageContent => part.type === "image");
 			if (images.length === 0) continue;
-			return images.flatMap((image, index) => {
+			const attachments: { label: string; uri: string; image: ImageContent; sourcePath: string }[] = [];
+			for (const [index, image] of images.entries()) {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
 				try {
-					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
-						extension: blobExtensionForImageMimeType(image.mimeType),
-					}).displayPath;
-					return [{ label, uri, image, sourcePath }];
+					const sourcePath = (
+						await this.#host.sessionManager.putBlob(
+							Buffer.from(image.data, "base64"),
+							{ extension: blobExtensionForImageMimeType(image.mimeType) },
+							signal,
+						)
+					).displayPath;
+					attachments.push({ label, uri, image, sourcePath });
 				} catch (error) {
+					signal?.throwIfAborted();
 					logger.warn("failed to materialize image attachment; attachment omitted", {
 						label,
 						error: error instanceof Error ? error.message : String(error),
 					});
-					return [];
 				}
-			});
+			}
+			return attachments;
 		}
 		return [];
 	}

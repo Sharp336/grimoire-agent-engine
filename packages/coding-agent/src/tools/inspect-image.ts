@@ -214,7 +214,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 				imageInput = await loadAttachmentReferenceInput({
 					path: params.path,
 					reference: attachmentReference,
-					attachments: this.session.getImageAttachments?.() ?? [],
+					attachments: (await this.session.getImageAttachments?.(signal)) ?? [],
 					autoResize,
 					excludeWebP,
 				});

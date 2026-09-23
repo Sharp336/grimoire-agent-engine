@@ -1796,7 +1796,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getActiveModel: () => agent?.state.model ?? model,
 			getInspectImageModeOverride: () => session?.getInspectImageModeOverride(),
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
-			getImageAttachments: () => session?.getImageAttachments() ?? [],
+			getImageAttachments: signal => session?.getImageAttachments(signal) ?? [],
 			withOriginalAttachment: (uri, read, signal) => withOriginalAttachment(sessionManager, uri, read, signal),
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",

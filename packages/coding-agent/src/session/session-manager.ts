@@ -1683,8 +1683,8 @@ export class SessionManager {
 	}
 
 	/** Puts a binary blob into the blob store and returns the blob reference. */
-	async putBlob(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
-		return this.#blobs.put(data, options);
+	async putBlob(data: Buffer, options?: BlobPutOptions, signal?: AbortSignal): Promise<BlobPutResult> {
+		return this.#blobs.put(data, options, signal);
 	}
 
 	/** Synchronous variant of {@link putBlob} for rebuild-only render paths. */

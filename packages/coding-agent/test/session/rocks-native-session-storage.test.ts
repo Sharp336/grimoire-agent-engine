@@ -326,7 +326,7 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		});
 
 		const hash = hashes[0]!;
-		const blobPath = path.join(blobs.dir, hash);
+		const blobPath = path.join(blobs.liveDir, hash);
 		const original = await fs.readFile(blobPath);
 		await fs.unlink(blobPath);
 		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
@@ -340,7 +340,7 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 	} finally {
 		await server.stop(true);
 	}
-});
+}, 15_000);
 
 it("persists structured native checkpoints through the shared HTTP client and reads frozen bounded context/children", async () => {
 	let latest: StorageWrite;

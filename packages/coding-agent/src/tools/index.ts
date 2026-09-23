@@ -472,7 +472,7 @@ export interface ToolSession {
 	 *  the parent's tracer/hooks with the subagent's own identity stamped. */
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
-	getImageAttachments?: () => ImageAttachmentEntry[];
+	getImageAttachments?: (signal?: AbortSignal) => Promise<ImageAttachmentEntry[]> | ImageAttachmentEntry[];
 	/** Read a verified temporary copy of an original upload owned by this exact session branch. */
 	withOriginalAttachment?: <T>(
 		uri: string,

@@ -1072,7 +1072,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		if (IMAGE_ATTACHMENT_URI_REGEX.test(readPath)) {
-			const attachments = this.session.getImageAttachments?.() ?? [];
+			const attachments = (await this.session.getImageAttachments?.(signal)) ?? [];
 			const attachment = attachments.find(entry => entry.uri === readPath);
 			if (!attachment) {
 				const availableUris = attachments.map(entry => entry.uri).join(", ") || "none";

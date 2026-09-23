@@ -355,7 +355,7 @@ describe("InspectImageTool", () => {
 				const tool = session.getToolByName("inspect_image");
 				expect(tool).toBeDefined();
 				const wiredToolSession = (tool as unknown as { session?: ToolSession }).session;
-				const attachments = wiredToolSession?.getImageAttachments?.();
+				const attachments = await wiredToolSession?.getImageAttachments?.();
 				const sourcePath = attachments?.[0]?.sourcePath;
 				if (!sourcePath) {
 					throw new Error("Expected attachment sourcePath to be populated");

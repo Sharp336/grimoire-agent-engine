@@ -146,7 +146,7 @@ describe("AgentSession message pipeline", () => {
 		session.clearQueue();
 	});
 
-	it("resolves image attachments from submitted messages, not tool-result images", () => {
+	it("resolves image attachments from submitted messages, not tool-result images", async () => {
 		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
 		const toolImage: ImageContent = { type: "image", data: "tool-image", mimeType: "image/png" };
 		const session = new AgentSession({
@@ -171,7 +171,7 @@ describe("AgentSession message pipeline", () => {
 			isError: false,
 		});
 
-		const attachments = session.getImageAttachments();
+		const attachments = await session.getImageAttachments();
 		const sourcePath = attachments[0]?.sourcePath;
 		if (!sourcePath) {
 			throw new Error("Expected attachment sourcePath to be populated");

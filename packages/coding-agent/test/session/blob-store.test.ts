@@ -193,3 +193,175 @@ describe("BlobStore completed upload import", () => {
 		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
 	});
 });
+
+describe("BlobStore async publication responsiveness", () => {
+	it("keeps control timers moving while another process holds the hash lock", async () => {
+		using tempDir = TempDir.createSync("artel-s5-r4-lock-");
+		const data = Buffer.from("publication waits without blocking other chats");
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		const ready = path.join(tempDir.path(), "holder-ready");
+		const release = path.join(tempDir.path(), "holder-release");
+		const entered = Promise.withResolvers<void>();
+		const secondWait = Promise.withResolvers<void>();
+		const store = new BlobStore(path.join(tempDir.path(), "blobs"), stage => {
+			if (stage === "lock_wait") entered.resolve();
+		});
+		const cancelStore = new BlobStore(store.dir, stage => {
+			if (stage === "lock_wait") secondWait.resolve();
+		});
+		const lock = path.join(store.locksDir, `${hash}.lock`);
+		const holder = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "../helpers/blob-publication-lock-holder.ts"),
+				lock,
+				ready,
+				release,
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+		);
+		try {
+			for (let attempt = 0; attempt < 500; attempt++) {
+				if (
+					await fs.stat(ready).then(
+						() => true,
+						() => false,
+					)
+				)
+					break;
+				await Bun.sleep(10);
+			}
+			expect(
+				await fs.stat(ready).then(
+					() => true,
+					() => false,
+				),
+			).toBe(true);
+			let settled = false;
+			const publishing = store.put(data).finally(() => {
+				settled = true;
+			});
+			void publishing.catch(() => {});
+			await Promise.race([
+				entered.promise,
+				Bun.sleep(5_000).then(() => {
+					throw new Error("async publication never reached lock wait");
+				}),
+			]);
+			const controlTick = Promise.withResolvers<void>();
+			setTimeout(controlTick.resolve, 0);
+			await controlTick.promise;
+			expect(settled).toBe(false);
+			const abort = new AbortController();
+			const cancelled = cancelStore.put(data, undefined, abort.signal);
+			await Promise.race([
+				secondWait.promise,
+				Bun.sleep(5_000).then(() => {
+					throw new Error("abort case never reached lock wait");
+				}),
+			]);
+			abort.abort(new Error("publication cancelled"));
+			await expect(cancelled).rejects.toThrow("publication cancelled");
+			expect(
+				await fs.stat(path.join(store.liveDir, hash)).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+			await fs.writeFile(release, "");
+			expect(await holder.exited).toBe(0);
+			const result = await publishing;
+			expect(result.hash).toBe(hash);
+			expect(await fs.readFile(result.path)).toEqual(data);
+		} finally {
+			await fs.writeFile(release, "");
+			await holder.exited;
+		}
+	}, 15_000);
+
+	it("yields during an existing body comparison and retains exact bytes", async () => {
+		using tempDir = TempDir.createSync("artel-s5-r4-compare-");
+		const data = Buffer.alloc(BLOB_RANGE_BYTES * 2 + 17, 41);
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let pause = false;
+		const store = new BlobStore(path.join(tempDir.path(), "blobs"), stage => {
+			if (stage === "compare" && pause) {
+				entered.resolve();
+				return release.promise;
+			}
+		});
+		await store.put(data);
+		pause = true;
+		let settled = false;
+		const duplicate = store.restore(hash, data).finally(() => {
+			settled = true;
+		});
+		void duplicate.catch(() => {});
+		try {
+			await Promise.race([
+				entered.promise,
+				Bun.sleep(5_000).then(() => {
+					throw new Error("existing body comparison was not reached");
+				}),
+			]);
+			const controlTick = Promise.withResolvers<void>();
+			setTimeout(controlTick.resolve, 0);
+			await controlTick.promise;
+			expect(settled).toBe(false);
+		} finally {
+			release.resolve();
+		}
+		await duplicate;
+		expect(await fs.readFile(path.join(store.liveDir, hash))).toEqual(data);
+	}, 15_000);
+
+	it("fails a bounded lock wait without publishing a missing body", async () => {
+		using tempDir = TempDir.createSync("artel-s5-r4-deadline-");
+		const data = Buffer.from("lock timeout must not claim publication");
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		const ready = path.join(tempDir.path(), "holder-ready");
+		const release = path.join(tempDir.path(), "holder-release");
+		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
+		const lock = path.join(store.locksDir, `${hash}.lock`);
+		const holder = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "../helpers/blob-publication-lock-holder.ts"),
+				lock,
+				ready,
+				release,
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+		);
+		try {
+			for (let attempt = 0; attempt < 500; attempt++) {
+				if (
+					await fs.stat(ready).then(
+						() => true,
+						() => false,
+					)
+				)
+					break;
+				await Bun.sleep(10);
+			}
+			expect(
+				await fs.stat(ready).then(
+					() => true,
+					() => false,
+				),
+			).toBe(true);
+			await expect(store.put(data)).rejects.toThrow("Blob publication lock is busy");
+			expect(
+				await fs.stat(path.join(store.liveDir, hash)).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+		} finally {
+			await fs.writeFile(release, "");
+			await holder.exited;
+		}
+	}, 15_000);
+});

@@ -61,6 +61,8 @@ function normalizeBlobExtension(extension: string | undefined): string | undefin
 
 const PROCESS_STARTED_AT_MS = Math.round(Date.now() - process.uptime() * 1000);
 const LOCK_PAUSE = new Int32Array(new SharedArrayBuffer(4));
+const LOCK_ATTEMPTS = 500;
+const LOCK_RETRY_MS = 10;
 
 interface BlobIntent {
 	id: string;
@@ -84,6 +86,16 @@ function syncDirectory(directory: string): void {
 	}
 }
 
+async function syncDirectoryAsync(directory: string): Promise<void> {
+	if (process.platform === "win32") return;
+	const handle = await fsp.open(directory, "r");
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
 function writeExclusiveAndSync(file: string, contents: Buffer | string): void {
 	const fd = fs.openSync(file, "wx");
 	try {
@@ -94,12 +106,28 @@ function writeExclusiveAndSync(file: string, contents: Buffer | string): void {
 	}
 }
 
+async function writeExclusiveAndSyncAsync(file: string, contents: Buffer | string): Promise<void> {
+	const handle = await fsp.open(file, "wx");
+	try {
+		await handle.writeFile(contents);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
 function unlinkIfPresent(file: string): void {
 	try {
 		fs.unlinkSync(file);
 	} catch (error) {
 		if (!isEnoent(error)) throw error;
 	}
+}
+
+async function unlinkIfPresentAsync(file: string): Promise<void> {
+	await fsp.unlink(file).catch(error => {
+		if (!isEnoent(error)) throw error;
+	});
 }
 
 function sameFileBytesSync(file: string, data: Buffer): boolean {
@@ -122,11 +150,54 @@ function sameFileBytesSync(file: string, data: Buffer): boolean {
 	}
 }
 
+async function sameFileBytesAsync(
+	file: string,
+	data: Buffer,
+	signal?: AbortSignal,
+	afterFirstChunk?: () => void | Promise<void>,
+): Promise<boolean> {
+	const before = await fsp.lstat(file);
+	if (!before.isFile() || before.isSymbolicLink() || before.size !== data.length) return false;
+	const handle = await fsp.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+	try {
+		const opened = await handle.stat();
+		if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false;
+		const chunk = Buffer.alloc(Math.min(BLOB_RANGE_BYTES, data.length));
+		for (let offset = 0; offset < data.length; ) {
+			signal?.throwIfAborted();
+			const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, data.length - offset), offset);
+			if (!bytesRead || !chunk.subarray(0, bytesRead).equals(data.subarray(offset, offset + bytesRead)))
+				return false;
+			if (offset === 0) await afterFirstChunk?.();
+			offset += bytesRead;
+		}
+		const after = await handle.stat();
+		return after.size === opened.size && after.mtimeMs === opened.mtimeMs && after.ctimeMs === opened.ctimeMs;
+	} finally {
+		await handle.close();
+	}
+}
+
 function linkOrVerifySync(source: string, destination: string, data: Buffer): void {
 	try {
 		fs.linkSync(source, destination);
 	} catch (error) {
 		if (!isExists(error) || !sameFileBytesSync(destination, data))
+			throw new Error(`Existing blob conflicts with publication: ${destination}`, { cause: error });
+	}
+}
+
+async function linkOrVerifyAsync(
+	source: string,
+	destination: string,
+	data: Buffer,
+	signal?: AbortSignal,
+	afterFirstChunk?: () => void | Promise<void>,
+): Promise<void> {
+	try {
+		await fsp.link(source, destination);
+	} catch (error) {
+		if (!isExists(error) || !(await sameFileBytesAsync(destination, data, signal, afterFirstChunk)))
 			throw new Error(`Existing blob conflicts with publication: ${destination}`, { cause: error });
 	}
 }
@@ -142,17 +213,31 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 }
 
 export class BlobStore {
-	readonly #checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "complete", hash: string) => void;
+	readonly #checkpoint?: (
+		stage: "intent" | "publication_lock" | "canonical" | "complete" | "compare" | "lock_wait",
+		hash: string,
+	) => void | Promise<void>;
 	/** Fault-injection seam for isolated publication crash tests. */
 	constructor(
 		readonly dir: string,
-		checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "complete", hash: string) => void,
+		checkpoint?: (
+			stage: "intent" | "publication_lock" | "canonical" | "complete" | "compare" | "lock_wait",
+			hash: string,
+		) => void | Promise<void>,
 	) {
 		this.#checkpoint = checkpoint;
 	}
 	#assertSafeRoot(): void {
 		try {
 			const stat = fs.lstatSync(this.dir);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Blob directory is unsafe");
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	async #assertSafeRootAsync(): Promise<void> {
+		try {
+			const stat = await fsp.lstat(this.dir);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Blob directory is unsafe");
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
@@ -183,7 +268,7 @@ export class BlobStore {
 			throw new Error("Blob publication lock directory is unsafe");
 		const lock = path.join(this.locksDir, `${hash}.lock`);
 		let acquired = false;
-		for (let attempt = 0; attempt < 500; attempt++) {
+		for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
 			try {
 				writeExclusiveAndSync(lock, `${process.pid}\n${PROCESS_STARTED_AT_MS}\n`);
 				acquired = true;
@@ -214,7 +299,7 @@ export class BlobStore {
 					}
 					continue;
 				}
-				Atomics.wait(LOCK_PAUSE, 0, 0, 10);
+				Atomics.wait(LOCK_PAUSE, 0, 0, LOCK_RETRY_MS);
 			}
 		}
 		if (!acquired) throw new Error("Blob publication lock is busy");
@@ -223,6 +308,64 @@ export class BlobStore {
 			return work();
 		} finally {
 			unlinkIfPresent(lock);
+		}
+	}
+	async #withPublicationLockAsync<T>(
+		hash: string,
+		work: () => Promise<T>,
+		publishing = false,
+		signal?: AbortSignal,
+	): Promise<T> {
+		await fsp.mkdir(this.locksDir, { recursive: true });
+		const directory = await fsp.lstat(this.locksDir);
+		if (!directory.isDirectory() || directory.isSymbolicLink())
+			throw new Error("Blob publication lock directory is unsafe");
+		const lock = path.join(this.locksDir, `${hash}.lock`);
+		let acquired = false;
+		const deadline = performance.now() + LOCK_ATTEMPTS * LOCK_RETRY_MS;
+		for (let attempt = 0; attempt < LOCK_ATTEMPTS && performance.now() < deadline; attempt++) {
+			signal?.throwIfAborted();
+			try {
+				await writeExclusiveAndSyncAsync(lock, `${process.pid}\n${PROCESS_STARTED_AT_MS}\n`);
+				acquired = true;
+				break;
+			} catch (error) {
+				if (!isExists(error)) throw error;
+				let before: string;
+				try {
+					before = await fsp.readFile(lock, "utf8");
+				} catch (readError) {
+					if (isEnoent(readError)) continue;
+					throw readError;
+				}
+				const pid = Number(before.split("\n", 1)[0]);
+				let live = true;
+				if (Number.isSafeInteger(pid) && pid > 0) {
+					try {
+						process.kill(pid, 0);
+					} catch (probe) {
+						live = !probe || typeof probe !== "object" || !("code" in probe) || probe.code !== "ESRCH";
+					}
+				}
+				if (!live) {
+					try {
+						if ((await fsp.readFile(lock, "utf8")) === before) await unlinkIfPresentAsync(lock);
+					} catch (readError) {
+						if (!isEnoent(readError)) throw readError;
+					}
+					continue;
+				}
+				await this.#checkpoint?.("lock_wait", hash);
+				await Bun.sleep(LOCK_RETRY_MS);
+			}
+		}
+		if (!acquired) throw new Error("Blob publication lock is busy");
+		try {
+			signal?.throwIfAborted();
+			if (publishing) await this.#checkpoint?.("publication_lock", hash);
+			return await work();
+		} finally {
+			await unlinkIfPresentAsync(lock);
 		}
 	}
 	#beginIntent(hash: string, extension?: string): BlobIntent {
@@ -249,10 +392,45 @@ export class BlobStore {
 			done: path.join(this.completedDir, `${id}.done`),
 		};
 	}
+	async #beginIntentAsync(hash: string, extension?: string, signal?: AbortSignal): Promise<BlobIntent> {
+		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
+		await this.#assertSafeRootAsync();
+		const id = crypto.randomUUID();
+		const hashDir = path.join(this.intentsDir, hash);
+		const name = `${process.pid}.${PROCESS_STARTED_AT_MS}.${id}${extension ? `.${extension}` : ""}`;
+		await this.#withPublicationLockAsync(
+			hash,
+			async () => {
+				for (const directory of [this.liveDir, this.stagingDir, this.completedDir, hashDir]) {
+					await fsp.mkdir(directory, { recursive: true });
+					const stat = await fsp.lstat(directory);
+					if (!stat.isDirectory() || stat.isSymbolicLink())
+						throw new Error("Blob publication directory is unsafe");
+				}
+				await writeExclusiveAndSyncAsync(path.join(hashDir, name), "");
+				await syncDirectoryAsync(hashDir);
+			},
+			false,
+			signal,
+		);
+		await this.#checkpoint?.("intent", hash);
+		return {
+			id,
+			hash,
+			extension,
+			temporary: path.join(this.stagingDir, `${id}.blob-tmp`),
+			done: path.join(this.completedDir, `${id}.done`),
+		};
+	}
 	#completeIntent(intent: BlobIntent): void {
 		writeExclusiveAndSync(intent.done, "");
 		syncDirectory(this.completedDir);
 		this.#checkpoint?.("complete", intent.hash);
+	}
+	async #completeIntentAsync(intent: BlobIntent): Promise<void> {
+		await writeExclusiveAndSyncAsync(intent.done, "");
+		await syncDirectoryAsync(this.completedDir);
+		await this.#checkpoint?.("complete", intent.hash);
 	}
 	#paths(name: string): string[] {
 		return [path.join(this.liveDir, name), path.join(this.dir, name), path.join(this.legacyDir, name)];
@@ -294,7 +472,7 @@ export class BlobStore {
 		const source = await fsp.open(sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
 		let intent: BlobIntent;
 		try {
-			intent = this.#beginIntent(expected.hash);
+			intent = await this.#beginIntentAsync(expected.hash, undefined, signal);
 		} catch (error) {
 			await source.close();
 			throw error;
@@ -341,20 +519,22 @@ export class BlobStore {
 			}
 			signal?.throwIfAborted();
 			let existing = false;
-			this.#withPublicationLock(
+			await this.#withPublicationLockAsync(
 				expected.hash,
-				() => {
+				async () => {
 					try {
-						fs.linkSync(temporary, destination);
+						await fsp.link(temporary, destination);
 					} catch (error) {
 						if (!isExists(error)) throw error;
 						existing = true;
 					}
-					syncDirectory(this.liveDir);
+					await syncDirectoryAsync(this.liveDir);
 				},
 				true,
+				signal,
 			);
-			this.#checkpoint?.("canonical", expected.hash);
+			signal?.throwIfAborted();
+			await this.#checkpoint?.("canonical", expected.hash);
 			if (existing) {
 				const hash = new Bun.SHA256();
 				let offset = 0;
@@ -381,7 +561,7 @@ export class BlobStore {
 			try {
 				await source.close();
 			} finally {
-				this.#completeIntent(intent);
+				await this.#completeIntentAsync(intent);
 				if (ownsTemporary)
 					await fsp.unlink(temporary).catch(error => {
 						if (!isEnoent(error)) throw error;
@@ -390,14 +570,16 @@ export class BlobStore {
 		}
 	}
 
-	async restore(hash: string, data: Buffer, extension?: string): Promise<void> {
+	async restore(hash: string, data: Buffer, extension?: string, signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
 		if (!BLOB_HASH_RE.test(hash) || new Bun.SHA256().update(data).digest("hex") !== hash)
 			throw new Error("Archived blob hash does not match");
 		const normalizedExtension = normalizeBlobExtension(extension);
-		const intent = this.#beginIntent(hash, normalizedExtension);
+		const intent = await this.#beginIntentAsync(hash, normalizedExtension, signal);
 		const destination = path.join(this.liveDir, hash);
 		const temporary = intent.temporary;
 		try {
+			signal?.throwIfAborted();
 			const handle = await fsp.open(temporary, "wx");
 			try {
 				await handle.writeFile(data);
@@ -405,18 +587,24 @@ export class BlobStore {
 			} finally {
 				await handle.close();
 			}
-			this.#withPublicationLock(
+			signal?.throwIfAborted();
+			await this.#withPublicationLockAsync(
 				hash,
-				() => {
-					if (normalizedExtension) linkOrVerifySync(temporary, `${destination}.${normalizedExtension}`, data);
-					linkOrVerifySync(temporary, destination, data);
-					syncDirectory(this.liveDir);
+				async () => {
+					if (normalizedExtension)
+						await linkOrVerifyAsync(temporary, `${destination}.${normalizedExtension}`, data, signal, () =>
+							this.#checkpoint?.("compare", hash),
+						);
+					await linkOrVerifyAsync(temporary, destination, data, signal, () => this.#checkpoint?.("compare", hash));
+					await syncDirectoryAsync(this.liveDir);
 				},
 				true,
+				signal,
 			);
-			this.#checkpoint?.("canonical", hash);
+			signal?.throwIfAborted();
+			await this.#checkpoint?.("canonical", hash);
 		} finally {
-			this.#completeIntent(intent);
+			await this.#completeIntentAsync(intent);
 			await fsp.unlink(temporary).catch(error => {
 				if (!isEnoent(error)) throw error;
 			});
@@ -427,7 +615,8 @@ export class BlobStore {
 	 * Write binary data to the blob store.
 	 * @returns SHA-256 hex hash of the data
 	 */
-	async put(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
+	async put(data: Buffer, options?: BlobPutOptions, signal?: AbortSignal): Promise<BlobPutResult> {
+		signal?.throwIfAborted();
 		const hash = new Bun.SHA256().update(data).digest("hex");
 		const blobPath = path.join(this.liveDir, hash);
 		const extension = normalizeBlobExtension(options?.extension);
@@ -441,7 +630,7 @@ export class BlobStore {
 			},
 		};
 
-		await this.restore(hash, data, extension);
+		await this.restore(hash, data, extension, signal);
 		return result;
 	}
 

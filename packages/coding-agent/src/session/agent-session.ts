@@ -4686,8 +4686,8 @@ export class AgentSession {
 	}
 
 	/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`. */
-	getImageAttachments(): ImageAttachmentEntry[] {
-		return this.#providerBoundary.getImageAttachments();
+	async getImageAttachments(signal?: AbortSignal): Promise<ImageAttachmentEntry[]> {
+		return this.#providerBoundary.getImageAttachments(signal);
 	}
 
 	buildDisplaySessionContext(): SessionContext {
