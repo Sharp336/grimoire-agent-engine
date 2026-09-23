@@ -169,6 +169,21 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
 
+	test("keeps original attachments referenced inside external entries", async () => {
+		const attachment = await writeBlob(root, hashFor("attachment"), "attachment");
+		const entry = JSON.stringify({ originalAttachments: [{ contentHash: `sha256:${hashFor("attachment")}` }] });
+		const entryHash = new Bun.SHA256().update(entry).digest("hex");
+		const external = await writeBlob(root, entryHash, entry);
+		await agePath(attachment);
+		await agePath(external);
+		await writeSession(root, "project", "session-1", "complete", { blobRef: `blob:sha256:${entryHash}` });
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(attachment).exists()).toBe(true);
+	});
+
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
 		const blob = await writeBlob(root, hashFor("fresh-orphan"), "fresh");
 
@@ -260,6 +275,7 @@ describe("runGcCommand blob sweep", () => {
 			expect(result.blobs?.referenced).toBe(1);
 			expect(result.blobs?.wouldDelete).toBe(0);
 			expect(result.blobs?.deleted).toBe(0);
+			expect(result.blobs?.errors).toEqual(["native blob deletion is owned by the storage worker"]);
 			expect(await Bun.file(blob).exists()).toBe(true);
 			const rangeReads = requests.flatMap(request =>
 				request.operation === "read_range" && request.read ? [request.read] : [],

@@ -826,6 +826,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 					continue;
 				}
 			}
+			if (scope.kind === "catalog" && (identity.archived_at || identity.deleted_at)) {
+				if (position.memberSource > 0) position.memberSource++;
+				else if (next) position.cursor = next;
+				else { position.memberSource++; position.cursor = undefined; }
+				continue;
+			}
 			const value =
 				scope.kind === "catalog"
 					? (JSON.parse(identity.summary_json ?? "null") as Record<string, unknown>)

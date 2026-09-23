@@ -1613,6 +1613,33 @@ export class EngineRuntime {
 		return { ...page, entries: projected.entries, activityCompleteness: projected.activityCompleteness };
 	}
 
+	async chatLifecycle(
+		agentInstanceId: string,
+		principalId: string,
+		action: "status" | "archive" | "unarchive" | "delete",
+		operationId?: string,
+		expectedRevision?: number,
+	) {
+		const store = this.store;
+		if (!(store instanceof RocksEngineStore))
+			throw new EngineTargetError("invalid_request", "Native chat maintenance is unavailable");
+		return this.#inLane(agentInstanceId, async () => {
+			if (action === "status") return store.chatLifecycleStatus(agentInstanceId, principalId);
+			const live = this.#bindings.get(agentInstanceId);
+			if (live && !TERMINAL_ATTEMPT_STATES.has(live.attemptState))
+				throw new EngineTargetError("agent_busy", "Stop the active chat first");
+			if (!operationId || expectedRevision === undefined)
+				throw new EngineTargetError("invalid_request", "Operation ID and lifecycle revision are required");
+			return store.chatLifecycle(agentInstanceId, principalId, action, operationId, expectedRevision);
+		});
+	}
+
+	async archivedChats(principalId: string, cursor?: string) {
+		if (!(this.store instanceof RocksEngineStore))
+			throw new EngineTargetError("invalid_request", "Native chat maintenance is unavailable");
+		return this.store.archivedChats(principalId, cursor);
+	}
+
 	async sessionArchive(
 		agentInstanceId: string,
 		expectedContentHash?: string,

@@ -13,6 +13,7 @@ import * as storageClient from "../session/storage-client";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
+const ORIGINAL_ATTACHMENT_RE = /"contentHash"\s*:\s*"sha256:([a-f0-9]{64})"/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
@@ -274,9 +275,29 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 }
 
 function collectBlobHashes(text: string, hashes: Set<string>): void {
-	for (const match of text.matchAll(BLOB_REF_RE)) {
-		const hash = match[1]?.toLowerCase();
-		if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+	for (const pattern of [BLOB_REF_RE, ORIGINAL_ATTACHMENT_RE]) {
+		for (const match of text.matchAll(pattern)) {
+			const hash = match[1]?.toLowerCase();
+			if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+		}
+	}
+}
+
+async function collectNestedBlobHashes(blobDir: string, hashes: Set<string>): Promise<void> {
+	const pending = [...hashes];
+	const queued = new Set(pending);
+	for (let index = 0; index < pending.length; index++) {
+		if (pending.length > 100_000) throw new Error("Native blob reference limit exceeded");
+		const file = path.join(blobDir, pending[index]!);
+		const stat = await fs.lstat(file);
+		if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Required blob is unsafe");
+		if (stat.size > 8 * 1024 * 1024) continue; // Native external entry bodies are capped at 8 MiB.
+		const before = hashes.size;
+		collectBlobHashes(await fs.readFile(file, "utf8"), hashes);
+		if (hashes.size !== before) for (const hash of hashes) if (!queued.has(hash)) {
+			queued.add(hash);
+			pending.push(hash);
+		}
 	}
 }
 
@@ -430,9 +451,14 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	};
 	try {
 		await collectNativeStorageBlobHashes(referenced, blobDir);
+		await collectNestedBlobHashes(blobDir, referenced);
 		result.referenced = referenced.size;
 	} catch (error) {
 		result.errors.push(`native storage scan: ${errorMessage(error)}`);
+		return result;
+	}
+	if (options.apply && storageClient.readStorageBinding()) {
+		result.errors.push("native blob deletion is owned by the storage worker");
 		return result;
 	}
 

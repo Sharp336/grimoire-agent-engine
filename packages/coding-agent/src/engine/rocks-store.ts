@@ -1,6 +1,10 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { createHash } from "node:crypto";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageDependency } from "../session/storage-protocol";
+import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type {
 	EngineAttemptState,
 	EngineBindingSnapshot,
@@ -146,20 +150,41 @@ export class RocksEngineMutations {
 		return result;
 	}
 	async nextEngineGeneration(): Promise<number> {
-		return this.mutation("engine", async tx => {
+		const floorPath = process.env.GRIMOIRE_ENGINE_GENERATION_FLOOR_FILE;
+		const saved = floorPath ? await fs.readFile(floorPath, "utf8").catch(error => {
+			if (error?.code === "ENOENT") return "0";
+			throw error;
+		}) : "0";
+		const floor = Number(saved.trim());
+		if (!Number.isSafeInteger(floor) || floor < 0) throw new Error("Invalid Engine generation floor");
+		const restoreEpoch = process.env.GRIMOIRE_STORAGE_RESTORE_ID;
+		const generation = await this.mutation("engine", async tx => {
 			const previous = await tx.get<{ generation: number; store_epoch: string; snapshot_epoch: string }>(
 				"metadata",
 				"engine",
 			);
 			const value = {
 				subtype: "engine",
-				generation: (previous?.generation ?? 0) + 1,
-				store_epoch: previous?.store_epoch ?? crypto.randomUUID(),
+				generation: Math.max((previous?.generation ?? 0) + 1, floor + 1),
+				store_epoch: restoreEpoch ?? previous?.store_epoch ?? crypto.randomUUID(),
 				snapshot_epoch: crypto.randomUUID(),
 			};
+			if (floorPath) {
+				const temporary = `${floorPath}.${process.pid}.tmp`;
+				await fs.mkdir(path.dirname(floorPath), { recursive: true });
+				const handle = await fs.open(temporary, "wx");
+				try {
+					await handle.writeFile(String(value.generation));
+					await handle.sync();
+				} finally {
+					await handle.close();
+				}
+				await fs.rename(temporary, floorPath);
+			}
 			await tx.put("metadata", "engine", value);
 			return value.generation;
 		});
+		return generation;
 	}
 	async isCurrentEngineGeneration(generation: number): Promise<boolean> {
 		return (await this.records.get("metadata", "engine")).value?.generation === generation;
@@ -173,6 +198,84 @@ export class RocksEngineMutations {
 	async getBinding(id: string): Promise<EngineBindingSnapshot | undefined> {
 		const row = (await this.records.get("binding", id)).value as unknown as RocksBinding | null;
 		return row ? bindingSnapshot(row) : undefined;
+	}
+	async chatLifecycleStatus(id: string, principalId: string) {
+		const identity = (await this.records.get("identity", id)).value as unknown as RocksIdentity | null;
+		if (!identity || identity.principal_id !== principalId) throw new EngineTargetError("agent_not_found", "Unknown chat");
+		return { agentInstanceId: id, status: identity.deleted_at ? "deleted" as const : identity.archived_at ? "archived" as const : "active" as const,
+			revision: identity.lifecycle_revision ?? 0, operationId: identity.lifecycle_operation_id ?? null };
+	}
+	async archivedChats(principalId: string, cursor?: string) {
+		const page = await this.records.query("kind_primary", ["identity"], cursor, 100);
+		return {
+			chats: page.records.flatMap(record => {
+				const identity = record.value as unknown as RocksIdentity | null;
+				return identity?.principal_id === principalId && identity.archived_at && !identity.deleted_at
+					? [{ agentInstanceId: identity.agent_instance_id, agentInstanceRef: identity.agent_instance_ref,
+						summary: JSON.parse(identity.summary_json ?? "null"), revision: identity.lifecycle_revision ?? 0,
+						archivedAt: identity.archived_at }]
+					: [];
+			}),
+			nextCursor: page.nextCursor,
+		};
+	}
+	async chatLifecycle(
+		id: string,
+		principalId: string,
+		action: "archive" | "unarchive" | "delete",
+		operationId: string,
+		expectedRevision: number,
+	): Promise<{ status: "active" | "archived" | "deleted"; revision: number; operationId: string }> {
+		validateRuntimeValue("id", id);
+		validateRuntimeValue("id", operationId);
+		return this.mutation(id, async tx => {
+			const identity = await tx.get<RocksIdentity>("identity", id);
+			if (!identity || identity.principal_id !== principalId) throw new EngineTargetError("agent_not_found", "Unknown chat");
+			const current = () => ({
+				status: identity.deleted_at ? "deleted" as const : identity.archived_at ? "archived" as const : "active" as const,
+				revision: identity.lifecycle_revision ?? 0,
+				operationId,
+			});
+			if (identity.lifecycle_operation_id === operationId) {
+				if (identity.lifecycle_action !== action) throw new EngineTargetError("invalid_request", "Lifecycle operation ID was reused");
+				return current();
+			}
+			if ((identity.lifecycle_revision ?? 0) !== expectedRevision)
+				throw new EngineTargetError("stale_target", "Chat lifecycle revision changed");
+			if (identity.deleted_at || action === "archive" && identity.archived_at || action === "unarchive" && !identity.archived_at)
+				throw new EngineTargetError("invalid_request", "Chat lifecycle transition is unavailable");
+			const binding = await tx.get<RocksBinding>("binding", id);
+			if (binding) {
+				const attempt = await tx.get<RocksAttempt>("attempt", binding.attempt_id);
+				if (attempt && !terminal.has(attempt.state)) throw new EngineTargetError("agent_busy", "Stop the active chat first");
+			}
+			if (action === "delete") {
+				if (binding?.session_file) {
+					if (!binding.session_file.startsWith("native:"))
+						throw new EngineTargetError("invalid_request", "Only native history can be deleted here");
+					const { familyId, generationId } = parseNativeSessionLocator(binding.session_file);
+					const digest = createHash("sha256").update(`${familyId}\0${generationId}`).digest("hex");
+					await tx.put("metadata", `native-delete:${digest}`, {
+						subtype: "native_tombstone", family_id: familyId, generation_id: generationId,
+						agent_instance_id: id, operation_id: operationId, deleted_at: Date.now(),
+					});
+				}
+				for (const kind of ["pause", "stop", "recovery"]) await tx.delete("hold", `${id}:${kind}`);
+			}
+			const now = Date.now();
+			await tx.put("identity", id, {
+				...identity,
+				archived_at: action === "archive" ? now : action === "unarchive" ? null : identity.archived_at ?? null,
+				deleted_at: action === "delete" ? now : identity.deleted_at ?? null,
+				lifecycle_revision: expectedRevision + 1,
+				lifecycle_operation_id: operationId,
+				lifecycle_action: action,
+				intent_revision: identity.intent_revision + 1,
+				updated_at: now,
+			});
+			return { status: action === "delete" ? "deleted" as const : action === "archive" ? "archived" as const : "active" as const,
+				revision: expectedRevision + 1, operationId };
+		});
 	}
 	async getAttempt(id: string): Promise<RocksAttempt | undefined> {
 		return ((await this.records.get("attempt", id)).value as unknown as RocksAttempt) ?? undefined;
@@ -366,6 +469,8 @@ export class RocksEngineMutations {
 	}
 	async checkIntent(tx: RuntimeTransaction, id: string, expected?: number, unheld = false): Promise<void> {
 		const row = await tx.get<RocksIdentity>("identity", id);
+		if (row?.deleted_at || row?.archived_at)
+			throw new EngineTargetError("stale_target", "Chat is archived or deleted");
 		if (expected !== undefined && (row?.intent_revision ?? 0) !== expected)
 			throw new EngineTargetError("stale_target", "AgentInstance intent revision changed");
 		if (unheld && (await this.holds(tx, id)).length)
@@ -438,6 +543,9 @@ export class RocksEngineMutations {
 				});
 				return { status: "claimed" };
 			}
+			const lifecycle = await tx.get<RocksIdentity>("identity", command.agentInstanceId);
+			if (lifecycle?.deleted_at || lifecycle?.archived_at)
+				throw new EngineTargetError("stale_target", "Chat is archived or deleted");
 			const control = ENGINE_CONTROL_OPS.has(command.operation);
 			const bytes = Buffer.byteLength(command.serializedCommand ?? "");
 			await this.pendingBudget(tx, command.agentInstanceId, control, 1, bytes);
@@ -745,6 +853,8 @@ export class RocksEngineMutations {
 		});
 		const old = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
 		const identity = (await tx.get<RocksIdentity>("identity", binding.agentInstanceId))!;
+		if (identity.deleted_at || identity.archived_at)
+			throw new EngineTargetError("stale_target", "Chat is archived or deleted");
 		if (
 			binding.authorityGeneration < identity.authority_generation ||
 			(old &&

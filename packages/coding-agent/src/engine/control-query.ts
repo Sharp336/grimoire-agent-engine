@@ -64,6 +64,8 @@ export type EngineControlQueryMethod =
 	| "session.archive.verify"
 	| "session.archive.retire"
 	| "session.archive.restore"
+	| "chat.lifecycle"
+	| "chat.archived.list"
 	| "storage.reclaim"
 	| "session.restore.stage"
 	| "attachments.stage"
@@ -545,6 +547,19 @@ async function dispatchRequest(
 				requiredString(params, "contentHash"),
 				requiredString(params, "operationId"),
 			);
+		case "chat.lifecycle": {
+			const action = requiredString(params, "action");
+			if (!(["status", "archive", "unarchive", "delete"] as string[]).includes(action))
+				throw new EngineTargetError("invalid_request", "Unknown chat lifecycle action");
+			return options.runtime.chatLifecycle(
+				requiredString(params, "agentInstanceId"), requiredString(params, "principalId"),
+				action as "status" | "archive" | "unarchive" | "delete",
+				optionalString(params.operationId),
+				params.expectedRevision === undefined ? undefined : requiredNonNegativeInteger(params, "expectedRevision"),
+			);
+		}
+		case "chat.archived.list":
+			return options.runtime.archivedChats(requiredString(params, "principalId"), optionalString(params.cursor));
 		case "session.restore.history":
 			return await listSessionHistory(
 				options.runtime,
@@ -732,6 +747,8 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.archive.verify",
 			"session.archive.retire",
 			"session.archive.restore",
+			"chat.lifecycle",
+			"chat.archived.list",
 			"storage.reclaim",
 			"session.restore.stage",
 			"attachments.stage",
@@ -1206,6 +1223,8 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.archive.verify",
 			"session.archive.retire",
 			"session.archive.restore",
+			"chat.lifecycle",
+			"chat.archived.list",
 			"storage.reclaim",
 			"session.restore.stage",
 			"attachments.stage",

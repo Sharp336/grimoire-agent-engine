@@ -141,6 +141,11 @@ export interface RuntimeIdentityRow {
 	summary_revision: number;
 	summary_json: string | null;
 	membership_revision: number;
+	archived_at?: number | null;
+	deleted_at?: number | null;
+	lifecycle_revision?: number;
+	lifecycle_operation_id?: string;
+	lifecycle_action?: "archive" | "unarchive" | "delete";
 }
 
 export interface RuntimeTargetRow {
