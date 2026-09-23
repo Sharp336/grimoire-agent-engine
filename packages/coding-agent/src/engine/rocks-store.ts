@@ -199,6 +199,13 @@ export class RocksEngineMutations {
 		const row = (await this.records.get("binding", id)).value as unknown as RocksBinding | null;
 		return row ? bindingSnapshot(row) : undefined;
 	}
+	async chatIdentityId(ref: string, principalId: string): Promise<string> {
+		const page = await this.records.query("identity_ref", [ref], undefined, 2);
+		const identity = page.records[0]?.value as unknown as RocksIdentity | null;
+		if (page.records.length !== 1 || identity?.agent_instance_ref !== ref || identity.principal_id !== principalId)
+			throw new EngineTargetError("agent_not_found", "Unknown chat");
+		return identity.agent_instance_id;
+	}
 	async chatLifecycleStatus(id: string, principalId: string) {
 		const identity = (await this.records.get("identity", id)).value as unknown as RocksIdentity | null;
 		if (!identity || identity.principal_id !== principalId) throw new EngineTargetError("agent_not_found", "Unknown chat");

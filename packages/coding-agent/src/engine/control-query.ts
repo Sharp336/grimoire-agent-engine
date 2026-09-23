@@ -552,7 +552,7 @@ async function dispatchRequest(
 			if (!(["status", "archive", "unarchive", "delete"] as string[]).includes(action))
 				throw new EngineTargetError("invalid_request", "Unknown chat lifecycle action");
 			return options.runtime.chatLifecycle(
-				requiredString(params, "agentInstanceId"), requiredString(params, "principalId"),
+				requiredString(params, "agentInstanceRef"), requiredString(params, "principalId"),
 				action as "status" | "archive" | "unarchive" | "delete",
 				optionalString(params.operationId),
 				params.expectedRevision === undefined ? undefined : requiredNonNegativeInteger(params, "expectedRevision"),

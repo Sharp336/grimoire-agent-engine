@@ -29,6 +29,9 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
 		};
 		expect(await store.admitCommand(command, generation)).toEqual({ status: "claimed" });
+		expect(await store.chatIdentityId(command.agentInstanceRef!, command.principalId!)).toBe(command.agentInstanceId);
+		await expect(store.chatIdentityId(command.agentInstanceRef!, "other-owner")).rejects.toThrow();
+		await expect(store.chatIdentityId(`${command.agentInstanceRef}-other`, command.principalId!)).rejects.toThrow();
 		expect(await store.admitCommand(command, generation)).toEqual({ status: "in_progress" });
 		await expect(store.admitCommand({ ...command, canonicalHash: "changed" }, generation)).rejects.toThrow();
 		const binding: EngineBindingSnapshot = {

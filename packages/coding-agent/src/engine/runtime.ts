@@ -1614,7 +1614,7 @@ export class EngineRuntime {
 	}
 
 	async chatLifecycle(
-		agentInstanceId: string,
+		agentInstanceRef: string,
 		principalId: string,
 		action: "status" | "archive" | "unarchive" | "delete",
 		operationId?: string,
@@ -1623,6 +1623,7 @@ export class EngineRuntime {
 		const store = this.store;
 		if (!(store instanceof RocksEngineStore))
 			throw new EngineTargetError("invalid_request", "Native chat maintenance is unavailable");
+		const agentInstanceId = await store.chatIdentityId(agentInstanceRef, principalId);
 		return this.#inLane(agentInstanceId, async () => {
 			if (action === "status") return store.chatLifecycleStatus(agentInstanceId, principalId);
 			const live = this.#bindings.get(agentInstanceId);
