@@ -107,6 +107,10 @@ export interface EngineStartRequest {
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
+	/** Presentation-only name. Identity and routing stay agentInstanceId/ref. */
+	displayName?: string;
+	/** Evidence-backed future delegation hint; never routing authority. */
+	delegationHint?: string;
 	parentAgentInstanceId?: string;
 	parentAgentInstanceRef?: string;
 	executionId: string;
@@ -537,6 +541,21 @@ export function validateStartRequest(request: EngineStartRequest): void {
 		(!request.clientMessageId.trim() || request.clientMessageId.length > 200)
 	) {
 		throw new EngineTargetError("invalid_request", "clientMessageId must contain 1 to 200 characters when supplied");
+	}
+	if (
+		request.displayName !== undefined &&
+		(!request.displayName.trim() || request.displayName.length > 64 || /[\r\n\0]/.test(request.displayName))
+	) {
+		throw new EngineTargetError("invalid_request", "displayName must be a safe one-line string of 1..64 characters");
+	}
+	if (
+		request.delegationHint !== undefined &&
+		(request.delegationHint.length > 200 || /[\r\n\0]/.test(request.delegationHint))
+	) {
+		throw new EngineTargetError(
+			"invalid_request",
+			"delegationHint must be a one-line string no larger than 200 characters",
+		);
 	}
 	if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
 		throw new EngineTargetError("invalid_request", "authorityGeneration must be a non-negative safe integer");

@@ -67,6 +67,8 @@ export interface AgentHistorySummary {
 export interface AgentRef {
 	id: string;
 	displayName: string;
+	/** Selection hint only; identity and peer routing continue to use id. */
+	delegationHint?: string;
 	kind: AgentKind;
 	parentId?: string;
 	status: AgentStatus;
@@ -94,6 +96,7 @@ type RegistryListener = (event: RegistryEvent) => void;
 export interface RegisterInput {
 	id: string;
 	displayName: string;
+	delegationHint?: string;
 	kind: AgentKind;
 	parentId?: string;
 	session: AgentSession | null;
@@ -141,6 +144,7 @@ export class AgentRegistry {
 		const ref: AgentRef = {
 			id: input.id,
 			displayName: input.displayName,
+			delegationHint: input.delegationHint,
 			kind: input.kind,
 			parentId: input.parentId,
 			status: input.status ?? "running",
