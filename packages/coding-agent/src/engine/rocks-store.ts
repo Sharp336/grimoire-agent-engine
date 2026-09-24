@@ -17,6 +17,13 @@ import type {
 	EngineRetryState,
 } from "./contracts";
 import { EngineTargetError } from "./contracts";
+import {
+	completeRestoreRebind,
+	type RestoreWorkspaceDescriptor,
+	type RestoreWorkspaceReceipt,
+	restoreDescriptor,
+	validateRestorePlan,
+} from "./rocks-restore-workspace";
 import { projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
@@ -121,6 +128,7 @@ export interface RocksTransitionOptions {
 	conversationIdentityDigest?: string;
 	previousInboxSessionId?: string;
 	pendingInboxSourceSessionId?: string;
+	restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
 }
 
 /** Product state transitions remain here; the storage owner checks every observed revision and commits the batch. */
@@ -165,6 +173,16 @@ export class RocksEngineMutations {
 		const floor = Number(saved.trim());
 		if (!Number.isSafeInteger(floor) || floor < 0) throw new Error("Invalid Engine generation floor");
 		const restoreEpoch = process.env.GRIMOIRE_STORAGE_RESTORE_ID;
+		const restoreWorkspace = process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND;
+		const plan = restoreWorkspace ? validateRestorePlan(JSON.parse(restoreWorkspace)) : undefined;
+		const workRoot = process.env.GRIMOIRE_ENGINE_WORK_ROOT;
+		if (
+			plan &&
+			(plan.restoreEpoch !== restoreEpoch ||
+				!workRoot ||
+				path.win32.normalize(plan.targetWorkRoot).toLowerCase() !== path.win32.normalize(workRoot).toLowerCase())
+		)
+			throw new Error("Restore workspace plan does not match the Engine launch contour");
 		const generation = await this.mutation("engine", async tx => {
 			const previous = await tx.get<{ generation: number; store_epoch: string; snapshot_epoch: string }>(
 				"metadata",
@@ -189,6 +207,24 @@ export class RocksEngineMutations {
 				await fs.rename(temporary, floorPath);
 			}
 			await tx.put("metadata", "engine", value);
+			const previousWorkspace = await tx.get<RestoreWorkspaceDescriptor>("metadata", "restore-workspace");
+			if (plan) {
+				await tx.put(
+					"metadata",
+					"restore-workspace",
+					restoreDescriptor(previousWorkspace, plan, this.storageClient.incarnation),
+				);
+			} else if (restoreEpoch && previousWorkspace) {
+				await tx.delete("metadata", "restore-workspace");
+			} else if (
+				previousWorkspace &&
+				(previousWorkspace.restoreEpoch !== value.store_epoch ||
+					!workRoot ||
+					path.win32.normalize(previousWorkspace.targetWorkRoot).toLowerCase() !==
+						path.win32.normalize(workRoot).toLowerCase())
+			) {
+				throw new Error("Retained restore workspace descriptor is incompatible with this Engine contour");
+			}
 			return value.generation;
 		});
 		return generation;
@@ -1082,6 +1118,7 @@ export class RocksEngineMutations {
 						);
 					else if (!guard.allowInheritedHold) await this.checkIntent(tx, binding.agentInstanceId, undefined, true);
 				}
+				if (options.restoreWorkspaceReceipt) await completeRestoreRebind(tx, options.restoreWorkspaceReceipt);
 				await this.bind(tx, binding, options.conversationIdentityDigest);
 				if (options.startIntent) {
 					const command = await tx.get<RocksCommand>("command", binding.commandId);

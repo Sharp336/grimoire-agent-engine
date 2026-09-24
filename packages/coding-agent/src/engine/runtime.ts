@@ -106,6 +106,7 @@ import {
 } from "./contracts";
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
+import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { RocksEngineStore } from "./rocks-runtime-store";
 import { RocksEngineMutations } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
@@ -2756,12 +2757,29 @@ export class EngineRuntime {
 		let forked: NativeHistoryForkResult;
 		if (this.store instanceof RocksEngineStore) {
 			const nativeSource = this.#nativeSessionStorage(source.sessionFile);
+			const sourceContext = await nativeSource.readContext();
+			const mapped = await resolveRestoreWorkspace(
+				this.store,
+				edit.source.agentInstanceId,
+				source.sessionFile,
+				sourceContext.checkpoint.header,
+				sourceContext.position,
+			);
+			if (mapped && (await canonicalWorkspacePath(request.cwd)) !== (await canonicalWorkspacePath(mapped.cwd)))
+				throw new EngineTargetError("stale_target", "History branch cwd differs from restored workspace mapping");
 			const { familyId } = parseNativeSessionLocator(source.sessionFile);
 			const nativeTarget = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
-			const manager = await SessionManager.forkNativeContext(nativeSource, nativeTarget, request.cwd, sessionDir, {
-				...forkOptions,
-				entryId: edit.entryId,
-			});
+			const manager = await SessionManager.forkNativeContext(
+				nativeSource,
+				nativeTarget,
+				request.cwd,
+				sessionDir,
+				{
+					...forkOptions,
+					entryId: edit.entryId,
+				},
+				mapped?.additionalDirectories,
+			);
 			const selected = manager.getLeafEntry();
 			if (
 				selected?.type !== "message" ||
@@ -3039,6 +3057,56 @@ export class EngineRuntime {
 		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
 			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 		}
+		let restoreReceipt: RestoreWorkspaceReceipt | undefined;
+		if (this.store instanceof RocksEngineStore && !binding) {
+			const prior = await this.store.getBinding(request.agentInstanceId);
+			if (prior?.sessionFile?.startsWith("native:")) {
+				const storage = this.#nativeSessionStorage(prior.sessionFile);
+				const loaded = await storage.readContext();
+				const restored = await resolveRestoreWorkspace(
+					this.store,
+					request.agentInstanceId,
+					prior.sessionFile,
+					loaded.checkpoint.header,
+					loaded.position,
+				);
+				if (restored?.receipt?.state === "complete") {
+					if (restored.checkpointNeeded)
+						throw new EngineTargetError("stale_target", "Completed workspace rebind lost its native checkpoint");
+				} else if (restored) {
+					if (!explicitContinue || profile.continuationPolicy === "fresh")
+						throw new EngineTargetError("stale_target", "Restored workspace requires explicit Continue");
+					if ((await canonicalWorkspacePath(request.cwd)) !== (await canonicalWorkspacePath(restored.cwd)))
+						throw new EngineTargetError(
+							"stale_target",
+							"Continue cwd differs from the restored workspace mapping",
+						);
+					restoreReceipt = await beginRestoreRebind(
+						this.store,
+						restored,
+						request.agentInstanceId,
+						prior.sessionFile,
+						loaded.checkpoint.header,
+						loaded.position,
+					);
+					if (restored.checkpointNeeded) {
+						const manager = await SessionManager.openNative(storage);
+						await manager.rebindRestoredNativeWorkspace(restored.cwd, restored.additionalDirectories);
+						manager.seal();
+					}
+					const checked = await storage.readContext();
+					const resolved = await resolveRestoreWorkspace(
+						this.store,
+						request.agentInstanceId,
+						prior.sessionFile,
+						checked.checkpoint.header,
+						checked.position,
+					);
+					if (!resolved?.receipt || resolved.checkpointNeeded)
+						throw new EngineTargetError("stale_target", "Restored native checkpoint did not become durable");
+				}
+			}
+		}
 		const references = queuedItem?.attachments ?? this.#messageAttachments(request);
 		const preparedAttachments = references
 			? await this.attachmentUploads.prepareForMessage(
@@ -3050,6 +3118,9 @@ export class EngineRuntime {
 			: undefined;
 		const images = preparedAttachments?.images;
 		const continuationDigest = await this.#continuationDigest(request, profile);
+		const compatibilityDigest = restoreReceipt
+			? await this.#continuationDigest(request, profile, restoreReceipt.originalCwd)
+			: undefined;
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		const preparedHistory = await this.#prepareHistoryStart(request);
 		const preparedRestore = await this.#prepareRestoreStart(request);
@@ -3125,6 +3196,8 @@ export class EngineRuntime {
 				profile,
 				continuationDigest,
 				conversationIdentityDigest,
+				restoreReceipt,
+				compatibilityDigest,
 				preparedSession,
 				pendingStartSignal,
 				audit,
@@ -3177,6 +3250,7 @@ export class EngineRuntime {
 				},
 				settleCommandId: request.commandId,
 				settleCommandReceipt: { outcome: "applied", detail: result },
+				...(restoreReceipt ? { restoreWorkspaceReceipt: restoreReceipt } : {}),
 				requireNew: true,
 				inboxSessionId: binding.session.sessionId,
 				...(queuedItem
@@ -3332,6 +3406,8 @@ export class EngineRuntime {
 		profile: EngineLaunchProfile,
 		continuationDigest: string,
 		conversationIdentityDigest: string,
+		restoreReceipt?: RestoreWorkspaceReceipt,
+		compatibilityDigest?: string,
 		preparedSessionManager?: SessionManager,
 		pendingStartSignal?: AbortSignal,
 		audit?: LatencyAudit,
@@ -3361,7 +3437,11 @@ export class EngineRuntime {
 			if (
 				!preparedSessionManager &&
 				prior?.sessionFile &&
-				prior.profileDigest === profileDigest &&
+				(prior.profileDigest === profileDigest ||
+					(restoreReceipt &&
+						prior.profileDigest === compatibilityDigest &&
+						prior.profileDigest === restoreReceipt.oldProfileDigest &&
+						prior.bindingId === restoreReceipt.oldBindingId)) &&
 				profile.continuationPolicy !== "fresh"
 			) {
 				sessionManager =
@@ -3372,7 +3452,13 @@ export class EngineRuntime {
 							});
 			} else if (!preparedSessionManager) {
 				previousInboxSessionId = prior?.sessionFile
-					? await this.#conversationCarrySource(prior, request, profile, conversationIdentityDigest)
+					? await this.#conversationCarrySource(
+							prior,
+							request,
+							profile,
+							conversationIdentityDigest,
+							restoreReceipt,
+						)
 					: undefined;
 				if (prior?.sessionFile && previousInboxSessionId) {
 					// A profile/dependency change needs a fresh AgentSession so none of the old
@@ -3883,9 +3969,22 @@ export class EngineRuntime {
 		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId)) {
 			if (taskRefFromAgentInstanceRef(child.agentInstanceRef) !== parentTaskRef) continue;
 			if (child.engineAgentId !== engineAgentId(child.agentInstanceId)) continue;
+			let mappedCwd: string | undefined;
+			if (this.store instanceof RocksEngineStore) {
+				const loaded = await this.#nativeSessionStorage(child.sessionFile).readContext();
+				mappedCwd = (
+					await resolveRestoreWorkspace(
+						this.store,
+						child.agentInstanceId,
+						child.sessionFile,
+						loaded.checkpoint.header,
+						loaded.position,
+					)
+				)?.cwd;
+			}
 			const header = await this.#sessionHeader(child.sessionFile);
 			if (header?.type !== "session" || typeof header.cwd !== "string") continue;
-			if ((await canonicalWorkspacePath(header.cwd)) !== canonicalCwd) continue;
+			if ((await canonicalWorkspacePath(mappedCwd ?? header.cwd)) !== canonicalCwd) continue;
 			refs.push({
 				id: child.engineAgentId,
 				parentId: engineAgentId(request.agentInstanceId),
@@ -3895,7 +3994,11 @@ export class EngineRuntime {
 		return { ...access, refs };
 	}
 
-	async #continuationDigest(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<string> {
+	async #continuationDigest(
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		canonicalCwdOverride?: string,
+	): Promise<string> {
 		if (
 			profile.continuationPolicy !== undefined &&
 			profile.continuationPolicy !== "exact" &&
@@ -3906,7 +4009,10 @@ export class EngineRuntime {
 		if (this.#resolveSessionProfile && !this.#resolveSessionContinuation) {
 			throw new Error("Engine session profile resolution requires an exact continuation dependency digest");
 		}
-		const canonicalCwd = await canonicalWorkspacePath(request.cwd);
+		const canonicalCwd =
+			canonicalCwdOverride === undefined
+				? await canonicalWorkspacePath(request.cwd)
+				: canonicalRetainedWorkspacePath(canonicalCwdOverride);
 		return sessionProfileDigest({
 			agentInstanceId: request.agentInstanceId,
 			agentInstanceRef: request.agentInstanceRef,
@@ -3925,11 +4031,16 @@ export class EngineRuntime {
 		request: EngineStartRequest,
 		profile: EngineLaunchProfile,
 		conversationIdentityDigest: string,
+		restoreReceipt?: RestoreWorkspaceReceipt,
 	): Promise<string | undefined> {
 		if (!prior.sessionFile || profile.continuationPolicy === "fresh") return undefined;
 		if (prior.authorityGeneration !== request.authorityGeneration) return undefined;
 		const storedDigest = await this.store.getBindingConversationIdentity(request.agentInstanceId);
-		if (storedDigest !== conversationIdentityDigest) {
+		const restoredIdentity =
+			restoreReceipt &&
+			storedDigest === restoreReceipt.oldIdentityDigest &&
+			storedDigest === (await this.#conversationIdentityDigest(request, restoreReceipt.originalCwd));
+		if (storedDigest !== conversationIdentityDigest && !restoredIdentity) {
 			if (storedDigest) return undefined;
 			// Upgrade compatibility for bindings created before the conversation digest
 			// column existed. The admitted start retains the same durable identity tuple.
@@ -3957,13 +4068,16 @@ export class EngineRuntime {
 		return header.id;
 	}
 
-	async #conversationIdentityDigest(request: EngineStartRequest): Promise<string> {
+	async #conversationIdentityDigest(request: EngineStartRequest, canonicalCwdOverride?: string): Promise<string> {
 		return sessionProfileDigest({
 			agentInstanceId: request.agentInstanceId,
 			agentInstanceRef: request.agentInstanceRef,
 			parentAgentInstanceId: request.parentAgentInstanceId,
 			authorityGeneration: request.authorityGeneration,
-			canonicalCwd: await canonicalWorkspacePath(request.cwd),
+			canonicalCwd:
+				canonicalCwdOverride === undefined
+					? await canonicalWorkspacePath(request.cwd)
+					: canonicalRetainedWorkspacePath(canonicalCwdOverride),
 		});
 	}
 
@@ -5647,6 +5761,7 @@ export class EngineRuntime {
 			inboxMutation?: EngineInboxMutation;
 			inboxMutationCausationCommandId?: string;
 			pendingInboxSourceSessionId?: string;
+			restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
@@ -6479,6 +6594,10 @@ function sessionProfileDigest(continuation: Record<string, unknown>): string {
 async function canonicalWorkspacePath(cwd: string): Promise<string> {
 	const canonical = await fs.realpath(cwd).catch(() => path.resolve(cwd));
 	return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+function canonicalRetainedWorkspacePath(cwd: string): string {
+	return process.platform === "win32" ? cwd.toLowerCase() : cwd;
 }
 
 function sessionClosure(options: EngineRuntimeOptions["sessionDefaults"]): Record<string, unknown> {

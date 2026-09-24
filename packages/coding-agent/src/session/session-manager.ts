@@ -685,6 +685,7 @@ export class SessionManager {
 		cwd: string,
 		sessionDir = getSessionsDir(),
 		history?: NativeHistoryForkOptions & { entryId: string },
+		restoredAdditionalDirectories?: string[],
 	): Promise<SessionManager> {
 		const loaded = await source.readContext(
 			history ? { entryId: history.entryId, expectedLeafEntryId: history.leafEntryId } : undefined,
@@ -703,9 +704,11 @@ export class SessionManager {
 		manager.#header.providerPromptCacheKey = sourceHeader.providerPromptCacheKey ?? sourceHeader.id;
 		manager.#header.title = sourceHeader.title;
 		manager.#header.titleSource = sourceHeader.titleSource;
-		manager.#additionalDirectories = (sourceHeader.additionalDirectories ?? []).filter(
-			directory => directory !== path.resolve(cwd),
-		);
+		manager.#additionalDirectories = (
+			restoredAdditionalDirectories ??
+			sourceHeader.additionalDirectories ??
+			[]
+		).filter(directory => directory !== path.resolve(cwd));
 		manager.#header.additionalDirectories = manager.#additionalDirectories.length
 			? manager.#additionalDirectories
 			: undefined;
@@ -2377,6 +2380,21 @@ export class SessionManager {
 
 	getCwd(): string {
 		return this.#cwd;
+	}
+
+	/** Restore-only native header checkpoint; the Engine verifies the durable receipt and target roots first. */
+	async rebindRestoredNativeWorkspace(cwd: string, additionalDirectories: string[]): Promise<void> {
+		if (!this.#nativeStorage) throw new Error("Restore workspace rebind requires native storage");
+		this.#cwd = cwd;
+		this.#header.cwd = cwd;
+		this.#additionalDirectories = [...additionalDirectories];
+		this.#header.additionalDirectories = additionalDirectories.length ? [...additionalDirectories] : undefined;
+		try {
+			await this.#writeNative([], "required").completion;
+		} catch (error) {
+			this.seal();
+			throw error;
+		}
 	}
 
 	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
