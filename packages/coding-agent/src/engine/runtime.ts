@@ -1237,25 +1237,37 @@ export class EngineRuntime {
 				command.operation === "start" && command.code === "launch_failed" && !retainedBinding
 					? "absent"
 					: undefined;
+			const target = {
+				commandId: command.commandId,
+				agentInstanceId: command.agentInstanceId,
+				executionId: command.executionId,
+				attemptId: command.attemptId,
+				engineGeneration: this.engineGeneration,
+				bindingId: "",
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			};
+			const payload = { code: command.code, message: command.message, ...(sessionState ? { sessionState } : {}) };
+			const receipt = {
+				outcome: "rejected" as const,
+				detail: { code: command.code, message: command.message },
+			};
+			if (command.operation === "start" && settleCommand && this.store instanceof RocksEngineStore) {
+				const event = await this.store.commitUnboundStartRejection(
+					target,
+					{ kind: "rejected", payload, causationCommandId: command.commandId },
+					receipt,
+				);
+				this.#notifyEvents([event]);
+				return;
+			}
 			await this.#commitEvent(
-				{
-					commandId: command.commandId,
-					agentInstanceId: command.agentInstanceId,
-					executionId: command.executionId,
-					attemptId: command.attemptId,
-					engineGeneration: this.engineGeneration,
-					bindingId: "",
-					bindingGeneration: command.bindingGeneration ?? 0,
-					authorityGeneration: command.authorityGeneration,
-				},
+				target,
 				"rejected",
-				{ code: command.code, message: command.message, ...(sessionState ? { sessionState } : {}) },
+				payload,
 				command.commandId,
 				settleCommand ? command.commandId : undefined,
-				{
-					outcome: "rejected",
-					detail: { code: command.code, message: command.message },
-				},
+				receipt,
 			);
 		});
 	}

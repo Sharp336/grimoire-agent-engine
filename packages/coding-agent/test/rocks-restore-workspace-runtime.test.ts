@@ -6,6 +6,8 @@ import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import type { EngineAttachmentDescriptor } from "../src/engine/contracts";
+import { runEngineCommand } from "../src/engine/control-query";
+import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import type { RestoreWorkspacePlan } from "../src/engine/rocks-restore-workspace";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { engineAgentInstanceId } from "../src/engine/route";
@@ -211,14 +213,21 @@ it.skipIf(!(executable && runRoot))(
 			process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND = JSON.stringify(plan);
 			process.env.GRIMOIRE_ENGINE_WORK_ROOT = targetCwd;
 			const seenContexts: string[] = [];
+			const staleTurnStarted = Promise.withResolvers<void>();
+			const releaseStaleTurn = Promise.withResolvers<void>();
 			const targetModel = createMockModel({
-				handler: context => {
+				handler: async context => {
 					seenContexts.push(JSON.stringify(context.messages));
-					if (seenContexts.length === 1)
+					if (seenContexts.length === 1) {
+						staleTurnStarted.resolve();
+						await releaseStaleTurn.promise;
+						return { content: ["stale turn must not finish"] };
+					}
+					if (seenContexts.length === 2)
 						return { content: [{ type: "toolCall", name: "read", arguments: { path: "workspace-marker.txt" } }] };
-					if (seenContexts.length === 2) {
-						expect(seenContexts[1]).toContain("target workspace marker");
-						expect(seenContexts[1]).not.toContain("source workspace marker");
+					if (seenContexts.length === 3) {
+						expect(seenContexts[2]).toContain("target workspace marker");
+						expect(seenContexts[2]).not.toContain("source workspace marker");
 					}
 					return { content: ["continued answer"] };
 				},
@@ -247,24 +256,130 @@ it.skipIf(!(executable && runRoot))(
 			expect(cold).toEqual({ sessionId, cwd: targetCwd });
 			expect(targetModel.calls).toHaveLength(0);
 			const intent = await runtime.store.intent(agentInstanceId);
-			const continued = await runtime.start(
+			const stale = await runtime.start(
 				{
-					commandId: `continue-${suffix}`,
+					commandId: `stale-${suffix}`,
 					agentInstanceId,
 					agentInstanceRef,
 					principalId,
-					executionId: `continued-execution-${suffix}`,
-					attemptId: `continued-attempt-${suffix}`,
+					executionId: `stale-execution-${suffix}`,
+					attemptId: `stale-attempt-${suffix}`,
 					authorityGeneration: 1,
 					cwd: targetCwd,
-					queueId: queued.item.queueId,
-					expectedRevision: queued.item.revision,
-					mutationId: `deliver-${suffix}`,
+					input: "stale turn",
 					expectedIntentRevision: intent.intentRevision,
 					explicitContinue: true,
 				},
 				profile,
 			);
+			await staleTurnStarted.promise;
+			const cancelled = await runtime.cancel({
+				...stale,
+				commandId: `cancel-stale-${suffix}`,
+				expectedIntentRevision: stale.intentRevision,
+			});
+			releaseStaleTurn.resolve();
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(stale.attemptId))?.state).toBe("cancelled");
+			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
+			const unsupportedProfile = {
+				...profile,
+				profileDigest: "fixture-profile-without-read",
+				toolNames: ["bash", "task"],
+			};
+			const rejectedStart: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: `rejected-${suffix}`,
+				op: "start",
+				deviceId: "fixture-device",
+				engineId: "fixture-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId,
+				agentInstanceRef,
+				principalId,
+				executionId: `rejected-execution-${suffix}`,
+				attemptId: `rejected-attempt-${suffix}`,
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {
+					cwd: targetCwd,
+					queueId: queued.item.queueId,
+					expectedRevision: queued.item.revision,
+					mutationId: `reject-deliver-${suffix}`,
+					expectedIntentRevision: cancelled.intentRevision,
+					explicitContinue: true,
+					profileDigest: unsupportedProfile.profileDigest,
+					launchProfile: unsupportedProfile,
+				},
+			};
+			const rejectedIdentity = engineCommandIdentity(rejectedStart);
+			expect((await runtime.store.admitCommand(rejectedIdentity, runtime.engineGeneration)).status).toBe("claimed");
+			await expect(
+				dispatchEngineCommand({
+					runtime,
+					command: rejectedStart,
+					resolveLaunchProfile: () => unsupportedProfile,
+					provisionMailbox: async () => {},
+				}),
+			).rejects.toMatchObject({
+				code: "invalid_request",
+				message: "This profile does not provide the read tool required for file attachments",
+			});
+			await runtime.recordCommandRejection({
+				commandId: rejectedStart.commandId,
+				agentInstanceId,
+				executionId: rejectedStart.executionId!,
+				attemptId: rejectedStart.attemptId!,
+				authorityGeneration: 1,
+				code: "invalid_request",
+				message: "This profile does not provide the read tool required for file attachments",
+				operation: "start",
+			});
+			const rejectedAdmission = await runtime.store.admitCommand(rejectedIdentity, runtime.engineGeneration);
+			expect(rejectedAdmission.status).toBe("replay");
+			if (rejectedAdmission.status !== "replay") throw new Error("Rejected Start did not settle");
+			expect(rejectedAdmission.receipt.outcome).toBe("rejected");
+			expect(rejectedAdmission.receipt.detail?.code).toBe("invalid_request");
+			expect(await runtime.store.getAttempt(rejectedStart.attemptId!)).toBeUndefined();
+			expect((await runtime.store.getBinding(agentInstanceId))?.attemptId).toBe(stale.attemptId);
+			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: `continue-${suffix}`,
+				op: "start",
+				deviceId: "fixture-device",
+				engineId: "fixture-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId,
+				agentInstanceRef,
+				principalId,
+				executionId: `continued-execution-${suffix}`,
+				attemptId: `continued-attempt-${suffix}`,
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {
+					cwd: targetCwd,
+					queueId: queued.item.queueId,
+					expectedRevision: queued.item.revision,
+					mutationId: `deliver-${suffix}`,
+					expectedIntentRevision: cancelled.intentRevision,
+					explicitContinue: true,
+					profileDigest: profile.profileDigest,
+					launchProfile: profile,
+				},
+			};
+			const receipt = await runEngineCommand(
+				{
+					runtime,
+					deviceId: command.deviceId,
+					engineId: command.engineId,
+					resolveLaunchProfile: () => profile,
+					provisionMailbox: async () => {},
+				},
+				command,
+			);
+			expect(receipt.outcome).toBe("applied");
+			const continued = (await runtime.store.getBinding(agentInstanceId))!;
 			await runtime.drain();
 			expect(continued.sessionFile).toBe(sourceBinding!.sessionFile);
 			const targetNative = new RocksNativeSessionStorage(worker.client, locator.familyId, locator.generationId);
@@ -272,7 +387,7 @@ it.skipIf(!(executable && runRoot))(
 			expect(targetContext.checkpoint.header.id).toBe(sessionId);
 			expect(targetContext.checkpoint.header.cwd).toBe(targetCwd);
 			expect(seenContexts.join("\n")).toContain("retained answer");
-			expect(seenContexts).toHaveLength(2);
+			expect(seenContexts).toHaveLength(3);
 			expect(await new BlobStore(path.join(targetRoot, "blobs")).get(bodyHash)).toEqual(body);
 			const inbox = (await new RocksEngineStore(worker.client).records.get("inbox", clientMessageId)).value;
 			expect(inbox?.disposition).toBe("acknowledged");
@@ -300,8 +415,8 @@ it.skipIf(!(executable && runRoot))(
 			);
 			await runtime.drain();
 			expect(afterRestart.sessionFile).toBe(sourceBinding!.sessionFile);
-			expect(seenContexts).toHaveLength(3);
-			expect(seenContexts[2]).toContain("continued answer");
+			expect(seenContexts).toHaveLength(4);
+			expect(seenContexts[3]).toContain("continued answer");
 			const finalContext = await targetNative.readContext();
 			expect(finalContext.checkpoint.header.id).toBe(sessionId);
 			expect(finalContext.checkpoint.header.cwd).toBe(targetCwd);

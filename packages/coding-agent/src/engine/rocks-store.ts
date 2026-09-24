@@ -995,6 +995,45 @@ export class RocksEngineMutations {
 			return result;
 		});
 	}
+	async commitUnboundStartRejection(
+		target: EventTarget,
+		event: EngineTransitionEvent,
+		receipt: EngineCommandReceipt,
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			// The retained binding belongs to an older Attempt, so validate the claimed Start instead.
+			const engine = await tx.get<{ generation: number }>("metadata", "engine");
+			const command = await tx.get<RocksCommand>("command", target.commandId);
+			const identity = command?.identity;
+			if (
+				engine?.generation !== target.engineGeneration ||
+				command?.command_id !== target.commandId ||
+				command.agent_instance_id !== target.agentInstanceId ||
+				command?.state !== "received" ||
+				command.processor_generation !== target.engineGeneration ||
+				command.operation !== "start" ||
+				identity?.commandId !== target.commandId ||
+				identity?.agentInstanceId !== target.agentInstanceId ||
+				identity.executionId !== target.executionId ||
+				identity.attemptId !== target.attemptId ||
+				identity.authorityGeneration !== target.authorityGeneration ||
+				identity.engineGeneration !== target.engineGeneration ||
+				(identity.bindingId ?? "") !== target.bindingId ||
+				(identity.bindingGeneration ?? 0) !== target.bindingGeneration ||
+				target.bindingId !== "" ||
+				target.bindingGeneration !== 0 ||
+				event.kind !== "rejected" ||
+				event.causationCommandId !== target.commandId ||
+				receipt.outcome !== "rejected" ||
+				(await tx.get<RocksAttempt>("attempt", target.attemptId))
+			) {
+				throw new EngineAttemptConflictError(target.attemptId);
+			}
+			const result = await this.append(tx, target, event);
+			await this.settle(tx, target.commandId, receipt, command.canonical_hash, true);
+			return result;
+		});
+	}
 	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot, digest?: string): Promise<void> {
 		const engine = await tx.get<{ generation: number }>("metadata", "engine");
 		if (engine?.generation !== binding.engineGeneration) throw new EngineAttemptConflictError(binding.attemptId);
