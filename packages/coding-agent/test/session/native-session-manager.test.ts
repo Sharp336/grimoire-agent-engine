@@ -92,6 +92,29 @@ class StructuredStore implements NativeSessionStorage {
 }
 
 describe("structured native SessionManager", () => {
+	it("checkpoints a restored workspace without changing native conversation identity or entries", async () => {
+		const storage = new StructuredStore();
+		const original = SessionManager.createNative("C:\\source\\workspace", storage);
+		original.appendMessage({ role: "user", content: "retained question", timestamp: 1 });
+		await original.flush();
+		const before = await storage.readContext();
+		const entries = structuredClone(storage.entries);
+		const sessionId = original.getSessionId();
+		const leafId = original.getLeafId();
+		const restored = await SessionManager.openNative(storage);
+		await restored.rebindRestoredNativeWorkspace("C:\\target\\workspace", ["C:\\target\\shared"]);
+		const after = await storage.readContext();
+		expect(after.throughSeq).toBe(before.throughSeq + 1);
+		expect(storage.entries).toEqual(entries);
+		expect(after.checkpoint.header.id).toBe(sessionId);
+		expect(after.checkpoint.leafId).toBe(leafId);
+		expect(after.checkpoint.header.cwd).toBe("C:\\target\\workspace");
+		expect(after.checkpoint.header.additionalDirectories).toEqual(["C:\\target\\shared"]);
+		const reopened = await SessionManager.openNative(storage);
+		expect(reopened.getSessionId()).toBe(sessionId);
+		expect(reopened.getLeafId()).toBe(leafId);
+		expect(reopened.buildSessionContext()).toEqual(original.buildSessionContext());
+	});
 	it("retains the preceding launch revision across cold compaction without reading its archived user", async () => {
 		const storage = new StructuredStore();
 		const manager = SessionManager.createNative("/native", storage);

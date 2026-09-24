@@ -1,5 +1,7 @@
+import type { SessionHeader } from "../session/session-entries";
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
 import { type EngineTarget, EngineTargetError } from "./contracts";
+import { resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import type { ProjectedEvent, RocksProjection } from "./rocks-runtime-projection";
 import { projectionId, terminal } from "./rocks-runtime-projection";
@@ -44,8 +46,8 @@ export async function nativeScope(
 		currentAttemptId: attemptId ?? binding?.attempt_id ?? null,
 	};
 }
-function header(state: Record<string, unknown> | null | undefined): { id: string; cwd?: string } {
-	const value = (state?.native as { header?: { id: string; cwd?: string } } | undefined)?.header;
+function header(state: Record<string, unknown> | null | undefined): SessionHeader {
+	const value = (state?.native as { header?: SessionHeader } | undefined)?.header;
 	if (!value || typeof value.id !== "string")
 		throw new EngineTargetError("history_expired", "Native session header is not retained");
 	return value;
@@ -70,7 +72,12 @@ export async function nativeSessionHeader(
 		maxBytes: runtimeLimits.httpPageBytes,
 	});
 	const value = header(page.state);
-	return { sessionId: value.id, cwd: value.cwd ?? null };
+	const mapped = await resolveRestoreWorkspace(store, target.agentInstanceId, selected.path, value, {
+		...selected.scope,
+		throughSeq: page.throughSeq,
+		incarnation: store.storageClient.incarnation,
+	});
+	return { sessionId: value.id, cwd: mapped?.cwd ?? value.cwd ?? null };
 }
 export async function nativeHistoryPage(
 	store: RocksEngineStore,

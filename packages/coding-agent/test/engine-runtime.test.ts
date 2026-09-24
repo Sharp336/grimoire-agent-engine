@@ -3501,13 +3501,15 @@ describe("EngineRuntime", () => {
 				},
 			],
 		};
-		const commitAttemptTransition = runtime.store.commitAttemptTransition.bind(runtime.store);
-		const transitionSpy = spyOn(runtime.store, "commitAttemptTransition").mockImplementation(
-			async (binding, state, events, options) => {
+		const store = legacyEngineStore(runtime);
+		const commitAttemptTransition = store.commitAttemptTransition.bind(store);
+		const transitionSpy = spyOn(store, "commitAttemptTransition").mockImplementation(
+			async (...args: Parameters<typeof commitAttemptTransition>) => {
+				const [, , events] = args;
 				if (events.some(event => event.kind === "input_resolved")) {
 					throw new Error("injected input_resolved failure");
 				}
-				return await commitAttemptTransition(binding, state, events, options);
+				return await commitAttemptTransition(...args);
 			},
 		);
 		try {
@@ -4012,7 +4014,7 @@ describe("EngineRuntime", () => {
 		];
 		await legacyEngineStore(runtime).sessionStorage.writeText(
 			started.sessionFile!,
-			[header, ...entries].map(entry => JSON.stringify(entry)).join("\n") + "\n",
+			`${[header, ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`,
 		);
 		const runtimeDir = path.dirname(cwd);
 		const server = await startEngineControlQueryServer({
