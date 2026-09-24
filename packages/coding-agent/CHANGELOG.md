@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Python shell, Bash, and pip subprocesses no longer open extra console windows on Windows.
 - Engine agents retain their canonical display names and delegation hints without changing chat identity or routing.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
 - Pause and Resume remain responsive while neighboring native sessions produce events.

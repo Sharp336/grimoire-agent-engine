@@ -50,6 +50,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
+_SUBPROCESS_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 # ---------------------------------------------------------------------------
 # Frame writer
 # ---------------------------------------------------------------------------
@@ -583,6 +585,7 @@ def _magic_pip(args: str) -> None:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        creationflags=_SUBPROCESS_CREATIONFLAGS,
     )
     installed_packages: list[str] = []
 
@@ -819,6 +822,7 @@ def _run_shell_body(body: str, *, shell_arg: str) -> int:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        creationflags=_SUBPROCESS_CREATIONFLAGS,
     )
     _stream_process_output(proc)
     proc.wait()
@@ -863,6 +867,7 @@ def __omp_shell(cmd: str) -> _ShellResult:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        creationflags=_SUBPROCESS_CREATIONFLAGS,
     )
     capture = _BoundedTextCapture(
         _SHELL_RESULT_CAPTURE_BYTES, _SHELL_OUTPUT_MAX_LINES, _process_output_encoding()
