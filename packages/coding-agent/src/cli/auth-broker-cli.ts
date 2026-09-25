@@ -310,7 +310,16 @@ async function runLocalLogin(provider: OAuthProvider, flags: AuthBrokerCommandAr
 		// the callback wins, leave that prompt outstanding (dirty/blocked terminal).
 		// `AuthStorage.login` independently refuses to synthesize the default prompt
 		// for non-paste-code providers, so this is defense-in-depth on the same gate.
-		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
+		const usesManualInput = !managed && PASTE_CODE_LOGIN_PROVIDERS.has(provider);
+		// Managed (status-file) mode is headless: `AuthStorage.login` would
+		// synthesize the default manual-paste prompt for paste-code providers
+		// (anthropic, zai, openrouter, ...), `OAuthCallbackFlow` would immediately
+		// await it, and with no interactive prompt available the throw would race
+		// the callback and fail the whole login. Opt out of the synthesized prompt
+		// instead: the flow then waits purely for the loopback callback until the
+		// existing timeout/cancel. The never-resolving promise below is only ever
+		// raced, never awaited alone, so it cannot leak past `runLocalLogin`.
+		const managedManualCodeInput = managed ? () => new Promise<string>(() => {}) : undefined;
 		const identity = await storage.login(provider, {
 			onAuth({ url, launchUrl, instructions }) {
 				if (managed) {
@@ -345,14 +354,16 @@ async function runLocalLogin(provider: OAuthProvider, flags: AuthBrokerCommandAr
 				if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
 				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
 			},
-			...(usesManualInput
-				? {
-						onManualCodeInput() {
-							if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
-							return ask("Paste the authorization code (or full redirect URL):");
-						},
-					}
-				: undefined),
+			...(managedManualCodeInput
+				? { onManualCodeInput: managedManualCodeInput }
+				: usesManualInput
+					? {
+							onManualCodeInput() {
+								if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
+								return ask("Paste the authorization code (or full redirect URL):");
+							},
+						}
+					: undefined),
 		});
 		if (managed) {
 			publish({
