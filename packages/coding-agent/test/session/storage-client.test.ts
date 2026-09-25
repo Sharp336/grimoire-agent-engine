@@ -254,7 +254,7 @@ it("fences all later calls after the owner incarnation changes", async () => {
 	}
 });
 
-it("keeps every failed read local and fences only an unknown write outcome", async () => {
+it("keeps every failed read local and fences only an unknown write or barrier outcome", async () => {
 	let requests = 0;
 	const hang = Promise.withResolvers<void>();
 	const server = Bun.serve({
@@ -268,6 +268,8 @@ it("keeps every failed read local and fences only an unknown write outcome", asy
 				return envelope(body.receipt.requestId, {
 					error: { code: "outcome_unknown", message: "no authoritative receipt", retryable: true },
 				});
+			// The client's own deadline is the behavior under test; the response never arrives.
+			if (body.operation === "barrier") await hang.promise;
 			if (body.read.familyId === "degraded")
 				return envelope(body.read.requestId, {
 					error: { code: "storage_error", message: "RocksDB read failed", retryable: false },
@@ -275,7 +277,6 @@ it("keeps every failed read local and fences only an unknown write outcome", asy
 			if (body.read.familyId === "garbled")
 				return Response.json({ schema: "wrong.storage.protocol", version: "1.0", requestId: body.read.requestId });
 			if (body.read.familyId === "oversized") return envelope(body.read.requestId, { padding: "x".repeat(4096) });
-			// The client's own deadline is the behavior under test; the response never arrives.
 			if (body.read.familyId === "slow") await hang.promise;
 			return envelope(body.read.requestId, {
 				familyId: body.read.familyId,
@@ -302,6 +303,12 @@ it("keeps every failed read local and fences only an unknown write outcome", asy
 			offline.readRange({ familyId: "refused", generationId: "g", maxRecords: 1, maxBytes: 1024 }),
 		).rejects.toMatchObject({ code: "retryable" });
 		expect(offline.failure).toBeUndefined();
+		// A barrier confirms durability of accepted writes, so its lost outcome is a write outcome.
+		const barrier = new StorageClient(binding(server.port!), { deadlineMs: 200 });
+		await expect(
+			barrier.barrier({ familyId: "f", generationId: "g", throughSeq: 1, dependencies: [] }),
+		).rejects.toMatchObject({ code: "outcome_unknown" });
+		expect(barrier.failure?.code).toBe("outcome_unknown");
 		expect(client.failure).toBeUndefined();
 		expect((await read("healthy")).events).toEqual([]);
 

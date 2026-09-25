@@ -864,6 +864,61 @@ export class RocksEngineMutations {
 	async settleCommand(id: string, hash: string, receipt: EngineCommandReceipt): Promise<void> {
 		await this.mutation(`command:${id}`, tx => this.settle(tx, id, receipt, hash, true));
 	}
+	/** Terminal receipt for a command whose admission keeps failing; the row and receipt commit together. */
+	async rejectUnadmittedCommand(
+		command: EngineCommandIdentity,
+		receipt: EngineCommandReceipt & { outcome: "rejected" },
+		processorGeneration: number,
+	): Promise<void> {
+		await this.mutation(command.agentInstanceId, async tx => {
+			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
+				throw new EngineTargetError("stale_target", "Command processor generation changed");
+			const old = await tx.get<RocksCommand>("command", command.commandId);
+			if (old?.state === "settled") return;
+			if (old && old.processor_generation !== null)
+				throw new Error(`Command ${command.commandId} is being processed`);
+			if (!old) {
+				// Never admitted: it holds no pending budget, so settling releases nothing.
+				await tx.put("command", command.commandId, {
+					command_id: command.commandId,
+					agent_instance_id: command.agentInstanceId,
+					processor_generation: null,
+					state: "received",
+					canonical_hash: command.canonicalHash,
+					payload_bytes: Buffer.byteLength(command.serializedCommand ?? ""),
+					control_admission: ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
+					engine_generation: command.engineGeneration,
+					operation: command.operation,
+					identity: command,
+					receipt: null,
+					received_at: Date.now(),
+					updated_at: Date.now(),
+					pending_accounted: false,
+				} satisfies RocksCommand);
+			}
+			if (
+				command.operation === "start" &&
+				command.executionId &&
+				command.attemptId &&
+				!(await tx.get<RocksAttempt>("attempt", command.attemptId))
+			)
+				await this.append(
+					tx,
+					{
+						commandId: command.commandId,
+						agentInstanceId: command.agentInstanceId,
+						executionId: command.executionId,
+						attemptId: command.attemptId,
+						bindingId: "",
+						engineGeneration: processorGeneration,
+						bindingGeneration: 0,
+						authorityGeneration: command.authorityGeneration,
+					},
+					{ kind: "rejected", payload: receipt.detail, causationCommandId: command.commandId },
+				);
+			await this.settle(tx, command.commandId, receipt, command.canonicalHash, true);
+		});
+	}
 	async settle(
 		tx: RuntimeTransaction,
 		id: string,

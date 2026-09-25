@@ -2396,39 +2396,7 @@ export class EngineStore {
 				ENGINE_CONTROL_OPS.has(command.operation),
 			);
 			await this.#registerAgent(sql, command);
-			await sql.unsafe(
-				`INSERT INTO engine_commands(
-				 command_id, operation, device_id, engine_id, engine_generation, agent_instance_id,
-				 agent_instance_ref, parent_agent_instance_id, binding_id, binding_generation,
-				 execution_id, attempt_id, authority_generation, payload_hash, canonical_hash,
-				 state, processor_generation, received_at, updated_at,principal_id,browser_payload_hash,payload_bytes,serialized_command,control_admission
-				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?,?,?,?,?,?)`,
-				[
-					command.commandId,
-					command.operation,
-					command.deviceId,
-					command.engineId,
-					command.engineGeneration,
-					command.agentInstanceId,
-					command.agentInstanceRef ?? null,
-					command.parentAgentInstanceId ?? null,
-					command.bindingId ?? null,
-					command.bindingGeneration ?? null,
-					command.executionId ?? null,
-					command.attemptId ?? null,
-					command.authorityGeneration,
-					command.payloadHash,
-					command.canonicalHash,
-					processorGeneration,
-					now,
-					now,
-					command.principalId ?? "",
-					command.browserPayloadHash ?? null,
-					payloadBytes,
-					command.serializedCommand ?? null,
-					ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
-				],
-			);
+			await this.#insertCommand(sql, command, processorGeneration, now);
 			if (command.operation === "start") {
 				const start = await readTargetStart(sql, {
 					agentInstanceId: command.agentInstanceId,
@@ -2481,6 +2449,79 @@ export class EngineStore {
 
 	async settleCommand(commandId: string, canonicalHash: string, receipt: EngineCommandReceipt): Promise<void> {
 		await this.#transaction(sql => this.#settleAdmittedCommand(sql, commandId, receipt, canonicalHash, true));
+	}
+
+	/** Terminal receipt for a command whose admission keeps failing; the row and receipt commit together. */
+	async rejectUnadmittedCommand(
+		command: EngineCommandIdentity,
+		receipt: EngineCommandReceipt & { outcome: "rejected" },
+	): Promise<void> {
+		await this.#transaction(async sql => {
+			const [existing] = (await sql.unsafe(
+				"SELECT state, processor_generation FROM engine_commands WHERE command_id=?",
+				[command.commandId],
+			)) as Array<{ state: string; processor_generation: number | null }>;
+			if (existing?.state === "settled") return;
+			if (existing && existing.processor_generation !== null)
+				throw new Error(`Command ${command.commandId} is being processed`);
+			if (!existing) await this.#insertCommand(sql, command, null, Date.now());
+			if (command.operation === "start" && command.executionId && command.attemptId)
+				await this.#appendEvent(sql, {
+					agentInstanceId: command.agentInstanceId,
+					executionId: command.executionId,
+					attemptId: command.attemptId,
+					bindingId: "",
+					engineGeneration: command.engineGeneration,
+					bindingGeneration: 0,
+					authorityGeneration: command.authorityGeneration,
+					causationCommandId: command.commandId,
+					kind: "rejected",
+					payload: receipt.detail,
+				});
+			await this.#settleAdmittedCommand(sql, command.commandId, receipt, command.canonicalHash, true);
+		});
+	}
+
+	async #insertCommand(
+		sql: SqlClient,
+		command: EngineCommandIdentity,
+		processorGeneration: number | null,
+		now: number,
+	): Promise<void> {
+		const payloadBytes = Buffer.byteLength(command.serializedCommand ?? "");
+		await sql.unsafe(
+			`INSERT INTO engine_commands(
+			 command_id, operation, device_id, engine_id, engine_generation, agent_instance_id,
+			 agent_instance_ref, parent_agent_instance_id, binding_id, binding_generation,
+			 execution_id, attempt_id, authority_generation, payload_hash, canonical_hash,
+			 state, processor_generation, received_at, updated_at,principal_id,browser_payload_hash,payload_bytes,serialized_command,control_admission
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?,?,?,?,?,?)`,
+			[
+				command.commandId,
+				command.operation,
+				command.deviceId,
+				command.engineId,
+				command.engineGeneration,
+				command.agentInstanceId,
+				command.agentInstanceRef ?? null,
+				command.parentAgentInstanceId ?? null,
+				command.bindingId ?? null,
+				command.bindingGeneration ?? null,
+				command.executionId ?? null,
+				command.attemptId ?? null,
+				command.authorityGeneration,
+				command.payloadHash,
+				command.canonicalHash,
+				processorGeneration,
+				now,
+				now,
+				command.principalId ?? "",
+				command.browserPayloadHash ?? null,
+				payloadBytes,
+				command.serializedCommand ?? null,
+				ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
+			],
+		);
 	}
 
 	async cancelPendingStart(

@@ -3169,8 +3169,16 @@ export class EngineRuntime {
 				resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
 				audit?.mark("binding_profile_done");
 				// Same precedence as the session options: resolved options override the launch profile.
-				const { toolNames } = { toolNames: profile.toolNames, ...resolved?.options };
-				assertFilesReadable(!toolNames || normalizeToolNames(toolNames).includes("read"), originals);
+				// A restricted session without names has no tools; an unrestricted one without names has all.
+				const { toolNames, restrictToolNames } = {
+					toolNames: profile.toolNames,
+					restrictToolNames: profile.restrictToolNames,
+					...resolved?.options,
+				};
+				assertFilesReadable(
+					toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
+					originals,
+				);
 				if (binding) await this.#terminateBinding(binding, "requested");
 			} catch (error) {
 				resolved?.dispose();
