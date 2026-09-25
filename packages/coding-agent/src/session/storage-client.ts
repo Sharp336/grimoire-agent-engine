@@ -139,8 +139,9 @@ export class StorageClient {
 		return this.#write(write, body).finally(release);
 	}
 
+	/** A barrier confirms durability of accepted writes: any unknown outcome leaves those writes unknown and fences. */
 	barrier(input: Omit<StorageBarrier, "requestId" | "incarnation">): Promise<StorageBarrierSuccessResponse> {
-		return this.#request("control", "/v1/barrier", "barrier", "barrier", input).then(response => {
+		return this.#request("control", "/v1/barrier", "barrier", "barrier", input, true).then(response => {
 			// An owner that answers but cannot confirm the prefix leaves accepted writes with unknown durability.
 			if (!("durableThroughSeq" in response) || response.durableThroughSeq < input.throughSeq)
 				throw this.#fence("outcome_unknown", "Storage barrier did not confirm its requested prefix");
@@ -191,13 +192,14 @@ export class StorageClient {
 		);
 	}
 
-	/** Reads and barriers change nothing, so an unusable response is an ordinary retryable failure, never a fence. */
+	/** Reads change nothing, so an unusable response is an ordinary retryable failure, never a fence. */
 	#request(
 		lane: Lane,
 		route: string,
 		operation: string,
 		key: string,
 		input: object,
+		confirmsWrites = false,
 	): Promise<StorageProtocolResponse> {
 		const requestId = crypto.randomUUID();
 		const body = this.#body(operation, key, { ...input, requestId, incarnation: this.incarnation });
@@ -205,7 +207,9 @@ export class StorageClient {
 		return this.#http(route, body, requestId, Date.now() + this.#limits.deadlineMs)
 			.catch(error => {
 				if (error instanceof StorageClientError && error.code === "outcome_unknown")
-					throw new StorageClientError("retryable", error.message);
+					throw confirmsWrites
+						? this.#fence(error.code, error.message)
+						: new StorageClientError("retryable", error.message);
 				throw error;
 			})
 			.finally(release);

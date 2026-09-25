@@ -560,7 +560,8 @@ export class NatsEngineAdapter {
 	}
 
 	/** Target and poison errors are final at once; any other failure is redelivered with backoff and becomes
-	 * a terminal failed receipt on its last attempt. A retry of the same command then replays that receipt. */
+	 * a terminal failed receipt on its last attempt. A resend of the same command then replays that receipt.
+	 * Only a message without a valid command identity (unparseable or unauthorized) ends without a receipt. */
 	async #failCommand(
 		message: JsMsg,
 		command: EngineCommandEnvelope | undefined,
@@ -583,33 +584,43 @@ export class NatsEngineAdapter {
 								code: "command_failed" as const,
 								message: publicFailureMessage(`Command failed after ${attempt} attempts`, error),
 							};
-			const rejectable = !poison && command?.executionId && command.attemptId ? command : undefined;
-			let recorded = false;
+			const detail = { code: failure.code, message: failure.message.slice(0, 2_048) };
+			let recorded = !identity;
 			try {
-				if (rejectable) {
-					try {
-						await this.runtime.recordCommandRejection({
-							commandId: rejectable.commandId,
-							agentInstanceId: rejectable.agentInstanceId,
-							executionId: rejectable.executionId!,
-							attemptId: rejectable.attemptId!,
-							authorityGeneration: rejectable.authorityGeneration,
-							bindingGeneration: rejectable.bindingGeneration,
-							...failure,
-							...(rejectable.op === "start" ? { operation: "start" as const } : {}),
+				if (identity && !claimed) {
+					// Admission itself failed: the command row and its terminal receipt commit together.
+					await this.runtime.store.rejectUnadmittedCommand(
+						identity,
+						{ outcome: "rejected", detail },
+						this.runtime.engineGeneration,
+					);
+					recorded = true;
+				} else if (identity) {
+					const rejectable = !poison && command?.executionId && command.attemptId ? command : undefined;
+					if (rejectable) {
+						try {
+							await this.runtime.recordCommandRejection({
+								commandId: rejectable.commandId,
+								agentInstanceId: rejectable.agentInstanceId,
+								executionId: rejectable.executionId!,
+								attemptId: rejectable.attemptId!,
+								authorityGeneration: rejectable.authorityGeneration,
+								bindingGeneration: rejectable.bindingGeneration,
+								...failure,
+								...(rejectable.op === "start" ? { operation: "start" as const } : {}),
+							});
+							recorded = true;
+						} catch {
+							// The rejection event is optional; the claimed receipt below is the terminal fact.
+						}
+					}
+					if (!recorded) {
+						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
+							outcome: "rejected",
+							detail,
 						});
 						recorded = true;
-					} catch (rejectionError) {
-						// The rejection event is optional; the claimed receipt below is the terminal fact.
-						if (!(claimed && identity)) throw rejectionError;
 					}
-				}
-				if (!recorded && claimed && identity) {
-					await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
-						outcome: "rejected",
-						detail: { code: failure.code, message: failure.message.slice(0, 2_048) },
-					});
-					recorded = true;
 				}
 			} catch (persistError) {
 				// A concurrent settlement (for example a Stop) already produced the terminal receipt.
@@ -622,23 +633,11 @@ export class NatsEngineAdapter {
 						)?.status === "replay";
 				if (!recorded) this.#report(persistError);
 			}
-			// A deterministic rejection before admission has no receipt to write.
-			if (recorded || (final && !claimed && !rejectable)) {
+			if (recorded) {
 				if (commandId) this.#commandFailures.delete(commandId);
-				if (poison) message.term(failure.message.slice(0, 128));
+				if (poison || !identity) message.term(failure.message.slice(0, 128));
 				else message.ack();
 				if (!(error instanceof EngineTargetError)) this.#report(error);
-				return;
-			}
-			// Never admitted: no receipt can exist. Stop redelivering unless the lease moved to a successor.
-			if (
-				!claimed &&
-				exhausted &&
-				(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration).catch(() => false))
-			) {
-				if (commandId) this.#commandFailures.delete(commandId);
-				message.term("command_failed");
-				this.#report(error);
 				return;
 			}
 		}

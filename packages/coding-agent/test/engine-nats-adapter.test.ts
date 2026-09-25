@@ -1466,6 +1466,82 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await broker.process.exited;
 		}
 	}, 30000);
+
+	it("rejects a Start whose admission keeps failing with a durable receipt instead of dropping it", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-admission-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		const admit = runtime.store.admitCommand.bind(runtime.store);
+		let admissions = 0;
+		const failing = spyOn(runtime.store, "admitCommand").mockImplementation(async () => {
+			admissions++;
+			throw new Error("ENOENT: admission fixture storage is offline");
+		});
+		let resolverCalls = 0;
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => {
+				resolverCalls++;
+				return { spawns: "", profileDigest: "leaf-profile-v1" };
+			},
+			commandAttempts: 2,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			const consumer = `engine_${adapter.engineRoute}`;
+			const settled = async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
+				return info.num_pending === 0 && info.num_ack_pending === 0;
+			};
+			const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd);
+			await js.publish(adapter.commandSubject(start.agentInstanceId, "start"), JSON.stringify(start), {
+				msgID: "delivery-1",
+			});
+			await waitFor(async () => admissions === 2 && (await settled()), 15_000);
+			failing.mockRestore();
+			const failure = {
+				code: "command_failed",
+				message: "Command failed after 2 attempts: ENOENT: admission fixture storage is offline",
+			};
+			const receipt = await admit(engineCommandIdentity(start), runtime.engineGeneration);
+			expect(receipt).toEqual({ status: "replay", receipt: { outcome: "rejected", detail: failure } });
+			expect(
+				(await runtime.store.pendingEventsForSink("test-admission-audit")).events.filter(
+					event => event.causationCommandId === start.commandId && event.kind === "rejected",
+				),
+			).toMatchObject([{ payload: failure }]);
+
+			await js.publish(adapter.commandSubject(start.agentInstanceId, "start"), JSON.stringify(start), {
+				msgID: "delivery-2",
+			});
+			await waitFor(
+				async () => (await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer)).delivered.stream_seq >= 2,
+			);
+			await waitFor(settled);
+			expect(resolverCalls).toBe(0);
+			expect(await runtime.store.getAttempt(start.attemptId!)).toBeUndefined();
+			expect(await admit(engineCommandIdentity(start), runtime.engineGeneration)).toEqual(receipt);
+		} finally {
+			failing.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
 });
 
 function startCommand(
