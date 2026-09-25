@@ -10,6 +10,7 @@
 ### Fixed
 
 - Managed (`--status-file`) logins for loopback OAuth providers with paste-code fallback (Anthropic, Z.ai, OpenRouter) stay in `authorization_required` until the loopback callback, instead of failing with `oauth_login_failed` because the headless flow had no interactive paste prompt.
+- Python shell, Bash, and pip subprocesses no longer open extra console windows on Windows.
 - Engine agents retain their canonical display names and delegation hints without changing chat identity or routing.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
 - Pause and Resume remain responsive while neighboring native sessions produce events.
