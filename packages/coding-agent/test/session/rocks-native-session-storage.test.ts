@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AssistantMessage, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, TempDir } from "@oh-my-pi/pi-utils";
 import { BlobStore, parseBlobRef } from "../../src/session/blob-store";
 import {
 	type NativeSessionCheckpoint,
@@ -10,6 +10,7 @@ import {
 } from "../../src/session/native-session-storage";
 import {
 	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
+	nativePayloadBlobHashes,
 	RocksNativeSessionStorage,
 } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
@@ -19,10 +20,17 @@ import {
 	type StorageBarrier,
 	type StorageBarrierSuccessResponse,
 	type StorageEntry,
+	type StorageNativeHead,
+	type StoragePayload,
 	type StorageProtocolRequest,
+	type StorageRead,
+	type StorageReadEntry,
+	type StorageReadSuccessResponse,
 	type StorageReceipt,
 	type StorageWrite,
 } from "../../src/session/storage-protocol";
+
+type WriteInput = Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
 
 class DelayedStorageClient extends StorageClient {
 	readonly writes: Array<{
@@ -72,6 +80,232 @@ class DelayedStorageClient extends StorageClient {
 		};
 	}
 }
+
+/** In-memory owner for one family: frozen cuts, leaf walks to the context anchor and fork lineage. */
+class MemoryNativeClient extends StorageClient {
+	readonly writes: WriteInput[] = [];
+	readonly #entries = new Map<string, StorageReadEntry>();
+	readonly #heads = new Map<string, Array<{ seq: number; head?: StorageNativeHead; state?: StoragePayload }>>();
+	constructor() {
+		super({
+			url: "http://127.0.0.1:1",
+			token: "0123456789012345",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+	}
+	override async write(input: WriteInput): Promise<StorageReceipt> {
+		this.writes.push(structuredClone(input));
+		const throughSeq = input.firstSeq + Math.max(1, input.entries.length) - 1;
+		for (const edit of input.nativeEdits ?? []) {
+			if (edit.entry) this.#entries.set(edit.entryId, { ...edit.entry, seq: throughSeq });
+			else this.#entries.delete(edit.entryId);
+		}
+		for (const [index, entry] of input.entries.entries())
+			this.#entries.set(entry.entryId, { ...entry, seq: input.firstSeq + index });
+		const heads = this.#heads.get(input.generationId) ?? [];
+		heads.push({ seq: throughSeq, head: input.head, state: input.state });
+		this.#heads.set(input.generationId, heads);
+		return {
+			operationId: input.operationId,
+			familyId: input.familyId,
+			generationId: input.generationId,
+			payloadHash: "sha256:test",
+			firstSeq: input.firstSeq,
+			throughSeq,
+			admissionState: "admitted",
+			appliedState: "applied",
+			durabilityState: "durable",
+			outcome: "success",
+			incarnation: 1,
+		};
+	}
+	override async barrier(
+		input: Omit<StorageBarrier, "requestId" | "incarnation">,
+	): Promise<StorageBarrierSuccessResponse> {
+		return {
+			...input,
+			schema: "artel.storage.protocol.response.v1",
+			version: "1.0",
+			requestId: "barrier",
+			incarnation: 1,
+			durableThroughSeq: input.throughSeq,
+		};
+	}
+	override async readContext(
+		input: Omit<StorageRead, "requestId" | "incarnation">,
+	): Promise<StorageReadSuccessResponse> {
+		const heads = this.#heads.get(input.generationId) ?? [];
+		const latest = heads.at(-1)?.seq ?? 0;
+		const cut = input.cutSeq ?? latest;
+		const at = heads.findLast(item => item.seq <= cut);
+		const start = input.startEntryId ?? at?.head?.contextAnchors?.startEntryId;
+		const path: StorageReadEntry[] = [];
+		for (let id = input.leafId ?? at?.head?.leafId; id; ) {
+			const entry = this.#entries.get(id);
+			if (!entry) break;
+			path.push(entry);
+			if (id === start) break;
+			id = entry.parentId;
+		}
+		const offset = Number(input.cursor ?? 0);
+		const events = path.slice(offset, offset + input.maxRecords);
+		return {
+			schema: "artel.storage.protocol.response.v1",
+			version: "1.0",
+			requestId: "read",
+			incarnation: 1,
+			familyId: input.familyId,
+			generationId: input.generationId,
+			throughSeq: cut,
+			durableThroughSeq: latest,
+			liveThroughSeq: latest,
+			head: at?.head ?? null,
+			state: at?.state ?? null,
+			events,
+			nextCursor: offset + events.length < path.length ? String(offset + events.length) : null,
+		};
+	}
+}
+
+/** Run with a contour body root, the way ClientHost starts Engine (`PI_BLOBS_DIR`). */
+async function withContourBlobs(run: (blobs: BlobStore) => Promise<void>): Promise<void> {
+	using tempDir = TempDir.createSync("@omp-native-contour-blobs-");
+	const previous = process.env.PI_BLOBS_DIR;
+	process.env.PI_BLOBS_DIR = path.join(tempDir.path(), "storage", "blobs");
+	try {
+		await run(new BlobStore(getBlobsDir()));
+	} finally {
+		if (previous === undefined) delete process.env.PI_BLOBS_DIR;
+		else process.env.PI_BLOBS_DIR = previous;
+	}
+}
+
+const blobShapes = (await Bun.file(path.join(import.meta.dir, "blob-ref-shapes.json")).json()) as {
+	cases: Array<{ name: string; payload: StoragePayload; hashes: string[] }>;
+};
+
+it.each(blobShapes.cases)("derives exactly the shared C2-A blob hashes for $name", ({ payload, hashes }) => {
+	expect(nativePayloadBlobHashes(payload)).toEqual(hashes);
+});
+
+it("stores message images as blob references, publishes one body and restores base64 after a restart", async () => {
+	await withContourBlobs(async blobs => {
+		const client = new MemoryNativeClient();
+		const image = Buffer.from(Uint8Array.from({ length: 40_000 }, (_, index) => (index * 7) & 0xff));
+		// An uploaded attachment already owns this body; the message image must reuse it.
+		const upload = await blobs.put(image);
+		const data = image.toString("base64");
+		const manager = SessionManager.createNative("/images", new RocksNativeSessionStorage(client, "images", "root"));
+		for (const timestamp of [1, 2])
+			manager.appendMessage({
+				role: "user",
+				content: [
+					{ type: "text", text: "look" },
+					{ type: "image", data, mimeType: "image/png" },
+				],
+				timestamp,
+			});
+		const expected = structuredClone(manager.getWorkingEntries());
+		await manager.flushAndCheckpoint();
+
+		expect(JSON.stringify(client.writes)).not.toContain(data);
+		for (const write of client.writes)
+			expect(write.entries[0].payload).toMatchObject({
+				message: { content: [{ type: "text" }, { type: "image", data: `blob:sha256:${upload.hash}` }] },
+			});
+		expect(await fs.readdir(blobs.liveDir)).toEqual([upload.hash]);
+
+		const cold = await SessionManager.openNative(new RocksNativeSessionStorage(client, "images", "root"));
+		expect(cold.getWorkingEntries()).toEqual(expected);
+	});
+});
+
+it("admits an entry whose image and text exceed the 8 MiB entry budget by trimming its longest strings", async () => {
+	await withContourBlobs(async () => {
+		const client = new MemoryNativeClient();
+		const data = Buffer.alloc(9 * 1024 * 1024, 0x2a).toString("base64");
+		const text = "t".repeat(450_000);
+		const manager = SessionManager.createNative(
+			"/oversize",
+			new RocksNativeSessionStorage(client, "oversize", "root"),
+		);
+		const id = manager.appendMessage({
+			role: "user",
+			content: [
+				...Array.from({ length: 20 }, () => ({ type: "text" as const, text })),
+				{ type: "image", data, mimeType: "image/png" },
+			],
+			timestamp: 1,
+		});
+		await manager.flushAndCheckpoint();
+		const marker = client.writes[0].entries[0].payload;
+		expect(marker).toMatchObject({ schema: "omp.native.entry.blob.v1" });
+		expect(marker.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+
+		const entry = (
+			await SessionManager.openNative(new RocksNativeSessionStorage(client, "oversize", "root"))
+		).getEntry(id);
+		if (entry?.type !== "message" || entry.message.role !== "user" || typeof entry.message.content === "string")
+			throw new Error("Expected restored user message");
+		expect(entry.message.content.at(-1)).toEqual({ type: "image", data, mimeType: "image/png" });
+		// 20 x 450k chars exceed 8 MiB; one halving of the 500k cap trims each block to 250k.
+		expect(entry.message.content.slice(0, -1).map(block => block.type === "text" && block.text.length)).toEqual(
+			Array(20).fill(250_000),
+		);
+	});
+}, 30_000);
+
+it("keeps image references through a native fork and a history edit", async () => {
+	await withContourBlobs(async blobs => {
+		const client = new MemoryNativeClient();
+		const image = Buffer.from(Uint8Array.from({ length: 30_000 }, (_, index) => (index * 13) & 0xff));
+		const data = image.toString("base64");
+		const ref = `blob:sha256:${new Bun.SHA256().update(image).digest("hex")}`;
+		const source = new RocksNativeSessionStorage(client, "fork", "source");
+		const manager = SessionManager.createNative("/fork", source);
+		const selected = manager.appendMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "before" },
+				{ type: "image", data, mimeType: "image/png" },
+			],
+			timestamp: 1,
+		});
+		const leaf = manager.appendMessage({ role: "user", content: "later", timestamp: 2 });
+		await manager.flushAndCheckpoint();
+		const bodies = await fs.readdir(blobs.liveDir);
+
+		const plain = await SessionManager.forkNativeContext(
+			source,
+			new RocksNativeSessionStorage(client, "fork", "plain"),
+			"/fork",
+		);
+		expect(JSON.stringify(plain.buildSessionContext())).toContain(data);
+
+		const edited = await SessionManager.forkNativeContext(
+			source,
+			new RocksNativeSessionStorage(client, "fork", "edited"),
+			"/fork",
+			undefined,
+			{ entryId: selected, leafEntryId: leaf, edit: { entryId: selected, text: "after" } },
+		);
+		const replacement = client.writes.at(-1);
+		expect(replacement?.generationId).toBe("edited");
+		expect(replacement?.entries[0].payload).toMatchObject({
+			message: {
+				content: [
+					{ type: "text", text: "after" },
+					{ type: "image", data: ref },
+				],
+			},
+		});
+		expect(await fs.readdir(blobs.liveDir)).toEqual(bodies);
+		const reopened = await SessionManager.openNative(new RocksNativeSessionStorage(client, "fork", "edited"));
+		expect(reopened.buildSessionContext()).toEqual(edited.buildSessionContext());
+		expect(JSON.stringify(reopened.buildSessionContext())).toContain(data);
+	});
+});
 
 it("keeps ordinary appends in prefix order and flushes only after every buffered write applies", async () => {
 	const client = new DelayedStorageClient();
@@ -174,7 +408,7 @@ it.each([
 
 it("persists oversized native text, image, tool, and signed payloads exactly through bounded blobs", async () => {
 	using tempDir = TempDir.createSync("@omp-native-entry-blobs-");
-	const blobs = new BlobStore(path.join(tempDir.path(), "blobs"));
+	const previousBlobsDir = process.env.PI_BLOBS_DIR;
 	const stored: StorageEntry[] = [];
 	const writes: StorageWrite[] = [];
 	const wireBytes: number[] = [];
@@ -231,6 +465,8 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		},
 	});
 	try {
+		process.env.PI_BLOBS_DIR = path.join(tempDir.path(), "blobs");
+		const blobs = new BlobStore(getBlobsDir());
 		const client = new StorageClient({
 			url: `http://127.0.0.1:${server.port}`,
 			token: "0123456789012345",
@@ -305,7 +541,9 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		expect(wireBytes.every(bytes => bytes < 1024 * 1024)).toBe(true);
 		expect(stored).toHaveLength(expected.length);
 		const byId = new Map(stored.map(entry => [entry.entryId, entry]));
-		for (const id of ids) expect(byId.get(id)?.payload).toMatchObject({ schema: "omp.native.entry.blob.v1" });
+		// The image message stays inline: its image is a blob reference, not an entry blob.
+		for (const id of [ids[0], ids[2], ids[3]])
+			expect(byId.get(id)?.payload).toMatchObject({ schema: "omp.native.entry.blob.v1" });
 		expect(pressureIds.some(id => byId.get(id)?.payload.schema === "omp.native.entry.blob.v1")).toBe(true);
 		const refs = stored
 			.filter(entry => entry.payload.schema === "omp.native.entry.blob.v1")
@@ -339,6 +577,8 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		);
 	} finally {
 		await server.stop(true);
+		if (previousBlobsDir === undefined) delete process.env.PI_BLOBS_DIR;
+		else process.env.PI_BLOBS_DIR = previousBlobsDir;
 	}
 }, 15_000);
 

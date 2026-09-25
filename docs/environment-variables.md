@@ -466,6 +466,7 @@ These affect where coding-agent stores data and which process-local settings ove
 | `PI_CONFIG_DIR`                                     | Config root dirname under home (default `.omp`)                                                                            |
 | `PI_CODING_AGENT_DIR`                               | Full agent-directory override for the default profile only; named profiles ignore it                                       |
 | `PI_CODING_AGENT_SESSION_DIR`                       | Initial session-directory override consumed by launch argument parsing                                                     |
+| `PI_BLOBS_DIR`                                      | Absolute content-addressed blob root (default `<agent dir>/blobs`); set by ClientHost to the storage contour's body root; relative paths are ignored; callers passing an explicit agent dir (e.g. `omp gc`) keep `<agent dir>/blobs` |
 | `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays |
 | `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots                                              |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists    |

@@ -12,6 +12,8 @@ import {
 } from "./native-session-storage";
 import { resolveSessionContextState } from "./session-context";
 import type { SessionEntry } from "./session-entries";
+import { collectPersistedBlobHashes } from "./session-loader";
+import { MAX_PERSIST_CHARS, prepareNativeEntryPayload } from "./session-persistence";
 import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
 
@@ -21,8 +23,12 @@ const NATIVE_ENTRY_BLOB_GC_GUARD_CONTENT = '{"schema":"omp.native.entry.blob.gc-
 const NATIVE_INLINE_ENTRY_PAYLOAD_BYTES = 192 * 1024;
 const NATIVE_ENTRY_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const NATIVE_WRITE_INPUT_MAX_BYTES = 1024 * 1024 - 4096;
+/** Below this string cap further trimming no longer shrinks an entry meaningfully. */
+const NATIVE_MIN_STRING_CHARS = 1024;
 
 type NativeWriteInput = Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
+/** One entry serialized once: `entry` carries a `{}` payload placeholder until the write is assembled. */
+type NativeRecord = { entry: StorageEntry; json: string; bytes: number };
 type NativeEntryBlobMarker = StoragePayload & {
 	schema: typeof NATIVE_ENTRY_BLOB_SCHEMA;
 	ref: string;
@@ -96,40 +102,78 @@ async function ensureNativeEntryBlobGcGuard(blobs: BlobStore): Promise<void> {
 	if (failed) throw failure;
 }
 
-function prepareNativeWrite(write: NativeWriteInput): { write: NativeWriteInput; blobs: Map<string, Buffer> } {
-	const candidates: Array<{ entry: StorageEntry; data: Buffer; externalized: boolean }> = [];
-	for (const entry of write.entries) {
-		const data = Buffer.from(JSON.stringify(entry.payload), "utf8");
-		if (data.byteLength > NATIVE_ENTRY_BLOB_MAX_BYTES)
-			throw new NativeSessionWriteRejectedError("Native entry payload exceeds the 8 MiB blob budget");
-		candidates.push({ entry, data, externalized: false });
+/**
+ * Detach one entry into its native record: images become blob references, over-long strings are
+ * trimmed, and if the JSON still exceeds one entry blob the longest strings are trimmed further.
+ */
+function nativeRecord(entry: SessionEntry, bodies: Map<string, Buffer>): NativeRecord {
+	let payload = prepareNativeEntryPayload(entry, bodies);
+	let json = JSON.stringify(payload);
+	let bytes = Buffer.byteLength(json);
+	// Images are references already, so each halved cap trims only the longest remaining strings.
+	for (
+		let maxChars = MAX_PERSIST_CHARS >> 1;
+		bytes > NATIVE_ENTRY_BLOB_MAX_BYTES && maxChars >= NATIVE_MIN_STRING_CHARS;
+		maxChars >>= 1
+	) {
+		payload = prepareNativeEntryPayload(payload, bodies, maxChars);
+		json = JSON.stringify(payload);
+		bytes = Buffer.byteLength(json);
 	}
-	for (const edit of write.nativeEdits ?? []) {
-		if (!edit.entry) continue;
-		const data = Buffer.from(JSON.stringify(edit.entry.payload), "utf8");
-		if (data.byteLength > NATIVE_ENTRY_BLOB_MAX_BYTES)
-			throw new NativeSessionWriteRejectedError("Native entry payload exceeds the 8 MiB blob budget");
-		candidates.push({ entry: edit.entry, data, externalized: false });
-	}
+	if (bytes > NATIVE_ENTRY_BLOB_MAX_BYTES)
+		throw new NativeSessionWriteRejectedError("Native entry payload exceeds the 8 MiB blob budget");
+	return { entry: { entryId: entry.id, parentId: entry.parentId, kind: entry.type, payload: {} }, json, bytes };
+}
 
-	const blobs = new Map<string, Buffer>();
-	const externalize = (candidate: (typeof candidates)[number]) => {
-		if (candidate.externalized) return;
-		const hash = new Bun.SHA256().update(candidate.data).digest("hex");
-		candidate.entry.payload = markerFor(hash, candidate.data.byteLength);
-		candidate.externalized = true;
-		blobs.set(hash, candidate.data);
+/**
+ * Assemble the write around records whose payloads are serialized exactly once. The envelope is
+ * serialized once with `{}` placeholders, which detaches the checkpoint and measures every wire byte;
+ * records above 192 KiB, then the largest ones until the request fits, move into entry blobs.
+ * `referencesBlobs` reports whether any assembled payload names a blob.
+ */
+function prepareNativeWrite(
+	envelope: NativeWriteInput,
+	records: readonly NativeRecord[],
+	bodies: Map<string, Buffer>,
+): { write: NativeWriteInput; bytes: number; referencesBlobs: boolean } {
+	const serialized = JSON.stringify(envelope);
+	const write = JSON.parse(serialized) as NativeWriteInput;
+	const targets = [...write.entries, ...(write.nativeEdits ?? []).flatMap(edit => (edit.entry ? [edit.entry] : []))];
+	const payloads: Array<StoragePayload | undefined> = new Array(records.length);
+	let bytes = Buffer.byteLength(serialized) - 2 * records.length;
+	const externalize = (index: number) => {
+		const data = Buffer.from(records[index].json, "utf8");
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		bodies.set(hash, data);
+		payloads[index] = markerFor(hash, data.byteLength);
+		bytes += Buffer.byteLength(JSON.stringify(payloads[index]));
 	};
-	for (const candidate of candidates) {
-		if (candidate.data.byteLength > NATIVE_INLINE_ENTRY_PAYLOAD_BYTES) externalize(candidate);
+	for (const [index, record] of records.entries()) {
+		if (record.bytes > NATIVE_INLINE_ENTRY_PAYLOAD_BYTES) externalize(index);
+		else bytes += record.bytes;
 	}
-	for (const candidate of candidates.toSorted((left, right) => right.data.byteLength - left.data.byteLength)) {
-		if (Buffer.byteLength(JSON.stringify(write)) <= NATIVE_WRITE_INPUT_MAX_BYTES) break;
-		externalize(candidate);
+	for (const index of [...records.keys()].sort((left, right) => records[right].bytes - records[left].bytes)) {
+		if (bytes <= NATIVE_WRITE_INPUT_MAX_BYTES) break;
+		if (payloads[index]) continue;
+		bytes -= records[index].bytes;
+		externalize(index);
 	}
-	if (Buffer.byteLength(JSON.stringify(write)) > NATIVE_WRITE_INPUT_MAX_BYTES)
+	if (bytes > NATIVE_WRITE_INPUT_MAX_BYTES)
 		throw new NativeSessionWriteRejectedError("Native write exceeds the storage request byte budget");
-	return { write, blobs };
+	for (const [index, target] of targets.entries())
+		target.payload = payloads[index] ?? (JSON.parse(records[index].json) as StoragePayload);
+	const referencesBlobs =
+		bodies.size > 0 || targets.some(target => nativePayloadBlobHashes(target.payload).length > 0);
+	return { write, bytes, referencesBlobs };
+}
+
+/** Every blob one native entry payload names (C2-A): its entry-blob body, or its image and upload references. */
+export function nativePayloadBlobHashes(payload: StoragePayload): string[] {
+	const marker = nativeEntryBlobMarker(payload);
+	if (!marker) return collectPersistedBlobHashes([payload]);
+	const hash = parseBlobRef(marker.ref);
+	if (!hash) throw new Error("Native entry blob marker has an invalid reference");
+	return [hash];
 }
 
 export function parseNativeSessionLocator(locator: string): { familyId: string; generationId: string } {
@@ -139,15 +183,6 @@ export function parseNativeSessionLocator(locator: string): { familyId: string; 
 	const generationId = decodeURIComponent(match[2]);
 	if (!familyId || !generationId) throw new Error("Invalid native session locator scope");
 	return { familyId, generationId };
-}
-
-function nativeEntry(entry: SessionEntry): StorageEntry {
-	return {
-		entryId: entry.id,
-		parentId: entry.parentId,
-		kind: entry.type,
-		payload: JSON.parse(JSON.stringify(entry)) as StoragePayload,
-	};
 }
 
 async function decodeEntry(entry: StorageEntry, blobs: BlobStore): Promise<SessionEntry> {
@@ -295,67 +330,81 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		checkpoint: NativeSessionCheckpoint,
 		appended: readonly SessionEntry[] = [],
 	): NativeSessionTicket {
-		return this.#submit(appended, checkpoint, "required", [
-			...entries.map(entry => ({ entryId: entry.id, entry: nativeEntry(entry) })),
-			...deletedIds.map(entryId => ({ entryId, entry: null })),
-		]);
+		return this.#submit(appended, checkpoint, "required", { entries, deletedIds });
 	}
 
 	#submit(
 		entries: readonly SessionEntry[],
 		checkpoint: NativeSessionCheckpoint,
 		durability: "buffered" | "required",
-		nativeEdits?: StorageWrite["nativeEdits"],
+		edits?: { entries: readonly SessionEntry[]; deletedIds: readonly string[] },
 		forkSource?: NativeSessionPosition,
 	): NativeSessionTicket {
 		if (this.#failure) throw this.#failure;
-		if (this.#conditionalWrite || (nativeEdits && this.#pendingWrites > 0))
+		if (this.#conditionalWrite || (edits && this.#pendingWrites > 0))
 			throw new NativeSessionWriteRejectedError("Native conditional edit requires an idle scope");
 		if (this.#pendingWrites >= this.#maxPendingWrites)
 			throw new NativeSessionWriteRejectedError("Native pending write admission budget exhausted");
 		const firstSeq = this.#throughSeq + 1;
 		const throughSeq = this.#throughSeq + Math.max(1, entries.length);
-		const serialized = JSON.stringify({
-			operationId: Bun.randomUUIDv7(),
-			familyId: this.#familyId,
-			generationId: this.#generationId,
-			firstSeq,
-			entries: entries.map(nativeEntry),
-			head: {
-				leafId: checkpoint.leafId,
-				contextAnchors: { startEntryId: checkpoint.contextStartId },
-				...(forkSource
-					? {
-							lineage: {
-								parentGenerationId: forkSource.generationId,
-								forkCutSeq: forkSource.throughSeq,
-								forkLeafId: checkpoint.leafId,
+		const bodies = new Map<string, Buffer>();
+		const records = [...entries, ...(edits?.entries ?? [])].map(entry => nativeRecord(entry, bodies));
+		const prepared = prepareNativeWrite(
+			{
+				operationId: Bun.randomUUIDv7(),
+				familyId: this.#familyId,
+				generationId: this.#generationId,
+				firstSeq,
+				entries: records.slice(0, entries.length).map(record => record.entry),
+				head: {
+					leafId: checkpoint.leafId,
+					contextAnchors: { startEntryId: checkpoint.contextStartId },
+					...(forkSource
+						? {
+								lineage: {
+									parentGenerationId: forkSource.generationId,
+									forkCutSeq: forkSource.throughSeq,
+									forkLeafId: checkpoint.leafId,
+								},
+							}
+						: {}),
+				},
+				state: { native: checkpoint },
+				durability,
+				dependencies: forkSource
+					? [
+							{
+								familyId: forkSource.familyId,
+								generationId: forkSource.generationId,
+								throughSeq: forkSource.throughSeq,
 							},
+						]
+					: [],
+				...(edits
+					? {
+							nativeEdits: [
+								...records.slice(entries.length).map(record => ({
+									entryId: record.entry.entryId,
+									entry: record.entry,
+								})),
+								...edits.deletedIds.map(entryId => ({ entryId, entry: null })),
+							],
+							expectedThroughSeq: this.#throughSeq,
 						}
 					: {}),
 			},
-			state: { native: JSON.parse(JSON.stringify(checkpoint)) },
-			durability,
-			dependencies: forkSource
-				? [
-						{
-							familyId: forkSource.familyId,
-							generationId: forkSource.generationId,
-							throughSeq: forkSource.throughSeq,
-						},
-					]
-				: [],
-			...(nativeEdits ? { nativeEdits, expectedThroughSeq: this.#throughSeq } : {}),
-		} satisfies NativeWriteInput);
-		// Bound both wire bytes and the retained snapshot, before reserving a sequence.
-		const bytes = Math.max(Buffer.byteLength(serialized), serialized.length * 2);
+			records,
+			bodies,
+		);
+		// Bound the retained snapshot (UTF-16 upper bound of its wire bytes) before reserving a sequence.
+		// Blob bodies stay outside the budget: they copy in-memory entry data, are bounded by the
+		// pending-write count, and counting them would reject valid image entries larger than the budget.
+		const bytes = prepared.bytes * 2;
 		if (this.#pendingBytes + bytes > this.#maxPendingBytes)
 			throw new NativeSessionWriteRejectedError("Native pending byte admission budget exhausted");
-		const prepared = prepareNativeWrite(JSON.parse(serialized) as NativeWriteInput);
-		const hasBlobReferences = prepared.blobs.size > 0 || JSON.stringify(prepared.write).includes("blob:sha256:");
 		const submit = async () => {
-			for (const [hash, data] of prepared.blobs) await this.#blobs.restore(hash, data);
-			if (hasBlobReferences) await ensureNativeEntryBlobGcGuard(this.#blobs);
+			for (const [hash, data] of bodies) await this.#blobs.restore(hash, data);
+			if (prepared.referencesBlobs) await ensureNativeEntryBlobGcGuard(this.#blobs);
 			return this.#client.write(prepared.write);
 		};
 		// Buffered writes resolve at application, not WAL durability. The next prefix
@@ -369,7 +418,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 				// The owner rejects this stale conditional prefix before admission. Other
 				// sequence gaps can occur at apply/barrier time and are not this rollback proof.
 				const rejectedPrefix =
-					nativeEdits !== undefined &&
+					edits !== undefined &&
 					error instanceof StorageClientError &&
 					error.code === "sequence_gap" &&
 					error.message === "write does not follow accepted prefix";
@@ -385,12 +434,12 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			.finally(() => {
 				this.#pendingWrites--;
 				this.#pendingBytes -= bytes;
-				if (nativeEdits) this.#conditionalWrite = false;
+				if (edits) this.#conditionalWrite = false;
 			});
 		this.#pendingWrites++;
 		this.#pendingBytes += bytes;
 		this.#writeTail = completion;
-		if (nativeEdits) this.#conditionalWrite = true;
+		if (edits) this.#conditionalWrite = true;
 		this.#throughSeq = throughSeq;
 		return { position: this.#position(), completion };
 	}

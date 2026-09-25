@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { nativeEntry } from "../src/engine/rocks-runtime-history";
@@ -9,6 +10,7 @@ import { RocksEngineMutations } from "../src/engine/rocks-store";
 import { type RuntimeEventsRequest, validateRuntimeValue } from "../src/engine/runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
 import type { EngineCommandIdentity } from "../src/engine/store";
+import { BlobStore } from "../src/session/blob-store";
 import { StorageClient } from "../src/session/storage-client";
 import {
 	STORAGE_PROTOCOL_SCHEMA_HASH,
@@ -623,5 +625,73 @@ describe("Rocks bounded reader contracts", () => {
 		);
 		rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file: "native:family/other" });
 		await expect(nativeEntry(store, "a", "e2", first.lifecycleContext.lineage)).rejects.toThrow("changed scope");
+	});
+	test("history image ranges read the referenced blob body and never decode an inline record", async () => {
+		using tempDir = TempDir.createSync("@omp-history-image-");
+		const previous = process.env.PI_BLOBS_DIR;
+		process.env.PI_BLOBS_DIR = tempDir.path();
+		try {
+			const image = Buffer.from(Uint8Array.from({ length: 70_000 }, (_, index) => (index * 5) & 0xff));
+			const { hash } = await new BlobStore(tempDir.path()).put(image);
+			const rows = fixture();
+			rows.seed("binding", "a", {
+				agent_instance_id: "a",
+				attempt_id: "attempt",
+				session_file: "native:family/gen",
+			});
+			const store = storeWith(rows);
+			let data = `blob:sha256:${hash}`;
+			spyOn(store.storageClient, "readContext").mockImplementation(async input => ({
+				schema: "artel.storage.protocol.response.v1",
+				version: "1.0",
+				requestId: "read",
+				incarnation: 1,
+				familyId: "family",
+				generationId: "gen",
+				throughSeq: input.cutSeq ?? 1,
+				durableThroughSeq: 1,
+				liveThroughSeq: 1,
+				head: { leafId: "e1" },
+				state: { native: { header: { id: "native-session" } } },
+				events: [
+					{
+						entryId: "e1",
+						parentId: null,
+						kind: "message",
+						seq: 1,
+						payload: {
+							id: "e1",
+							type: "message",
+							parentId: null,
+							message: { role: "user", content: [{ type: "image", data, mimeType: "image/png" }] },
+						},
+					},
+				],
+				nextCursor: null,
+			}));
+			const page = await store.nativeHistoryPage("a", undefined, 1);
+			const resource = {
+				kind: "history_image",
+				agentInstanceRef: ref,
+				attemptId: "attempt",
+				sessionId: "native-session",
+				entryId: "e1",
+				revision: page.lifecycleContext.lineage,
+				blockIndex: 0,
+				mediaType: "image/png",
+				bytes: image.length,
+				contentHash: `sha256:${hash}`,
+			};
+			const range = await store.runtimeResource({ principalId: "p", resource, offset: 65_536, limit: 65_536 });
+			expect(Buffer.from(String(range.contentBase64), "base64")).toEqual(image.subarray(65_536));
+			expect(range.nextOffset).toBeNull();
+			data = image.toString("base64");
+			await expect(store.runtimeResource({ principalId: "p", resource, offset: 0, limit: 1024 })).rejects.toThrow(
+				"content hash changed",
+			);
+		} finally {
+			if (previous === undefined) delete process.env.PI_BLOBS_DIR;
+			else process.env.PI_BLOBS_DIR = previous;
+		}
 	});
 });
