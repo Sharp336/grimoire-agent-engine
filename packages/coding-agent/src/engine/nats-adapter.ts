@@ -124,6 +124,8 @@ export interface NatsEngineAdapterOptions {
 	authorizeMessage: (message: AgentMessageEnvelope) => void | Promise<void>;
 	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	onError?: (error: Error) => void;
+	/** Deliveries of a failing command before it settles as a terminal failed receipt. */
+	commandAttempts?: number;
 }
 
 class PoisonMessageError extends Error {}
@@ -157,6 +159,8 @@ export class NatsEngineAdapter {
 	#outboxCursor = 0;
 	#stopping = false;
 	#disposed = false;
+	/** Failed deliveries per command in this Engine generation; a restart settles leftovers as interrupted. */
+	readonly #commandFailures = new Map<string, number>();
 
 	private constructor(
 		options: NatsEngineAdapterOptions,
@@ -491,6 +495,7 @@ export class NatsEngineAdapter {
 			// command application behind the entire device's unrelated event backlog.
 			this.wakeEvents();
 			if (admission.status === "replay") {
+				this.#commandFailures.delete(command.commandId);
 				message.ack();
 				return;
 			}
@@ -506,33 +511,13 @@ export class NatsEngineAdapter {
 					? { detail: detail as Record<string, unknown> }
 					: {}),
 			});
+			this.#commandFailures.delete(command.commandId);
 			message.ack();
 		} catch (error) {
 			if (error instanceof StaleEngineLeaseError) {
 				message.nak(250);
 				for (const consumer of this.#commandMessages) void consumer.close();
 				this.#report(error);
-				return;
-			}
-			if (error instanceof PoisonMessageError) {
-				if (claimed && identity) {
-					try {
-						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
-							outcome: "rejected",
-							detail: { code: "invalid_request", message: error.message.slice(0, 2_048) },
-						});
-					} catch (settleError) {
-						await this.runtime.store.releaseCommand(
-							identity.commandId,
-							identity.canonicalHash,
-							this.runtime.engineGeneration,
-						);
-						message.nak(1_000);
-						this.#report(settleError);
-						return;
-					}
-				}
-				message.term(error.message.slice(0, 128));
 				return;
 			}
 			if (error instanceof EngineCommandConflictError) {
@@ -558,68 +543,113 @@ export class NatsEngineAdapter {
 				this.#report(error);
 				return;
 			}
-			if (error instanceof EngineTargetError) {
-				if (error.code === "agent_busy" && !command?.browserPayloadHash) {
-					if (claimed && identity) {
-						await this.runtime.store
-							.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
-							.catch(reportError => this.#report(reportError));
-					}
-					message.nak(1_000);
-					return;
+			if (error instanceof EngineTargetError && error.code === "agent_busy" && !command?.browserPayloadHash) {
+				if (claimed && identity) {
+					await this.runtime.store
+						.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
+						.catch(reportError => this.#report(reportError));
 				}
-				try {
-					if (command?.executionId && command.attemptId) {
-						await this.runtime.recordCommandRejection({
-							commandId: command.commandId,
-							agentInstanceId: command.agentInstanceId,
-							executionId: command.executionId,
-							attemptId: command.attemptId,
-							authorityGeneration: command.authorityGeneration,
-							bindingGeneration: command.bindingGeneration,
-							code: error.code,
-							message: error.message,
-							...(command.op === "start" ? { operation: "start" as const } : {}),
-						});
-					} else if (claimed && identity) {
-						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
-							outcome: "rejected",
-							detail: { code: error.code, message: error.message.slice(0, 2_048) },
-						});
-					}
-				} catch (persistError) {
-					if (claimed && identity) {
-						const current = await this.runtime.store
-							.admitCommand(identity, this.runtime.engineGeneration)
-							.catch(() => undefined);
-						if (current?.status === "replay") {
-							message.ack();
-							return;
-						}
-					}
-					if (claimed && identity) {
-						await this.runtime.store
-							.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
-							.catch(reportError => this.#report(reportError));
-					}
-					message.nak(1_000);
-					this.#report(persistError);
-					return;
-				}
-				message.ack();
+				message.nak(1_000);
 				return;
 			}
-			if (claimed && identity) {
-				await this.runtime.store
-					.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
-					.catch(reportError => this.#report(reportError));
-			}
-			message.nak(1_000);
-			this.#report(error);
+			await this.#failCommand(message, command, identity, claimed, error);
 		} finally {
 			clearInterval(heartbeat);
 			this.wakeEvents();
 		}
+	}
+
+	/** Target and poison errors are final at once; any other failure is redelivered with backoff and becomes
+	 * a terminal failed receipt on its last attempt. A retry of the same command then replays that receipt. */
+	async #failCommand(
+		message: JsMsg,
+		command: EngineCommandEnvelope | undefined,
+		identity: EngineCommandIdentity | undefined,
+		claimed: boolean,
+		error: unknown,
+	): Promise<void> {
+		const commandId = command?.commandId;
+		const attempt = (commandId ? (this.#commandFailures.get(commandId) ?? 0) : 0) + 1;
+		const exhausted = attempt >= (this.#options.commandAttempts ?? 5);
+		const poison = error instanceof PoisonMessageError;
+		const final = poison || error instanceof EngineTargetError;
+		if (final || exhausted) {
+			const failure =
+				error instanceof EngineTargetError
+					? { code: error.code, message: error.message }
+					: poison
+						? { code: "invalid_request" as const, message: error.message }
+						: {
+								code: "command_failed" as const,
+								message: publicFailureMessage(`Command failed after ${attempt} attempts`, error),
+							};
+			const rejectable = !poison && command?.executionId && command.attemptId ? command : undefined;
+			let recorded = false;
+			try {
+				if (rejectable) {
+					try {
+						await this.runtime.recordCommandRejection({
+							commandId: rejectable.commandId,
+							agentInstanceId: rejectable.agentInstanceId,
+							executionId: rejectable.executionId!,
+							attemptId: rejectable.attemptId!,
+							authorityGeneration: rejectable.authorityGeneration,
+							bindingGeneration: rejectable.bindingGeneration,
+							...failure,
+							...(rejectable.op === "start" ? { operation: "start" as const } : {}),
+						});
+						recorded = true;
+					} catch (rejectionError) {
+						// The rejection event is optional; the claimed receipt below is the terminal fact.
+						if (!(claimed && identity)) throw rejectionError;
+					}
+				}
+				if (!recorded && claimed && identity) {
+					await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
+						outcome: "rejected",
+						detail: { code: failure.code, message: failure.message.slice(0, 2_048) },
+					});
+					recorded = true;
+				}
+			} catch (persistError) {
+				// A concurrent settlement (for example a Stop) already produced the terminal receipt.
+				if (claimed && identity)
+					recorded =
+						(
+							await this.runtime.store
+								.admitCommand(identity, this.runtime.engineGeneration)
+								.catch(() => undefined)
+						)?.status === "replay";
+				if (!recorded) this.#report(persistError);
+			}
+			// A deterministic rejection before admission has no receipt to write.
+			if (recorded || (final && !claimed && !rejectable)) {
+				if (commandId) this.#commandFailures.delete(commandId);
+				if (poison) message.term(failure.message.slice(0, 128));
+				else message.ack();
+				if (!(error instanceof EngineTargetError)) this.#report(error);
+				return;
+			}
+			// Never admitted: no receipt can exist. Stop redelivering unless the lease moved to a successor.
+			if (
+				!claimed &&
+				exhausted &&
+				(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration).catch(() => false))
+			) {
+				if (commandId) this.#commandFailures.delete(commandId);
+				message.term("command_failed");
+				this.#report(error);
+				return;
+			}
+		}
+		if (commandId) this.#commandFailures.set(commandId, attempt);
+		if (claimed && identity) {
+			await this.runtime.store
+				.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
+				.catch(reportError => this.#report(reportError));
+		}
+		message.nak(Math.min(1_000 * 2 ** (attempt - 1), 30_000));
+		this.#report(error);
 	}
 
 	async #dispatchCommand(command: EngineCommandEnvelope): Promise<unknown> {
@@ -967,7 +997,10 @@ export async function dispatchEngineCommand(options: {
 				};
 			} catch (error) {
 				if (error instanceof EngineTargetError) throw error;
-				throw new EngineTargetError("launch_failed", launchFailureMessage(error));
+				throw new EngineTargetError(
+					"launch_failed",
+					publicFailureMessage("Agent session initialization failed", error),
+				);
 			}
 		}
 		case "steer":
@@ -1119,7 +1152,8 @@ function parseHistoryEdit(payload: Record<string, unknown>): EngineHistoryEditSo
 	};
 }
 
-function launchFailureMessage(error: unknown): string {
+/** Sanitized cause chain; raw error text may carry credentials or prompt content. */
+function publicFailureMessage(prefix: string, error: unknown): string {
 	const messages: string[] = [];
 	const seen = new Set<unknown>();
 	let current: unknown = error;
@@ -1129,7 +1163,7 @@ function launchFailureMessage(error: unknown): string {
 		if (sanitized && !messages.includes(sanitized)) messages.push(sanitized);
 		current = current.cause;
 	}
-	return `Agent session initialization failed${messages.length ? `: ${messages.join(": ")}` : ""}`.slice(0, 2_048);
+	return `${prefix}${messages.length ? `: ${messages.join(": ")}` : ""}`.slice(0, 2_048);
 }
 
 export function engineCommandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {

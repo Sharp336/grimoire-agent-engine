@@ -270,7 +270,10 @@ export type StorageErrorCode =
 	| "storage_error"
 	| "stale_incarnation"
 	| "sequence_gap"
-	| "outcome_unknown";
+	| "outcome_unknown"
+	| "invalid_cursor"
+	| "not_found"
+	| "retryable";
 
 export interface StorageError {
 	code: StorageErrorCode;
