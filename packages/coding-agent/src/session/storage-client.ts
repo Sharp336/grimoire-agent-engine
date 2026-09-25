@@ -130,18 +130,20 @@ export class StorageClient {
 
 	write(input: WriteInput, control = false): Promise<StorageReceipt> {
 		const payload = { ...input, incarnation: this.incarnation };
-		const payloadHash =
-			`sha256:${new Bun.CryptoHasher("sha256").update(storageCanonicalJson(payload)).digest("hex")}` as const;
+		// The canonical payload is the only serialization: it is hashed and spliced into the request body.
+		const canonical = storageCanonicalJson(payload);
+		const payloadHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}` as const;
 		const write: StorageWrite = { ...payload, payloadHash, requestId: crypto.randomUUID() };
-		const body = this.#body("write", "write", write);
+		const body = `{"schema":${JSON.stringify(STORAGE_PROTOCOL_SCHEMA)},"version":${JSON.stringify(STORAGE_PROTOCOL_VERSION)},"operation":"write","write":${canonical.slice(0, -1)},"payloadHash":${JSON.stringify(payloadHash)},"requestId":${JSON.stringify(write.requestId)}}}`;
 		const release = this.#reserve(control ? "control" : "write", Buffer.byteLength(body));
 		return this.#write(write, body).finally(release);
 	}
 
 	barrier(input: Omit<StorageBarrier, "requestId" | "incarnation">): Promise<StorageBarrierSuccessResponse> {
 		return this.#request("control", "/v1/barrier", "barrier", "barrier", input).then(response => {
+			// An owner that answers but cannot confirm the prefix leaves accepted writes with unknown durability.
 			if (!("durableThroughSeq" in response) || response.durableThroughSeq < input.throughSeq)
-				throw this.#fence("storage_error", "Storage barrier did not confirm its requested prefix");
+				throw this.#fence("outcome_unknown", "Storage barrier did not confirm its requested prefix");
 			return response as StorageBarrierSuccessResponse;
 		});
 	}
@@ -169,7 +171,7 @@ export class StorageClient {
 					!Array.isArray(response.records) ||
 					response.records.length > input.maxRecords
 				)
-					throw this.#fence("storage_error", "Invalid bounded runtime query response");
+					throw new StorageClientError("schema_error", "Invalid bounded runtime query response");
 				return response as StorageRuntimeQueryResponse;
 			},
 		);
@@ -183,12 +185,13 @@ export class StorageClient {
 		return this.#request(control ? "control" : "read", `/v1/read/${kind}`, `read_${kind}`, "read", input).then(
 			response => {
 				if (!("events" in response) || !Array.isArray(response.events) || response.events.length > input.maxRecords)
-					throw this.#fence("storage_error", "Invalid bounded storage read response");
+					throw new StorageClientError("schema_error", "Invalid bounded storage read response");
 				return response as StorageReadSuccessResponse;
 			},
 		);
 	}
 
+	/** Reads and barriers change nothing, so an unusable response is an ordinary retryable failure, never a fence. */
 	#request(
 		lane: Lane,
 		route: string,
@@ -202,7 +205,7 @@ export class StorageClient {
 		return this.#http(route, body, requestId, Date.now() + this.#limits.deadlineMs)
 			.catch(error => {
 				if (error instanceof StorageClientError && error.code === "outcome_unknown")
-					throw this.#fence(error.code, error.message);
+					throw new StorageClientError("retryable", error.message);
 				throw error;
 			})
 			.finally(release);
@@ -210,6 +213,7 @@ export class StorageClient {
 
 	async #write(write: StorageWrite, body: string): Promise<StorageReceipt> {
 		const deadline = Date.now() + this.#limits.deadlineMs;
+		let pollMs = 10;
 		let response: StorageProtocolResponse | undefined;
 		try {
 			response = await this.#http(
@@ -231,11 +235,15 @@ export class StorageClient {
 					receipt.generationId !== write.generationId
 				)
 					throw this.#fence("storage_error", "Storage returned a different operation receipt");
-				if (receipt.outcome !== "pending" && receipt.outcome !== "outcome_unknown" && receipt.outcome !== "success")
-					throw new StorageClientError(
-						receipt.error?.code ?? "storage_error",
-						receipt.error?.message ?? receipt.outcome,
-					);
+				if (
+					receipt.outcome !== "pending" &&
+					receipt.outcome !== "outcome_unknown" &&
+					receipt.outcome !== "success"
+				) {
+					const code = receipt.error?.code ?? "storage_error";
+					if (code === "stale_incarnation") throw this.#fence(code, receipt.error?.message ?? receipt.outcome);
+					throw new StorageClientError(code, receipt.error?.message ?? receipt.outcome);
+				}
 				if (
 					receipt.appliedState === "applied" &&
 					(write.durability === "buffered" || receipt.durabilityState === "durable")
@@ -244,7 +252,8 @@ export class StorageClient {
 			}
 			if (Date.now() >= deadline)
 				throw this.#fence("outcome_unknown", "Storage write outcome is unknown; operation identity retained");
-			await Bun.sleep(Math.min(20, deadline - Date.now()));
+			await Bun.sleep(Math.min(pollMs, deadline - Date.now()));
+			pollMs = Math.min(pollMs * 2, 250);
 			const requestId = crypto.randomUUID();
 			const receiptBody = this.#body("receipt", "receipt", {
 				requestId,
@@ -256,8 +265,9 @@ export class StorageClient {
 			try {
 				response = await this.#http("/v1/receipt", receiptBody, requestId, deadline);
 			} catch (error) {
-				if (!(error instanceof StorageClientError) || !["outcome_unknown", "backpressure"].includes(error.code))
-					throw error;
+				// A failed receipt lookup proves nothing about the write; only a fence ends the wait early.
+				if (this.#failure) throw this.#failure;
+				if (!(error instanceof StorageClientError)) throw error;
 				response = undefined;
 			}
 		}
@@ -287,6 +297,8 @@ export class StorageClient {
 		};
 	}
 
+	/** Only a stale binding fences here. Every unusable response is `outcome_unknown`: a write then
+	 * reconciles through its receipt, while a read reports an ordinary retryable failure. */
 	async #http(route: string, body: string, requestId: string, deadline: number): Promise<StorageProtocolResponse> {
 		if (this.#failure) throw this.#failure;
 		try {
@@ -303,7 +315,7 @@ export class StorageClient {
 			}
 			if (response.status === 401) {
 				await response.body?.cancel();
-				throw this.#fence("storage_error", "Storage owner rejected its binding");
+				throw this.#fence("stale_incarnation", "Storage owner rejected its binding");
 			}
 			const reader = response.body?.getReader();
 			if (!reader) throw new StorageClientError("outcome_unknown", "Storage returned no response body");
@@ -316,7 +328,7 @@ export class StorageClient {
 					bytes += value.byteLength;
 					if (bytes > this.#limits.responseBytes) {
 						await reader.cancel();
-						throw this.#fence("storage_error", "Storage response exceeded its byte budget");
+						throw new StorageClientError("outcome_unknown", "Storage response exceeded its byte budget");
 					}
 					chunks.push(value);
 				}
@@ -326,26 +338,20 @@ export class StorageClient {
 			if (!bytes) throw new StorageClientError("outcome_unknown", "Storage returned an empty response");
 			const result = JSON.parse(Buffer.concat(chunks, bytes).toString("utf8")) as StorageProtocolResponse;
 			if (result.schema !== "artel.storage.protocol.response.v1" || result.version !== STORAGE_PROTOCOL_VERSION)
-				throw this.#fence("schema_error", "Storage response protocol mismatch");
+				throw new StorageClientError("outcome_unknown", "Storage response protocol mismatch");
 			if (result.incarnation !== this.incarnation)
 				throw this.#fence("stale_incarnation", "Storage owner incarnation changed");
 			if ("requestId" in result && result.requestId !== requestId && result.requestId !== null)
-				throw this.#fence("storage_error", "Storage response identity mismatch");
+				throw new StorageClientError("outcome_unknown", "Storage response identity mismatch");
 			if (result.error) {
-				if (result.error.code === "schema_error" && result.requestId === requestId)
-					throw new StorageClientError(result.error.code, result.error.message);
-				if (["storage_error", "stale_incarnation", "schema_error"].includes(result.error.code))
-					throw this.#fence(result.error.code, result.error.message);
+				if (result.error.code === "stale_incarnation") throw this.#fence(result.error.code, result.error.message);
 				throw new StorageClientError(result.error.code, result.error.message);
 			}
 			if (!response.ok) throw new StorageClientError("outcome_unknown", "Storage HTTP outcome is unknown");
 			return result;
 		} catch (error) {
 			if (error instanceof StorageClientError) throw error;
-			throw new StorageClientError(
-				"outcome_unknown",
-				"Storage connection failed; durable outcome requires reconciliation",
-			);
+			throw new StorageClientError("outcome_unknown", "Storage connection failed or timed out");
 		}
 	}
 

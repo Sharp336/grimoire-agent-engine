@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EngineAttachment, EngineAttachmentUploads } from "@oh-my-pi/pi-coding-agent/engine/runtime-attachments";
+import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { BLOB_RANGE_BYTES, BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { withOriginalAttachmentNotices } from "@oh-my-pi/pi-coding-agent/session/original-attachments";
 import { collectPersistedBlobHashes } from "@oh-my-pi/pi-coding-agent/session/session-loader";
@@ -130,7 +131,7 @@ describe("Engine attachment admission", () => {
 				},
 			],
 		});
-		const canonical = path.join(blobs.dir, attachment.contentHash.slice(7));
+		const canonical = path.join(blobs.liveDir, attachment.contentHash.slice(7));
 		await fs.writeFile(canonical, Buffer.alloc(png.length, 65));
 		await expect(uploads.prepareForMessage("message-a", references)).rejects.toThrow("SHA-256");
 		await fs.writeFile(canonical, png);
@@ -194,9 +195,9 @@ describe("Engine attachment admission", () => {
 		await expect(
 			uploads.resolveMessage("message-a", {
 				principalId: "alice",
-				uploadIds: Array.from({ length: 2000 }, (_, index) => `${index}-${"x".repeat(180)}`),
+				uploadIds: Array.from({ length: 129 }, (_, index) => `upload-${index}`),
 			}),
-		).rejects.toThrow("byte budget");
+		).rejects.toThrow("at most 128");
 		const cancelled = new AbortController();
 		cancelled.abort(new Error("delivery cancelled"));
 		await expect(
@@ -242,13 +243,13 @@ describe("Engine attachment admission", () => {
 		await expect(uploads.resolve("bob", "message-a", "upload-a")).rejects.toThrow("owner");
 		await expect(uploads.resolve("alice", "message-b", "upload-a")).rejects.toThrow("message");
 		await expect(uploads.stage("alice", { ...last, name: "changed.png" })).rejects.toThrow("identity changed");
-		expect(await fs.readFile(path.join(blobs.dir, attachment.contentHash.slice(7)))).toEqual(data);
+		expect(await fs.readFile(path.join(blobs.liveDir, attachment.contentHash.slice(7)))).toEqual(data);
 		const [dir] = await fs.readdir(root);
 		expect(await fs.readdir(path.join(root, dir!))).toEqual(["manifest.json"]);
 		expect(await uploads.remove("alice", "upload-a")).toEqual({ removed: true });
 		await expect(new EngineAttachmentUploads(root, blobs).stage("alice", last)).rejects.toThrow("removed");
 		await expect(uploads.resolve("alice", "message-a", "upload-a")).rejects.toThrow("removed");
-		expect(await fs.readFile(path.join(blobs.dir, attachment.contentHash.slice(7)))).toEqual(data);
+		expect(await fs.readFile(path.join(blobs.liveDir, attachment.contentHash.slice(7)))).toEqual(data);
 	});
 
 	it("recovers a torn chunk only when the prefix matches, and removal fences even a not-yet-arrived upload", async () => {
@@ -292,7 +293,7 @@ describe("Engine attachment admission", () => {
 		await expect(uploads.stage("alice", { ...request, contentHash: `sha256:${"0".repeat(64)}` })).rejects.toThrow(
 			"hash",
 		);
-		expect(await fs.readdir(blobs.dir)).toEqual([]);
+		expect(await fs.readdir(blobs.liveDir).catch(() => [])).toEqual([]);
 		await uploads.remove("alice", attachment.uploadId);
 		const aborted = new AbortController();
 		aborted.abort(new Error("cancelled"));
@@ -312,5 +313,33 @@ describe("Engine attachment admission", () => {
 			nextOffset: 0,
 		});
 		expect(await uploads.resolve("alice", empty.clientMessageId, empty.uploadId)).toEqual(empty);
+	});
+
+	it("rejects an oversized file and a 129th file of one message before staging a byte", async () => {
+		using temp = TempDir.createSync("@omp-attachment-limits-");
+		const root = path.join(temp.path(), "uploads");
+		const uploads = new EngineAttachmentUploads(root, new BlobStore(path.join(temp.path(), "blobs")));
+		const chunk = Buffer.from("a");
+		const request = (uploadId: string) => ({
+			...identity(Buffer.from("ab"), uploadId),
+			offset: 0,
+			contentBase64: chunk.toString("base64"),
+		});
+		await expect(
+			uploads.stage("alice", { ...request("huge"), bytes: runtimeLimits.maxAttachmentBytes + 1 }),
+		).rejects.toThrow("MiB file limit");
+		await expect(fs.readdir(root)).rejects.toThrow();
+		for (let index = 0; index < runtimeLimits.maxAttachmentsPerMessage; index++)
+			await uploads.stage("alice", request(`upload-${index}`));
+		await expect(uploads.stage("alice", request("one-too-many"))).rejects.toThrow("at most 128");
+		expect(await fs.readdir(root)).toHaveLength(runtimeLimits.maxAttachmentsPerMessage);
+		// A resumed upload is already counted, and removing one frees its slot.
+		expect(await uploads.stage("alice", request("upload-0"))).toMatchObject({ nextOffset: 1 });
+		await uploads.remove("alice", "upload-0");
+		expect(await uploads.stage("alice", request("one-too-many"))).toMatchObject({ nextOffset: 1 });
+		// The limit is per message, not per owner.
+		expect(await uploads.stage("alice", { ...request("other"), clientMessageId: "message-b" })).toMatchObject({
+			nextOffset: 1,
+		});
 	});
 });

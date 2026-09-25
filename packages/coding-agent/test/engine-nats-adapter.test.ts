@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1381,6 +1381,87 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await client.drain();
 			await adapter.dispose();
 			await secondRuntime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("settles a command that keeps failing as one terminal failed receipt and replays it on resend", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-failing-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		let dispatches = 0;
+		const failing = spyOn(runtime, "reconcile").mockImplementation(async () => {
+			dispatches++;
+			throw new Error("ENOENT: reconcile fixture storage is offline");
+		});
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
+			commandAttempts: 2,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			const consumer = `engine_${adapter.engineRoute}`;
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-always-failing",
+				op: "reconcile",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: "agent-failing",
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {},
+			};
+			const settled = async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
+				return info.num_pending === 0 && info.num_ack_pending === 0;
+			};
+			await js.publish(adapter.commandSubject(command.agentInstanceId, "reconcile"), JSON.stringify(command), {
+				msgID: "delivery-1",
+			});
+			// The first failure is redelivered after its backoff; the second is terminal.
+			await waitFor(async () => dispatches === 2 && (await settled()), 15_000);
+			const receipt = await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+			expect(receipt).toMatchObject({
+				status: "replay",
+				receipt: {
+					outcome: "rejected",
+					detail: {
+						code: "command_failed",
+						message: "Command failed after 2 attempts: ENOENT: reconcile fixture storage is offline",
+					},
+				},
+			});
+
+			await js.publish(adapter.commandSubject(command.agentInstanceId, "reconcile"), JSON.stringify(command), {
+				msgID: "delivery-2",
+			});
+			await waitFor(
+				async () => (await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer)).delivered.stream_seq >= 2,
+			);
+			await waitFor(settled);
+			expect(dispatches).toBe(2);
+			expect(await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration)).toEqual(
+				receipt,
+			);
+		} finally {
+			failing.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
 			broker.process.kill();
 			await broker.process.exited;
 		}
