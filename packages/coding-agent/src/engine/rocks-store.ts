@@ -13,6 +13,7 @@ import type {
 	EngineInboxMutation,
 	EngineInboxSource,
 	EngineInboxTarget,
+	EngineMessageAttachments,
 	EngineProfileRouteState,
 	EngineRetryState,
 } from "./contracts";
@@ -1708,6 +1709,15 @@ export class RocksEngineMutations {
 		});
 	}
 
+	/** A durable native entry owns a directly delivered message's bodies; its ready upload rows are done (C5). */
+	async consumeUploads(references: EngineMessageAttachments): Promise<void> {
+		for (const uploadId of references.uploadIds) {
+			const id = `blob-upload:${attachmentUploadKey(references.principalId, uploadId).key}`;
+			await this.mutation(id, async tx => {
+				if (await tx.get("metadata", id)) await tx.delete("metadata", id);
+			});
+		}
+	}
 	async enqueueInboxItem(
 		target: EngineInboxTarget,
 		source: EngineInboxSource,
@@ -1759,12 +1769,19 @@ export class RocksEngineMutations {
 						state: string;
 						attachment: EngineAttachment;
 					}>("metadata", `blob-upload:${key}`);
-					if (upload?.subtype !== "blob_upload" || upload.owner_hash !== ownerHash || upload.state !== "ready")
+					if (!upload)
+						throw new EngineTargetError(
+							"attachment_expired",
+							"Attachment upload is not ready or has expired; attach the file again",
+						);
+					if (upload.subtype !== "blob_upload" || upload.owner_hash !== ownerHash || upload.state !== "ready")
 						throw new EngineInboxConflictError("Attachment is not ready for this owner");
 					const descriptor = attachmentIdentity(upload.attachment);
 					if (descriptor.uploadId !== uploadId || descriptor.clientMessageId !== source.sourceEventId)
 						throw new EngineInboxConflictError("Attachment belongs to another message");
 					attachmentDescriptors.push(descriptor);
+					// The inbox source now owns the body; its upload row goes in the same batch (C5 consumed).
+					await tx.delete("metadata", `blob-upload:${key}`);
 				}
 			}
 			if (!original)
