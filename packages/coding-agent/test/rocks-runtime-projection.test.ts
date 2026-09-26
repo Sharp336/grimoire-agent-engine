@@ -36,8 +36,10 @@ class Rows extends RuntimeRecords {
 	seed(kind: StorageRuntimeKind, id: string, value: object): void {
 		this.values.set(`${kind}:${id}`, { kind, id, revision: 1, value: value as Record<string, unknown> });
 	}
-	override async get(kind: StorageRuntimeKind, id: string): Promise<StorageRuntimeRecord> {
-		return structuredClone(this.values.get(`${kind}:${id}`) ?? { kind, id, revision: null, value: null });
+	override async getMany(keys: Array<{ kind: StorageRuntimeKind; id: string }>): Promise<StorageRuntimeRecord[]> {
+		return keys.map(({ kind, id }) =>
+			structuredClone(this.values.get(`${kind}:${id}`) ?? { kind, id, revision: null, value: null }),
+		);
 	}
 	override async query(
 		index: StorageRuntimeIndex,
@@ -413,7 +415,7 @@ describe("Rocks runtime atomic public projections", () => {
 });
 function storeWith(rows: Rows): RocksEngineStore {
 	const store = new RocksEngineStore(rows.client);
-	spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+	spyOn(store.records, "getMany").mockImplementation(keys => rows.getMany(keys));
 	spyOn(store.records, "query").mockImplementation((index, key, cursor, max, after) =>
 		rows.query(index, key, cursor, max, after),
 	);
@@ -476,7 +478,7 @@ describe("Rocks bounded reader contracts", () => {
 			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
 		});
 		const store = new RocksEngineStore(client);
-		const read = spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+		const read = spyOn(store.records, "getMany").mockImplementation(keys => rows.getMany(keys));
 		try {
 			const request: RuntimeEventsRequest = {
 				scope: { kind: "catalog" },
