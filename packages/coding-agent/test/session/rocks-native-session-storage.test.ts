@@ -343,6 +343,49 @@ it("resumes after a crash from applied writes left past the durable cut instead 
 	expect(client.barriers).toEqual([11, 12, 13]);
 });
 
+it("keeps a reader's failed applied-prefix barrier retryable without fencing, while a writer's barrier still fences", async () => {
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as StorageProtocolRequest;
+			if (body.operation === "barrier") return new Response("owner failed", { status: 500 });
+			if (body.operation !== "read_context") throw new Error(`Unexpected request ${body.operation}`);
+			// A crashed writer left seq 1 applied past the durable cut.
+			return Response.json({
+				schema: "artel.storage.protocol.response.v1",
+				version: "1.0",
+				requestId: body.read.requestId,
+				incarnation: 1,
+				familyId: body.read.familyId,
+				generationId: body.read.generationId,
+				throughSeq: 0,
+				durableThroughSeq: 0,
+				liveThroughSeq: 1,
+				events: [],
+				nextCursor: null,
+			});
+		},
+	});
+	try {
+		const client = new StorageClient({
+			url: `http://127.0.0.1:${server.port}`,
+			token: "0123456789012345",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+		const storage = new RocksNativeSessionStorage(client, "f", "g");
+		await expect(storage.readContext()).rejects.toMatchObject({ code: "retryable" });
+		expect(client.failure).toBeUndefined();
+		await expect(
+			storage.barrier({ familyId: "f", generationId: "g", throughSeq: 1, incarnation: 1 }),
+		).rejects.toMatchObject({ code: "outcome_unknown" });
+		expect(client.failure?.code).toBe("outcome_unknown");
+	} finally {
+		await server.stop(true);
+	}
+});
+
 it("reads a retained original attachment from a resumed native session without its full archive", async () => {
 	await withContourBlobs(async blobs => {
 		const client = new MemoryNativeClient();
