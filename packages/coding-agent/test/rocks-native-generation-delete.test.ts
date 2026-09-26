@@ -149,3 +149,87 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 	},
 	120_000,
 );
+
+it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testRunRoot))(
+	"an abandoned unbound generation is reclaimed while its agent keeps the bound chat",
+	async () => {
+		const root =
+			workerExecutable && testRunRoot ? await fs.mkdtemp(path.join(testRunRoot, "generation-abandon-")) : undefined;
+		if (root) console.log(`Native generation abandon fixture: ${root}`);
+		const token = `${crypto.randomUUID()}${crypto.randomUUID()}`;
+		const worker = root && workerExecutable ? await startStorageWorker(workerExecutable, root, token, 1) : undefined;
+		const client = worker?.client ?? new StorageClient(readStorageBinding(process.env.ARTEL_STORAGE_TEST_BINDING)!);
+		try {
+			const store = new RocksEngineStore(client);
+			const generation = await store.nextEngineGeneration();
+			const suffix = crypto.randomUUID();
+			const agentInstanceId = `abandon-${suffix}`;
+			const familyId = `family-${suffix}`;
+			const command: EngineCommandIdentity = {
+				commandId: `start-${suffix}`,
+				operation: "start",
+				deviceId: "abandon-fixture-device",
+				engineId: "abandon-fixture-engine",
+				engineGeneration: generation,
+				agentInstanceId,
+				agentInstanceRef: `grimoire://tasks/grimoire/native-abandon-fixture/agents/${suffix}`,
+				executionId: `execution-${suffix}`,
+				attemptId: `attempt-${suffix}`,
+				authorityGeneration: 1,
+				principalId: `owner-${suffix}`,
+				payloadHash: "payload",
+				canonicalHash: "canonical",
+				serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+			};
+			expect(await store.admitCommand(command, generation)).toEqual({ status: "claimed" });
+			for (const generationId of ["bound", "prepared", "marker"])
+				await client.write({
+					operationId: `write-${suffix}-${generationId}`,
+					familyId,
+					generationId,
+					firstSeq: 1,
+					entries: [{ entryId: generationId, parentId: null, kind: "message", payload: { text: generationId } }],
+					durability: "required",
+					dependencies: [],
+				});
+			const sessionFile = `native:${familyId}/bound`;
+			await store.commitAttemptTransition(
+				{
+					commandId: command.commandId,
+					agentInstanceId,
+					executionId: command.executionId!,
+					attemptId: command.attemptId!,
+					bindingId: `binding-${suffix}`,
+					engineAgentId: familyId,
+					profileDigest: "abandon-fixture-profile",
+					state: "running",
+					sessionFile,
+					engineGeneration: generation,
+					bindingGeneration: 1,
+					authorityGeneration: 1,
+				},
+				"running",
+				[],
+				{ requireNew: true, settleCommandId: command.commandId },
+			);
+
+			const read = (generationId: string) =>
+				client.readRange({ familyId, generationId, maxRecords: 1, maxBytes: 1024 });
+			// Polls the real owner's background reclaim; there is no completion signal to await.
+			const reclaim = async (generationId: string) => {
+				await store.abandonNativeGeneration(agentInstanceId, `native:${familyId}/${generationId}`);
+				const deadline = Date.now() + 60_000;
+				while (Date.now() < deadline && (await read(generationId)).liveThroughSeq !== 0) await Bun.sleep(50);
+				expect((await read(generationId)).liveThroughSeq).toBe(0);
+			};
+			await reclaim("prepared");
+			// Reclaim takes one tombstone at a time, so the marker settles only after every pass for "prepared".
+			await reclaim("marker");
+			expect((await read("bound")).liveThroughSeq).toBe(1);
+			expect((await store.getBinding(agentInstanceId))?.sessionFile).toBe(sessionFile);
+		} finally {
+			await worker?.stop();
+		}
+	},
+	120_000,
+);

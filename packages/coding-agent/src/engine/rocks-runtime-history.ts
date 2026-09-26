@@ -38,11 +38,16 @@ export async function nativeScope(
 			: undefined;
 	if (attemptId && (!attempt || attempt.agent_instance_id !== agentId))
 		throw new EngineTargetError("stale_target", "History Attempt belongs to another agent");
-	const path = attempt?.transcript_path ?? binding?.session_file;
-	if (!path?.startsWith("native:"))
+	const path = attempt?.transcript_path ?? binding?.session_file ?? "";
+	let scope: NativeScope;
+	try {
+		scope = parseNativeSessionLocator(path);
+	} catch {
+		// A missing, legacy or corrupt locator retains no readable native history.
 		throw new EngineTargetError("history_expired", "Native history locator is not retained");
+	}
 	return {
-		scope: parseNativeSessionLocator(path),
+		scope,
 		path,
 		attempt,
 		currentAttemptId: attemptId ?? binding?.attempt_id ?? null,
