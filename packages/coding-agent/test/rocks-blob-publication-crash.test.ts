@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BlobStore } from "../src/session/blob-store";
-import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -13,7 +13,7 @@ it.skipIf(!(executable && runRoot))(
 	async () => {
 		const root = await fs.mkdtemp(path.join(runRoot!, "blob-crash-"));
 		console.log(`Blob crash fixture: ${root}`);
-		const blobsDir = path.join(root, "blobs");
+		const blobsDir = storageBlobsDir(root);
 		const store = new BlobStore(blobsDir);
 		const hashes: string[] = [];
 		for (const cut of cuts) {

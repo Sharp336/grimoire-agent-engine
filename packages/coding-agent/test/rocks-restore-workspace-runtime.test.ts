@@ -16,7 +16,7 @@ import { EngineAttachmentUploads } from "../src/engine/runtime-attachments";
 import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/session/rocks-native-session-storage";
-import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -51,6 +51,7 @@ it.skipIf(!(executable && runRoot))(
 			epoch: process.env.GRIMOIRE_STORAGE_RESTORE_ID,
 			plan: process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND,
 			workRoot: process.env.GRIMOIRE_ENGINE_WORK_ROOT,
+			blobs: process.env.PI_BLOBS_DIR,
 		};
 		const suffix = crypto.randomUUID();
 		const agentInstanceRef = `grimoire://tasks/grimoire/restore-fixture/agents/${suffix}`;
@@ -62,7 +63,8 @@ it.skipIf(!(executable && runRoot))(
 			delete process.env.GRIMOIRE_STORAGE_RESTORE_ID;
 			delete process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND;
 			const sourceModel = createMockModel({ handler: () => ({ content: ["retained answer"] }) });
-			const sourceBlobs = new BlobStore(path.join(sourceRoot, "blobs"));
+			const sourceBlobs = new BlobStore(storageBlobsDir(sourceRoot));
+			process.env.PI_BLOBS_DIR = sourceBlobs.dir;
 			runtime = await EngineRuntime.create({
 				databasePath: path.join(sourceRoot, "engine.sqlite"),
 				attachmentBlobStore: sourceBlobs,
@@ -158,7 +160,6 @@ it.skipIf(!(executable && runRoot))(
 								requestId: crypto.randomUUID(),
 								incarnation: worker.incarnation,
 								operationId: backupId,
-								...(operation === "backup_start" ? { blobsDir: path.join(sourceRoot, "blobs") } : {}),
 							},
 						}),
 					},
@@ -192,7 +193,8 @@ it.skipIf(!(executable && runRoot))(
 			);
 			if ((await restore.exited) !== 0)
 				throw new Error(`Storage restore failed: ${await new Response(restore.stderr).text()}`);
-			await fs.rename(path.join(targetRoot, "storage", "blobs"), path.join(targetRoot, "blobs"));
+			const targetBlobs = new BlobStore(storageBlobsDir(targetRoot));
+			process.env.PI_BLOBS_DIR = targetBlobs.dir;
 			worker = await startStorageWorker(executable!, targetRoot, token, 1);
 			sourceWorker = await startStorageWorker(executable!, sourceRoot, token, 2);
 			await expect(fs.access(path.join(targetCwd, "source-only.txt"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -235,7 +237,7 @@ it.skipIf(!(executable && runRoot))(
 			const createTargetRuntime = async () =>
 				EngineRuntime.create({
 					databasePath: path.join(targetRoot, "engine.sqlite"),
-					attachmentBlobStore: new BlobStore(path.join(targetRoot, "blobs")),
+					attachmentBlobStore: targetBlobs,
 					sessionDefaults: {
 						cwd: targetCwd,
 						agentDir: targetRoot,
@@ -322,8 +324,8 @@ it.skipIf(!(executable && runRoot))(
 					provisionMailbox: async () => {},
 				}),
 			).rejects.toMatchObject({
-				code: "invalid_request",
-				message: "This profile does not provide the read tool required for file attachments",
+				code: "attachment_requires_read",
+				message: expect.stringContaining('"note.txt"'),
 			});
 			await runtime.recordCommandRejection({
 				commandId: rejectedStart.commandId,
@@ -331,18 +333,22 @@ it.skipIf(!(executable && runRoot))(
 				executionId: rejectedStart.executionId!,
 				attemptId: rejectedStart.attemptId!,
 				authorityGeneration: 1,
-				code: "invalid_request",
-				message: "This profile does not provide the read tool required for file attachments",
+				code: "attachment_requires_read",
+				message: 'File "note.txt" cannot be sent',
 				operation: "start",
 			});
 			const rejectedAdmission = await runtime.store.admitCommand(rejectedIdentity, runtime.engineGeneration);
 			expect(rejectedAdmission.status).toBe("replay");
 			if (rejectedAdmission.status !== "replay") throw new Error("Rejected Start did not settle");
 			expect(rejectedAdmission.receipt.outcome).toBe("rejected");
-			expect(rejectedAdmission.receipt.detail?.code).toBe("invalid_request");
+			expect(rejectedAdmission.receipt.detail?.code).toBe("attachment_requires_read");
 			expect(await runtime.store.getAttempt(rejectedStart.attemptId!)).toBeUndefined();
 			expect((await runtime.store.getBinding(agentInstanceId))?.attemptId).toBe(stale.attemptId);
 			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
+			// The refused Start leaves no pending target, so the retained item can start again.
+			expect((await runtime.store.runtimeSummary({ principalId, agentInstanceRef })).summary).toMatchObject({
+				pendingStart: null,
+			});
 			const command: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1",
 				commandId: `continue-${suffix}`,
@@ -388,7 +394,7 @@ it.skipIf(!(executable && runRoot))(
 			expect(targetContext.checkpoint.header.cwd).toBe(targetCwd);
 			expect(seenContexts.join("\n")).toContain("retained answer");
 			expect(seenContexts).toHaveLength(3);
-			expect(await new BlobStore(path.join(targetRoot, "blobs")).get(bodyHash)).toEqual(body);
+			expect(await targetBlobs.get(bodyHash)).toEqual(body);
 			const inbox = (await new RocksEngineStore(worker.client).records.get("inbox", clientMessageId)).value;
 			expect(inbox?.disposition).toBe("acknowledged");
 			expect(await runtime.store.nativeSessionHeader(continued)).toEqual({ sessionId, cwd: targetCwd });
@@ -441,6 +447,7 @@ it.skipIf(!(executable && runRoot))(
 				["GRIMOIRE_STORAGE_RESTORE_ID", savedEnv.epoch],
 				["GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND", savedEnv.plan],
 				["GRIMOIRE_ENGINE_WORK_ROOT", savedEnv.workRoot],
+				["PI_BLOBS_DIR", savedEnv.blobs],
 			] as const) {
 				if (value === undefined) delete process.env[key];
 				else process.env[key] = value;

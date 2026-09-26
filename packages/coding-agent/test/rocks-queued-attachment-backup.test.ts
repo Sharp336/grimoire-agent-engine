@@ -10,7 +10,7 @@ import { EngineRuntime } from "../src/engine/runtime";
 import { EngineAttachmentUploads } from "../src/engine/runtime-attachments";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { BlobStore } from "../src/session/blob-store";
-import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -23,7 +23,7 @@ it.skipIf(!(executable && runRoot))(
 		const token = `${crypto.randomUUID()}${crypto.randomUUID()}`;
 		let worker = await startStorageWorker(executable!, root, token, 1);
 		try {
-			const blobs = new BlobStore(path.join(root, "blobs"));
+			const blobs = new BlobStore(storageBlobsDir(root));
 			const store = new RocksEngineStore(worker.client);
 			const uploads = new EngineAttachmentUploads(path.join(root, "uploads"), blobs, store.records);
 			const suffix = crypto.randomUUID();
@@ -139,7 +139,6 @@ it.skipIf(!(executable && runRoot))(
 								requestId: crypto.randomUUID(),
 								incarnation: worker.incarnation,
 								operationId,
-								...(operation === "backup_start" ? { blobsDir: path.join(root, "blobs") } : {}),
 							},
 						}),
 					},
@@ -184,14 +183,13 @@ it.skipIf(!(executable && runRoot))(
 			);
 			const restoreExit = await restore.exited;
 			if (restoreExit !== 0) throw new Error(`Storage restore failed: ${await new Response(restore.stderr).text()}`);
-			await fs.rename(path.join(restoredData, "blobs"), path.join(freshRoot, "blobs"));
 			expect(await fs.readdir(freshRoot)).not.toContain("uploads");
 			worker = await startStorageWorker(executable!, freshRoot, token, 1);
 			const resumed = new RocksEngineStore(worker.client);
 			const inbox = (await resumed.records.get("inbox", clientMessageId)).value;
 			const descriptors = inbox?.attachment_descriptors as EngineAttachmentDescriptor[] | undefined;
 			expect(descriptors).toEqual([attachment, imageAttachment]);
-			const restoredBlobs = new BlobStore(path.join(freshRoot, "blobs"));
+			const restoredBlobs = new BlobStore(storageBlobsDir(freshRoot));
 			const delivery = await new EngineAttachmentUploads(
 				path.join(freshRoot, "uploads"),
 				restoredBlobs,
@@ -201,7 +199,9 @@ it.skipIf(!(executable && runRoot))(
 			expect(delivery.images).toEqual([{ type: "image", mimeType: "image/png", data: image.toString("base64") }]);
 			expect(await restoredBlobs.get(hash)).toEqual(body);
 			const previousBinding = process.env.GRIMOIRE_STORAGE_BINDING;
+			const previousBlobs = process.env.PI_BLOBS_DIR;
 			process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
+			process.env.PI_BLOBS_DIR = restoredBlobs.dir;
 			let runtime: EngineRuntime | undefined;
 			try {
 				const settings = await Settings.loadReadOnly({ cwd: freshRoot, agentDir: freshRoot });
@@ -254,6 +254,8 @@ it.skipIf(!(executable && runRoot))(
 				await runtime?.dispose();
 				if (previousBinding === undefined) delete process.env.GRIMOIRE_STORAGE_BINDING;
 				else process.env.GRIMOIRE_STORAGE_BINDING = previousBinding;
+				if (previousBlobs === undefined) delete process.env.PI_BLOBS_DIR;
+				else process.env.PI_BLOBS_DIR = previousBlobs;
 			}
 		} finally {
 			await worker.stop();

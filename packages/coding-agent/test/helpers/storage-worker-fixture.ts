@@ -2,6 +2,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readStorageBinding, StorageClient } from "../../src/session/storage-client";
 
+/** The worker keeps bodies in `<data>/blobs`; Engine receives this root as ClientHost passes `PI_BLOBS_DIR`. */
+export function storageBlobsDir(root: string): string {
+	return path.join(root, "storage", "blobs");
+}
+
 /** Start an isolated real Rust owner. The caller retains and later disposes its run root. */
 export async function startStorageWorker(executable: string, root: string, token: string, boot: number) {
 	const tokenFile = path.join(root, "token.txt");
@@ -12,8 +17,6 @@ export async function startStorageWorker(executable: string, root: string, token
 			executable,
 			"--data",
 			path.join(root, "storage"),
-			"--blobs-dir",
-			path.join(root, "blobs"),
 			"--token-file",
 			tokenFile,
 			"--ready-file",
