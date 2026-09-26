@@ -376,13 +376,6 @@ export interface EngineRuntimeOptions {
 	mcpServer?: MCPHttpServerConfig;
 	childHistoryTtlMinutes?: number;
 	childHistoryRetention?: "local" | "off" | "grimoire";
-	archiveChildHistory?: (request: {
-		agentInstanceId: string;
-		agentInstanceRef: string;
-		attemptId: string;
-		terminalAt: number;
-		content: string;
-	}) => Promise<void>;
 	sessionDefaults?: Omit<
 		CreateAgentSessionOptions,
 		| "agentId"
@@ -2235,7 +2228,11 @@ export class EngineRuntime {
 					const source = this.#nativeSessionStorage(prior.sessionFile);
 					const { familyId } = parseNativeSessionLocator(prior.sessionFile);
 					const target = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
-					sessionManager = await SessionManager.forkNativeContext(source, target, request.cwd, sessionDir);
+					sessionManager = await SessionManager.forkNativeContext(source, target, request.cwd, sessionDir).catch(
+						error => {
+							throw new Error("Retained AgentSession conversation could not be loaded", { cause: error });
+						},
+					);
 					// Workspace roots are executable authority, not conversation history. The
 					// new profile/settings snapshot repopulates its own roots during session setup.
 					await sessionManager.setAdditionalDirectories([]);
