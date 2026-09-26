@@ -11,6 +11,7 @@
 
 - Native Engine history stores images as `blob:sha256:` references in the contour body root (`PI_BLOBS_DIR`) instead of base64, restores them when a chat is opened, forked or edited, and admits large image or text messages that the 8 MiB entry budget used to reject.
 - A native Engine chat reopened after an unclean stop now confirms writes that were applied but not yet durable, so its next message follows them instead of failing with `write does not follow accepted prefix`.
+- After an Engine restart the model can read a chat's original attachments again; the read resolves them in the active context instead of requiring the full native history.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
 - Pause and Resume remain responsive while neighboring native sessions produce events.
 - Child agents start from a local assignment even when Grimoire is unavailable, retain their results across retries and restarts, and sync their lifecycle after reconnection.

@@ -8,6 +8,7 @@ import {
 	type NativeSessionCheckpoint,
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
+import { withOriginalAttachment } from "../../src/session/original-attachments";
 import {
 	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
 	nativePayloadBlobHashes,
@@ -340,6 +341,34 @@ it("resumes after a crash from applied writes left past the durable cut instead 
 	// A clean reopen reads the durable cut without another barrier.
 	await SessionManager.openNative(new RocksNativeSessionStorage(client, "crash", "root"));
 	expect(client.barriers).toEqual([11, 12, 13]);
+});
+
+it("reads a retained original attachment from a resumed native session without its full archive", async () => {
+	await withContourBlobs(async blobs => {
+		const client = new MemoryNativeClient();
+		const text = "original notes\n";
+		const { hash } = await blobs.put(Buffer.from(text));
+		const manager = SessionManager.createNative(
+			"/originals",
+			new RocksNativeSessionStorage(client, "originals", "root"),
+		);
+		const userId = manager.appendMessage(
+			{ role: "user", content: "read the file", timestamp: 1 },
+			{
+				clientMessageId: "client-1",
+				originalAttachments: [
+					{ name: "notes.txt", mediaType: "text/plain", bytes: text.length, contentHash: `sha256:${hash}` },
+				],
+			},
+		);
+		await manager.flushAndCheckpoint();
+
+		// A restart reopens only the working context; the archive stays unmaterialized.
+		const resumed = await SessionManager.openNative(new RocksNativeSessionStorage(client, "originals", "root"));
+		expect(() => resumed.getBranch()).toThrow("Full native history is not loaded");
+		for (const uri of ["attachment://original/message/client-1/0", `attachment://original/entry/${userId}/0`])
+			expect(await withOriginalAttachment(resumed, uri, filePath => Bun.file(filePath).text())).toBe(text);
+	});
 });
 
 it("keeps ordinary appends in prefix order and flushes only after every buffered write applies", async () => {
