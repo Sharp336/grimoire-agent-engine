@@ -428,6 +428,20 @@ export class RocksEngineMutations {
 			});
 		}
 	}
+	/** An unbound prepared generation goes to reclaim like a deleted one. Its tombstone names no agent, so reclaim
+	 * removes only this generation and never the agent's runtime rows. */
+	async abandonNativeGeneration(scope: string, locator: string): Promise<void> {
+		const { familyId, generationId } = parseNativeSessionLocator(locator);
+		const digest = createHash("sha256").update(`${familyId}\0${generationId}`).digest("hex");
+		await this.mutation(scope, tx =>
+			tx.put("metadata", `native-delete:${digest}`, {
+				subtype: "native_tombstone",
+				family_id: familyId,
+				generation_id: generationId,
+				deleted_at: Date.now(),
+			}),
+		);
+	}
 	async getAttempt(id: string): Promise<RocksAttempt | undefined> {
 		return ((await this.records.get("attempt", id)).value as unknown as RocksAttempt) ?? undefined;
 	}

@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
-import { nativeEntry } from "../src/engine/rocks-runtime-history";
+import { nativeEntry, nativeScope } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
 import type { RocksCommand } from "../src/engine/rocks-runtime-rows";
 import { queryWork, RocksEngineStore } from "../src/engine/rocks-runtime-store";
@@ -709,6 +709,14 @@ describe("Rocks bounded reader contracts", () => {
 		);
 		rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file: "native:family/other" });
 		await expect(nativeEntry(store, "a", "e2", first.lifecycleContext.lineage)).rejects.toThrow("changed scope");
+	});
+	test("a corrupt native locator reads as expired history, not an internal failure", async () => {
+		const rows = fixture();
+		const store = storeWith(rows);
+		for (const session_file of ["native:%E0%A4%A/gen", "native:family-only", "legacy.jsonl"]) {
+			rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file });
+			await expect(nativeScope(store, "a")).rejects.toMatchObject({ code: "history_expired" });
+		}
 	});
 	test("history image ranges read the referenced blob body and never decode an inline record", async () => {
 		using tempDir = TempDir.createSync("@omp-history-image-");

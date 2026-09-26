@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -18,8 +18,10 @@ import {
 	type ToolExecutionStartData,
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { NativeSessionStorage } from "@oh-my-pi/pi-coding-agent/session/native-session-storage";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const pendingAssistant: AssistantMessage = {
 	role: "assistant",
@@ -241,6 +243,50 @@ describe("session exit diagnostics", () => {
 				.getEntries()
 				.some(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE),
 		).toBe(false);
+	});
+
+	it("persists a native session's exit marker through the async close instead of failing a sync flush", async () => {
+		tempDir = TempDir.createSync("@pi-native-session-exit-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const written: SessionEntry[] = [];
+		let throughSeq = 0;
+		// Only the append/barrier surface a fresh native journal uses before dispose.
+		const storage = {
+			locator: "native:family/generation",
+			append(entries: readonly SessionEntry[]) {
+				written.push(...structuredClone(entries));
+				throughSeq += Math.max(1, entries.length);
+				const position = { familyId: "family", generationId: "generation", throughSeq, incarnation: 1 };
+				return { position, completion: Promise.resolve() };
+			},
+			async barrier() {},
+		} as unknown as NativeSessionStorage;
+		const sessionManager = SessionManager.createNative(tempDir.path(), storage, tempDir.path());
+		sessionManager.appendMessage(pendingAssistant);
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const errors = spyOn(logger, "error");
+		try {
+			await session.dispose();
+			session = undefined;
+			expect(errors.mock.calls.map(([message]) => message)).not.toContain("Failed to record session exit");
+		} finally {
+			errors.mockRestore();
+		}
+		expect(
+			written.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE),
+		).toMatchObject({ data: { reason: "dispose", kind: "normal" } });
 	});
 
 	it("treats assistant tool calls as pending even when stopReason is not toolUse", () => {

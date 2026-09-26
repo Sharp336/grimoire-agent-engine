@@ -3195,7 +3195,7 @@ export class EngineRuntime {
 				resolved?.dispose();
 				if (!preparedSession) throw error;
 				try {
-					await this.#discardPreparedSession(preparedSession);
+					await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
 				} catch (cleanupError) {
 					throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
 				}
@@ -3382,14 +3382,19 @@ export class EngineRuntime {
 		};
 	}
 
-	async #discardPreparedSession(sessionManager: SessionManager): Promise<void> {
+	async #discardPreparedSession(agentInstanceId: string, sessionManager: SessionManager): Promise<void> {
 		const sessionFile = sessionManager.getSessionFile();
 		sessionManager.seal();
 		const errors: unknown[] = [];
 		await collectFailure(errors, () => sessionManager.close());
-		// Failed native generations are unbound immutable data; only a legacy fork file is deleted.
-		if (sessionFile && !(this.store instanceof RocksEngineStore)) {
-			await collectFailure(errors, () => this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(sessionFile));
+		// The prepared fork was never bound: a native generation goes to reclaim, a legacy fork file is deleted.
+		if (sessionFile) {
+			const store = this.store;
+			await collectFailure(errors, () =>
+				store instanceof RocksEngineStore
+					? store.abandonNativeGeneration(agentInstanceId, sessionFile)
+					: this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(sessionFile),
+			);
 		}
 		throwCollectedFailures(errors, "Prepared session cleanup failed");
 	}
