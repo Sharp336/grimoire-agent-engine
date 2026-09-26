@@ -43,12 +43,15 @@ export async function runtimeResource(
 			throw new EngineTargetError("stale_target", "Message resource changed identity or version");
 		if (offset > Number(resource.bytes))
 			throw new EngineTargetError("invalid_request", "Message range starts after EOF");
+		// Chunks are at most one live change long, so the chunk holding `offset` starts at or after `lowest`.
+		// The owner orders unsigned integers only: "after" excludes (lowest - 1, any event) instead of (lowest, -1).
+		const lowest = offset - runtimeLimits.liveChangeBytes;
 		const rows = await store.records.query(
 			"event_message" as StorageRuntimeIndex,
 			[String(resource.contentId)],
 			undefined,
 			runtimeLimits.httpPageRecords,
-			[Math.max(-1, offset - runtimeLimits.liveChangeBytes), -1],
+			lowest > 0 ? [lowest - 1, Number.MAX_SAFE_INTEGER] : undefined,
 		);
 		work.rows(rows.records.length);
 		work.value.materializedBytes += Buffer.byteLength(JSON.stringify(rows));

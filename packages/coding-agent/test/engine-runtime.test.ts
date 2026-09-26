@@ -4375,22 +4375,21 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		);
 		await runtime.drain();
 		expect(launches).toHaveLength(6);
-		const taskResults = Array.from(
-			{ length: 7 },
-			(_, index) =>
-				toolResultOf(mock, `tool-child-${index}`)?.content.find(part => part.type === "text")?.text ?? "",
-		);
-		expect(taskResults.slice(0, 6)).toEqual(Array.from({ length: 6 }, (_, index) => `done tool-child-${index}`));
-		expect(taskResults[6]).toContain("maxChildren ceiling (6) reached");
-		expect(launches[0]).toMatchObject({
-			toolCallId: "tool-child-0",
-			workStepId: "child-step-0",
-			maxSpawnDepth: 0,
+		// Parallel calls reserve the ceiling in any order: exactly one of the seven is refused.
+		const outcomes = Array.from({ length: 7 }, (_, index) => {
+			const id = `tool-child-${index}`;
+			const text = toolResultOf(mock, id)?.content.find(part => part.type === "text")?.text ?? "";
+			if (text === `done ${id}`) return "done";
+			return text.includes("maxChildren ceiling (6) reached") ? "ceiling" : text;
 		});
-		expect(launches[1]).toMatchObject({
-			toolCallId: "tool-child-1",
-			workStepId: "child-step-1",
-		});
+		expect([...outcomes].sort()).toEqual(["ceiling", ...Array.from({ length: 6 }, () => "done")]);
+		expect(launches.map(launch => launch.toolCallId)).not.toContain(`tool-child-${outcomes.indexOf("ceiling")}`);
+		for (const launch of launches) {
+			expect(launch).toMatchObject({
+				workStepId: launch.toolCallId.replace("tool-child-", "child-step-"),
+				maxSpawnDepth: 0,
+			});
+		}
 		await runtime.dispose();
 	}, 60_000);
 
