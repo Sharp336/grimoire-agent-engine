@@ -9,6 +9,7 @@ import {
 	nativeSessionHeader,
 } from "./rocks-runtime-history";
 import {
+	inputBodyPrefix,
 	type ProjectedEvent,
 	projectEvent,
 	projectedHolds,
@@ -35,7 +36,6 @@ import {
 	RuntimeQueryWork,
 	type RuntimeTargetRequest,
 	runtimeAuthorized,
-	runtimeInputPreview,
 } from "./runtime-projection";
 import {
 	type RuntimeAccess,
@@ -541,9 +541,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 		);
 		if (!row?.body || row.resolved || row.value.revision !== request.revision)
 			throw new EngineTargetError("stale_target", "Pending input or its revision changed");
-		const bytes = size(row.body);
-		const partial = bytes > runtimeLimits.httpPageBytes - runtimeLimits.bulkPreviewBytes;
-		const input = partial ? runtimeInputPreview(row.body) : row.body;
+		// Only an oversized input has parts; its row keeps the bounded preview and its parts the exact body.
+		const partial = row.parts !== undefined;
 		await this.assertCut(cut, work);
 		return finish(
 			"inputDetail",
@@ -551,9 +550,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 				version: "1.0",
 				agentInstanceRef: request.agentInstanceRef,
 				attemptId: request.attemptId,
-				input,
+				input: row.body,
 				partial,
-				...(partial
+				...(row.parts
 					? {
 							resource: {
 								kind: "input",
@@ -562,7 +561,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 								inputId: request.inputId,
 								revision: request.revision,
 								mediaType: "application/json",
-								bytes,
+								bytes: inputBodyPrefix(row.body).length + row.parts.bytes + 1,
 							},
 						}
 					: {}),

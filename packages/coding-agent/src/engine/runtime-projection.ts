@@ -56,6 +56,17 @@ export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 			},
 			options: ["approve", "deny"],
 		};
+	return {
+		kind: "question",
+		inputId: String(payload.inputId),
+		revision: event.eventId,
+		requestedAt: new Date(event.createdAt).toISOString(),
+		questions: runtimeInputQuestions(payload),
+	};
+}
+
+/** Validated public questions of an input request; they do not depend on the event that carries them. */
+export function runtimeInputQuestions(payload: Record<string, unknown>): Array<Record<string, unknown>> {
 	const questions = payload.questions;
 	if (!Array.isArray(questions) || questions.length < 1 || questions.length > runtimeLimits.inputMaxQuestions)
 		throw new EngineTargetError("invalid_request", "Input question count is outside the owner limit");
@@ -87,17 +98,11 @@ export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 			validateRuntimeValue("pendingInput", {
 				kind: "question",
 				inputId: String(payload.inputId),
-				revision: event.eventId,
+				revision: 0,
 				questions: [{ ...question, options }],
 			});
 	}
-	return {
-		kind: "question",
-		inputId: String(payload.inputId),
-		revision: event.eventId,
-		requestedAt: new Date(event.createdAt).toISOString(),
-		questions: projected,
-	};
+	return projected;
 }
 
 export function runtimeInputPreview(body: Record<string, unknown>): Record<string, unknown> {

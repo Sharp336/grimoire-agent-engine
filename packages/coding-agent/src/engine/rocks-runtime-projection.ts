@@ -12,11 +12,18 @@ import type {
 } from "./rocks-runtime-rows";
 import { lifecycleSummary } from "./runtime-lifecycle";
 import { utf8Tail } from "./runtime-messages";
-import { boundedItems, projectionChange, type RuntimeQueryWork, runtimeInputBody } from "./runtime-projection";
+import {
+	boundedItems,
+	projectionChange,
+	type RuntimeQueryWork,
+	runtimeInputBody,
+	runtimeInputPreview,
+	runtimeInputQuestions,
+} from "./runtime-projection";
 import { type RuntimeChange, runtimeLimits, runtimeToolPageRecords, validateRuntimeValue } from "./runtime-protocol";
 import { publicRuntimeQueueItem } from "./runtime-queue";
 import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
-import type { RuntimeTransaction } from "./runtime-records";
+import type { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
 import type { EngineCommandReceipt, EngineTransitionEvent } from "./store";
 
 export const terminal = new Set(["completed", "cancelled", "failed", "interrupted"]);
@@ -44,6 +51,84 @@ const summaryEvents = new Set([
 ]);
 export const projectionId = (subtype: string, ...parts: string[]) =>
 	`projection_${new Bun.CryptoHasher("sha256").update(JSON.stringify([subtype, ...parts])).digest("hex")}`;
+/** An input request payload up to this size stays whole in its event and projection rows. */
+const INLINE_INPUT_BYTES = 64 * 1024;
+/** Base64 of one part (192 KiB) fits one 256 KiB owner record; four parts fit one 1 MiB owner request. */
+export const INPUT_PART_BYTES = 144 * 1024;
+const INPUT_PARTS_PER_WRITE = 4;
+export const inputPartId = (attemptId: string, hash: string, index: number) =>
+	projectionId("input_part", attemptId, hash, String(index));
+/** Questions JSON of an oversized input, which lives in parts of `hash`; the input's rows keep a preview. */
+export interface InputParts {
+	hash: string;
+	bytes: number;
+}
+function oversizedQuestions(payload: Record<string, unknown>): { json: Buffer; parts: InputParts } | undefined {
+	// The raw payload decides: fields the public body drops (option previews) still weigh on the event row.
+	if (Buffer.byteLength(JSON.stringify(payload)) <= INLINE_INPUT_BYTES) return undefined;
+	const json = Buffer.from(JSON.stringify(runtimeInputQuestions(payload)));
+	return { json, parts: { hash: new Bun.CryptoHasher("sha256").update(json).digest("hex"), bytes: json.length } };
+}
+/** An oversized body is this prefix of its preview, the questions JSON of its parts, then `}`. */
+export function inputBodyPrefix(preview: Record<string, unknown>): Buffer {
+	// `questions` is the last key of an input body, so the head serializes identically in both.
+	const { questions: _, ...head } = preview;
+	return Buffer.from(`${JSON.stringify(head).slice(0, -1)},"questions":`);
+}
+/**
+ * Write the questions of an oversized input request in bounded parts before the event that requests it: one
+ * owner write holds neither the whole body nor the event beside it. Parts are content-addressed and immutable,
+ * so a retry rewrites the same bytes. A request whose event then fails leaves parts nothing names; they go with
+ * the chat's other runtime rows.
+ */
+export async function retainInputParts(
+	records: RuntimeRecords,
+	target: { agentInstanceId: string; attemptId: string },
+	payload: Record<string, unknown>,
+): Promise<void> {
+	const oversized = oversizedQuestions(payload);
+	if (!oversized) return;
+	const { json, parts } = oversized;
+	const count = Math.ceil(parts.bytes / INPUT_PART_BYTES);
+	for (let first = 0; first < count; first += INPUT_PARTS_PER_WRITE)
+		await records.mutate(target.agentInstanceId, async tx => {
+			const indexes = Array.from({ length: Math.min(INPUT_PARTS_PER_WRITE, count - first) }, (_, n) => first + n);
+			await tx.prefetch(
+				indexes.map(index => ({ kind: "projection", id: inputPartId(target.attemptId, parts.hash, index) })),
+			);
+			for (const index of indexes)
+				await tx.put("projection", inputPartId(target.attemptId, parts.hash, index), {
+					subtype: "input",
+					// A part is no pending control: `resolved` keeps it out of the input indexes, while
+					// `agent_instance_id` lets chat deletion reclaim it with the other runtime rows.
+					resolved: true,
+					agent_instance_id: target.agentInstanceId,
+					attempt_id: target.attemptId,
+					position: index,
+					value: { hash: parts.hash, index },
+					part: json.subarray(index * INPUT_PART_BYTES, (index + 1) * INPUT_PART_BYTES).toString("base64"),
+				} satisfies RocksProjection);
+		});
+}
+/**
+ * The payload an input request event retains: an oversized request keeps its exact bounded preview and names
+ * its parts, which must already be retained, so neither the event nor its projection exceeds one owner record.
+ */
+export async function retainedInputPayload(
+	tx: RuntimeTransaction,
+	event: EngineEvent,
+): Promise<Record<string, unknown> | undefined> {
+	const oversized = event.kind === "input_requested" && event.payload && oversizedQuestions(event.payload);
+	if (!oversized) return event.payload;
+	const { hash, bytes } = oversized.parts;
+	if (!(await tx.get("projection", inputPartId(event.attemptId, hash, Math.ceil(bytes / INPUT_PART_BYTES) - 1))))
+		throw new EngineTargetError("payload_too_large", "Oversized input must retain its parts before its event");
+	return {
+		...event.payload,
+		questions: runtimeInputPreview(runtimeInputBody(event)).questions,
+		inputParts: oversized.parts,
+	};
+}
 /** Rows `projectEvent` reads for this event whatever their values, so one owner round trip loads them. */
 export function eventReadKeys(
 	event: Pick<EngineEvent, "agentInstanceId" | "attemptId" | "kind" | "payload" | "causationCommandId">,
@@ -86,6 +171,10 @@ export interface RocksProjection {
 	value: Record<string, unknown>;
 	resolved?: boolean;
 	body?: Record<string, unknown>;
+	/** Set when `body` is the preview of an oversized input. */
+	parts?: InputParts;
+	/** Base64 bytes of one input part. */
+	part?: string;
 }
 export interface ProjectedEvent extends RocksEvent {
 	projection_principal: string;
@@ -493,14 +582,16 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		const inputId = String(event.payload?.inputId ?? event.payload?.approvalId);
 		const id = projectionId("input", event.attemptId, inputId);
 		if (event.kind.endsWith("requested")) {
+			// An oversized request event already carries its preview; its full body is read through its parts.
 			const body = runtimeInputBody(event);
+			const parts = event.payload?.inputParts as InputParts | undefined;
 			await putProjection(
 				tx,
 				event,
 				"input",
 				id,
 				{ inputId, kind: body.kind, revision: event.eventId },
-				{ body, resolved: false },
+				{ body, resolved: false, ...(parts ? { parts } : {}) },
 			);
 		} else if (event.kind.endsWith("resolved")) {
 			const previous = await tx.get<RocksProjection>("projection", id);
