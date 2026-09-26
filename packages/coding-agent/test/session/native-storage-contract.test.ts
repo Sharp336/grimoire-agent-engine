@@ -131,7 +131,11 @@ describe("native session storage contract", () => {
 		expect(await Bun.file(sessionFile).text()).toBe(persisted);
 	});
 
-	it("pins the Core-owned protocol identity without a second schema", () => {
+	it("pins the Core-owned protocol identity to a committed copy of Core's schema bytes", async () => {
+		// Byte-for-byte copy of Core `storage-runtime/protocol-v1.json`: replace it together with the pin.
+		const schema = Bun.file(`${import.meta.dir}/../fixtures/storage-protocol-v1.json`);
+		expect(`sha256:${Bun.SHA256.hash(await schema.arrayBuffer(), "hex")}`).toBe(STORAGE_PROTOCOL_SCHEMA_HASH);
+		expect((await schema.json())["x-artel"].protocolRevision).toBe(STORAGE_PROTOCOL_REVISION);
 		const request = storageProtocolRequest("barrier", {
 			barrier: {
 				requestId: "request-1",
@@ -144,7 +148,6 @@ describe("native session storage contract", () => {
 		});
 		expect(request.schema).toBe(STORAGE_PROTOCOL_SCHEMA);
 		expect(request.version).toBe(STORAGE_PROTOCOL_VERSION);
-		expect(() => assertStorageProtocolHash(STORAGE_PROTOCOL_SCHEMA_HASH)).not.toThrow();
 		expect(() => assertStorageProtocolHash("sha256:stale")).toThrow(/Unsupported storage protocol schema hash/);
 	});
 

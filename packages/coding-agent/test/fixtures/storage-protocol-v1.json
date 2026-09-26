@@ -1,0 +1,2584 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:artel:storage:protocol:v1",
+  "title": "Artel bounded native storage protocol v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "version",
+    "operation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "artel.storage.protocol.v1"
+    },
+    "version": {
+      "const": "1.0"
+    },
+    "operation": {
+      "enum": [
+        "write",
+        "barrier",
+        "read_range",
+        "read_context",
+        "receipt",
+        "health",
+        "metrics",
+        "runtime_query",
+        "read_children",
+        "backup_start",
+        "backup_status",
+        "reclaim_status"
+      ]
+    },
+    "write": {
+      "$ref": "#/$defs/write"
+    },
+    "barrier": {
+      "$ref": "#/$defs/barrier"
+    },
+    "read": {
+      "$ref": "#/$defs/read"
+    },
+    "receipt": {
+      "$ref": "#/$defs/receiptRequest"
+    },
+    "query": {
+      "$ref": "#/$defs/runtimeQuery"
+    },
+    "backup": {
+      "$ref": "#/$defs/backupRequest"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9:_-]+$"
+    },
+    "bytesHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "familyId",
+        "generationId"
+      ],
+      "properties": {
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "familyId",
+        "generationId",
+        "throughSeq"
+      ],
+      "properties": {
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "throughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "parentId",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "entryId": {
+          "$ref": "#/$defs/id"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "payload": {
+          "type": "object"
+        },
+        "state": {
+          "type": "object"
+        },
+        "effect": {
+          "type": "object"
+        }
+      }
+    },
+    "write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "operationId",
+        "familyId",
+        "generationId",
+        "firstSeq",
+        "entries",
+        "durability",
+        "dependencies",
+        "payloadHash",
+        "incarnation"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "operationId": {
+          "$ref": "#/$defs/id"
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "firstSeq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "entries": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "head": {
+          "$ref": "#/$defs/nativeHead"
+        },
+        "state": {
+          "type": "object"
+        },
+        "effect": {
+          "type": "object"
+        },
+        "durability": {
+          "enum": [
+            "buffered",
+            "required"
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        },
+        "payloadHash": {
+          "$ref": "#/$defs/bytesHash"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtimeMutation"
+        },
+        "expectedThroughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "nativeEdits": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/nativeEdit"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "nativeEdits"
+            ],
+            "properties": {
+              "nativeEdits": {
+                "minItems": 1
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "expectedThroughSeq"
+            ]
+          }
+        }
+      ]
+    },
+    "barrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "familyId",
+        "generationId",
+        "throughSeq",
+        "dependencies",
+        "incarnation"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "throughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/dependency"
+          }
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "read": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "familyId",
+        "generationId",
+        "maxRecords",
+        "maxBytes",
+        "incarnation"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "leafId": {
+          "$ref": "#/$defs/id"
+        },
+        "cutSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "maxRecords": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 4194304
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "startEntryId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentId": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "receiptRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "familyId",
+        "generationId",
+        "operationId",
+        "incarnation"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "operationId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "familyId",
+        "generationId",
+        "payloadHash",
+        "firstSeq",
+        "throughSeq",
+        "admissionState",
+        "appliedState",
+        "durabilityState",
+        "outcome",
+        "incarnation"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "#/$defs/id"
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "payloadHash": {
+          "$ref": "#/$defs/bytesHash"
+        },
+        "firstSeq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "throughSeq": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "admissionState": {
+          "enum": [
+            "rejected_before_admission",
+            "admitted_pending",
+            "admitted"
+          ]
+        },
+        "appliedState": {
+          "enum": [
+            "not_applied",
+            "applied"
+          ]
+        },
+        "durabilityState": {
+          "enum": [
+            "not_required",
+            "pending",
+            "durable"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "pending",
+            "success",
+            "outcome_unknown",
+            "storage_error",
+            "backpressure",
+            "conflict",
+            "schema_error",
+            "stale_incarnation"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "backpressure",
+            "conflict",
+            "schema_error",
+            "storage_error",
+            "stale_incarnation",
+            "sequence_gap",
+            "outcome_unknown",
+            "invalid_cursor",
+            "not_found",
+            "retryable"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "writeResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/writeResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "barrierResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/barrierResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "readResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/readResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "receiptResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/receiptResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "healthResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/healthResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "metricsResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/metricsResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "readEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "entryId",
+        "parentId",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "entryId": {
+          "$ref": "#/$defs/id"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "payload": {
+          "type": "object"
+        },
+        "state": {
+          "type": "object"
+        },
+        "effect": {
+          "type": "object"
+        }
+      }
+    },
+    "writeResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "receipt"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "receipt": {
+          "$ref": "#/$defs/receipt"
+        }
+      }
+    },
+    "barrierResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "familyId",
+        "generationId",
+        "throughSeq",
+        "durableThroughSeq",
+        "dependencies"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "throughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "durableThroughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          },
+          "maxItems": 32
+        }
+      }
+    },
+    "readResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "familyId",
+        "generationId",
+        "throughSeq",
+        "durableThroughSeq",
+        "liveThroughSeq",
+        "events",
+        "nextCursor",
+        "head",
+        "state"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "familyId": {
+          "$ref": "#/$defs/id"
+        },
+        "generationId": {
+          "$ref": "#/$defs/id"
+        },
+        "throughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "durableThroughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "liveThroughSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/readEntry"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 1024
+        },
+        "head": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "state": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "receiptResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "receipt"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "receipt": {
+          "$ref": "#/$defs/receipt"
+        }
+      }
+    },
+    "healthResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "status",
+        "incarnation",
+        "ready",
+        "owner"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "degraded",
+            "stopped"
+          ]
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "owner": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "metricsResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "incarnation",
+        "queue"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "queue": {
+          "type": "object"
+        },
+        "rocksdb": {
+          "type": "object"
+        }
+      }
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "error"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parentGenerationId",
+        "forkCutSeq",
+        "forkLeafId"
+      ],
+      "properties": {
+        "parentGenerationId": {
+          "$ref": "#/$defs/id"
+        },
+        "forkCutSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "forkLeafId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "nativeHead": {
+      "type": "object",
+      "properties": {
+        "leafId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lineage": {
+          "$ref": "#/$defs/lineage"
+        },
+        "contextAnchors": {
+          "type": "object"
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "appliedThroughSeq"
+            ]
+          },
+          {
+            "required": [
+              "durableThroughSeq"
+            ]
+          },
+          {
+            "required": [
+              "acceptedThroughSeq"
+            ]
+          },
+          {
+            "required": [
+              "incarnation"
+            ]
+          },
+          {
+            "required": [
+              "firstSeq"
+            ]
+          },
+          {
+            "required": [
+              "throughSeq"
+            ]
+          }
+        ]
+      }
+    },
+    "runtimeKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "metadata",
+            "identity",
+            "binding",
+            "attempt",
+            "command",
+            "effect",
+            "approval",
+            "inbox",
+            "hold",
+            "event",
+            "delivery",
+            "projection",
+            "session"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "runtimeCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "revision"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "metadata",
+            "identity",
+            "binding",
+            "attempt",
+            "command",
+            "effect",
+            "approval",
+            "inbox",
+            "hold",
+            "event",
+            "delivery",
+            "projection",
+            "session"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "runtimePut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "metadata",
+            "identity",
+            "binding",
+            "attempt",
+            "command",
+            "effect",
+            "approval",
+            "inbox",
+            "hold",
+            "event",
+            "delivery",
+            "projection",
+            "session"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "value": {
+          "type": "object",
+          "maxProperties": 128
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "metadata"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "required": [
+                  "subtype"
+                ],
+                "properties": {
+                  "subtype": {
+                    "enum": [
+                      "engine",
+                      "event_counter",
+                      "agent_seq",
+                      "pending_budget",
+                      "open_effects",
+                      "inbox_position",
+                      "start_cancellation",
+                      "native_tombstone",
+                      "native_delete_progress",
+                      "blob_upload",
+                      "restore_workspace"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "projection"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "required": [
+                  "subtype"
+                ],
+                "properties": {
+                  "subtype": {
+                    "enum": [
+                      "summary",
+                      "membership",
+                      "detail",
+                      "message",
+                      "input",
+                      "queue",
+                      "receipt",
+                      "ownership",
+                      "lifecycle"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "inbox"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "required": [
+                  "subtype"
+                ],
+                "properties": {
+                  "subtype": {
+                    "enum": [
+                      "item",
+                      "source"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtimeMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checks",
+        "puts",
+        "deletes"
+      ],
+      "properties": {
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/runtimeCheck"
+          }
+        },
+        "puts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/runtimePut"
+          }
+        },
+        "deletes": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/runtimeKey"
+          }
+        }
+      }
+    },
+    "nativeEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entryId",
+        "entry"
+      ],
+      "properties": {
+        "entryId": {
+          "$ref": "#/$defs/id"
+        },
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/entry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "runtimeQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "incarnation",
+        "selector",
+        "maxRecords",
+        "maxBytes"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "selector": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "keys"
+              ],
+              "properties": {
+                "type": {
+                  "const": "records"
+                },
+                "keys": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 100,
+                  "items": {
+                    "$ref": "#/$defs/runtimeKey"
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "index",
+                "key"
+              ],
+              "properties": {
+                "type": {
+                  "const": "index"
+                },
+                "index": {
+                  "enum": [
+                    "identity_ref",
+                    "identity_parent",
+                    "identity_principal",
+                    "binding_engine_agent",
+                    "binding_session",
+                    "binding_generation",
+                    "attempt_agent",
+                    "attempt_generation",
+                    "command_agent_pending",
+                    "command_processor",
+                    "effect_attempt_call",
+                    "effect_attempt",
+                    "effect_generation",
+                    "approval_effect",
+                    "approval_state",
+                    "inbox_source",
+                    "inbox_session",
+                    "inbox_agent",
+                    "inbox_wake",
+                    "hold_agent",
+                    "event_agent",
+                    "event_attempt",
+                    "event_all",
+                    "delivery_pending",
+                    "projection_target",
+                    "session_agent",
+                    "session_updated",
+                    "kind_primary",
+                    "event_pending",
+                    "event_projection",
+                    "event_message",
+                    "event_message_revision",
+                    "projection_attempt",
+                    "identity_root",
+                    "event_lifecycle",
+                    "attempt_all",
+                    "inbox_agent_pending"
+                  ]
+                },
+                "key": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": [
+                      "string",
+                      "number"
+                    ]
+                  }
+                },
+                "cursor": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "after": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 3,
+                  "items": {
+                    "type": [
+                      "string",
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "description": "Exclusive fixed-index sort tuple, optionally followed by record id. No-sort indexes require [id]. Mutually exclusive with cursor. Numeric order values are nonnegative safe integers."
+                }
+              },
+              "not": {
+                "required": [
+                  "cursor",
+                  "after"
+                ]
+              }
+            }
+          ]
+        },
+        "maxRecords": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 4194304
+        }
+      }
+    },
+    "runtimeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "revision",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "metadata",
+            "identity",
+            "binding",
+            "attempt",
+            "command",
+            "effect",
+            "approval",
+            "inbox",
+            "hold",
+            "event",
+            "delivery",
+            "projection",
+            "session"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "runtimeQueryResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "records",
+        "nextCursor",
+        "indexRevision"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/runtimeRecord"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 8192
+        },
+        "indexRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "runtimeQueryResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/runtimeQueryResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "backupRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "incarnation",
+        "operationId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,120}$"
+        }
+      }
+    },
+    "backupResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "requestId",
+        "incarnation",
+        "backup"
+      ],
+      "properties": {
+        "schema": {
+          "const": "artel.storage.protocol.response.v1"
+        },
+        "version": {
+          "const": "1.0"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        },
+        "incarnation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "backup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operationId",
+            "status"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,120}$"
+            },
+            "status": {
+              "enum": [
+                "running",
+                "complete",
+                "failed",
+                "incomplete",
+                "not_found"
+              ]
+            },
+            "manifest": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "backupId",
+                    "instanceId",
+                    "incarnation",
+                    "blobCount"
+                  ],
+                  "properties": {
+                    "backupId": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "instanceId": {
+                      "type": "string"
+                    },
+                    "incarnation": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    },
+                    "blobCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "maxLength": 1024
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "backupResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/backupResponseSuccess"
+        },
+        {
+          "$ref": "#/$defs/errorResponse"
+        }
+      ]
+    },
+    "reclaimStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "starting",
+            "idle",
+            "running",
+            "blocked_by_child",
+            "awaiting_generation_scan",
+            "failed"
+          ]
+        },
+        "scanned": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deleted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "totalDeleted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "familyId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "consecutiveFailures": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "retryInMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300000
+        },
+        "blobs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "starting",
+                "idle",
+                "running",
+                "pinned",
+                "failed"
+              ]
+            },
+            "scanned": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "deleted": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "error": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "consecutiveFailures": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "retryInMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 300000
+            }
+          }
+        }
+      }
+    }
+  },
+  "x-artel": {
+    "protocolRevision": 13,
+    "hash": {
+      "algorithm": "sha-256",
+      "encoding": "hex",
+      "prefix": "sha256:",
+      "canonicalization": "RFC 8785 JSON Canonicalization Scheme (JCS), UTF-8",
+      "input": "request body with recursively canonicalized objects; requestId and payloadHash omitted before hashing",
+      "numeric": "all protocol integers are JSON numbers in [0,9007199254740991] (2^53-1); payload numbers MUST be finite I-JSON values representable by JCS; reject NaN, Infinity and integers outside this bound; Rust and JS MUST use the same JCS implementation",
+      "key_order": "JCS UTF-16 code-unit property ordering",
+      "exclude": [
+        "requestId",
+        "payloadHash"
+      ]
+    },
+    "idempotency": {
+      "key": [
+        "familyId",
+        "operationId"
+      ],
+      "hash": "payloadHash",
+      "same_hash": "return original receipt exactly (including durable/outcome state)",
+      "different_hash": "conflict; do not mutate",
+      "timeout_after_admission": "outcome_unknown; write continues; resolve by receipt; never auto-retry under a new operationId"
+    },
+    "sequence": {
+      "per": [
+        "familyId",
+        "generationId"
+      ],
+      "firstSeq": "previous appliedThroughSeq + 1",
+      "entries": "span=max(1,entries.length); metadata-only writes consume one operation tick, no synthetic native entry"
+    },
+    "dependencySemantics": {
+      "writeAndBarrier": "wait only for own prefix and listed dependency prefixes; never global drain or future operations"
+    },
+    "durability": {
+      "buffered": "WAL enabled, admission/applied may precede physical sync",
+      "required": "physical WAL sync before durable receipt"
+    },
+    "states": [
+      "rejected_before_admission",
+      "admitted_pending",
+      "applied",
+      "durable",
+      "outcome_unknown",
+      "storage_error",
+      "backpressure",
+      "conflict",
+      "schema_error",
+      "stale_incarnation"
+    ],
+    "errors": {
+      "rejected_before_admission": "not saved",
+      "outcome_unknown": "admitted operation may commit; query receipt",
+      "stale_incarnation": "ticket belongs to prior runtime incarnation",
+      "storage_error": "RocksDB I/O or corruption only; the owner becomes degraded",
+      "invalid_cursor": "cursor was not issued for this read scope/kind/cut/leaf or names a position outside it; request error, storage stays ready",
+      "not_found": "requested entry does not exist",
+      "retryable": "transient read/admission condition (deadline, concurrent reclaim of a deleted generation, decoded page budget); nothing changed, retry",
+      "rejected_before_apply": "conflict/schema validation after admission is durably receipted (outcome conflict, not_applied); receipt lookup never returns outcome_unknown for it"
+    },
+    "receiptFields": [
+      "operationId",
+      "familyId",
+      "generationId",
+      "payloadHash",
+      "firstSeq",
+      "throughSeq",
+      "admissionState",
+      "appliedState",
+      "durabilityState",
+      "outcome",
+      "error",
+      "incarnation"
+    ],
+    "keyEncoding": {
+      "algorithm": "length-prefixed binary segments",
+      "segments": [
+        "tag",
+        "familyId",
+        "generationId",
+        "suffix"
+      ],
+      "integer": "big-endian u64",
+      "tags": {
+        "meta": "m",
+        "head": "h",
+        "event": "e",
+        "receipt": "r",
+        "state": "s",
+        "effect": "f",
+        "generation": "g",
+        "entryIndex": "i"
+      }
+    },
+    "bodyLedger": {
+      "layout": "<data>/blobs/.managed: live/<hash> is the only body (sidecars <hash>.png|jpg|gif|webp|svg are hardlinks), intents/<hash>/<pid>.<startMs>.<uuid>[.abandoned], staging/<uuid>.tmp, locks/<hash>.lock, gc.lock (backup pin). Everything else under the root is ignored.",
+      "publication": "Producer: intent, stage or reuse, link under locks/<hash>.lock, durable owner write, delete intent; on failure rename the intent to .abandoned. An intent of a live producer (pid alive, start within 5 s) pins its hash; a dead or abandoned one is retired with its staging file.",
+      "keys": {
+        "O": "O<ownerKey>: sorted hashes owned by that record",
+        "H": "H<hash>\\0<ownerKey>: owner row, written in the owner's batch",
+        "c": "c<hash>: deletion candidate (logical C; tag C is the native child index). Set when an owner drops the hash or a retired intent leaves an unowned body",
+        "D": "D<hash>: delete in progress; an owner write of that hash is a conflict",
+        "V": "V<hash>: {bytes, children}; the body was hashed once, later references only stat its size"
+      },
+      "sweep": "Per candidate, bounded per pass: no H, lock(hash), no live intent, D under apply_lock, unlink body and sidecars, delete D, c and V."
+    },
+    "stateTransitions": {
+      "admission": "rejected_before_admission | admitted_pending",
+      "apply": "admitted_pending -> applied | storage_error",
+      "durability": "applied -> durable only after required WAL sync; buffered may remain applied",
+      "disconnect": "admitted_pending|applied|durable remains owned; caller sees outcome_unknown until receipt lookup",
+      "stale": "any nonterminal old-incarnation ticket -> stale_incarnation; never durable"
+    },
+    "numericContract": {
+      "maxSafeInteger": 9007199254740991,
+      "seqEncoding": "JSON integer, never decimal float/exponent; reject >2^53-1",
+      "rustJs": "Rust serde and JS JCS serializers must agree; add golden vectors for integer, 1.0, exponent, unicode-key and nested payload cases"
+    },
+    "responses": {
+      "write": "writeResponse",
+      "barrier": "barrierResponse",
+      "read_range": "readResponse",
+      "read_context": "readResponse",
+      "receipt": "receiptResponse",
+      "health": "healthResponse",
+      "metrics": "metricsResponse",
+      "runtime_query": "runtimeQueryResponse",
+      "read_children": "readResponse",
+      "backup_start": "backupResponse",
+      "backup_status": "backupResponse",
+      "reclaim_status": "reclaimStatusResponse"
+    },
+    "readSemantics": {
+      "cutSeqDefault": "durableThroughSeq at one bounded snapshot",
+      "cursor": "Opaque versioned string binds kind, family/generation, frozen cut, selected context leaf and next traversal position; cross-scope/kind/cut/leaf reuse or a forged position is invalid_cursor. No retained snapshot.",
+      "watermarks": "durableThroughSeq is required WAL prefix; liveThroughSeq is applied prefix; no read waits for future writes",
+      "empty": "Empty generation is valid: barrier/read response throughSeq=durableThroughSeq=liveThroughSeq=0 and events=[]; concrete response schemas allow minimum=0.",
+      "context": "Newest-to-oldest selected leaf ancestry only; seq is origin-generation-local, entryId is family-unique. Bounded snapshot, decoded bytes, serialized full response bytes and traversal steps; oversize first record and corrupt records are explicit errors."
+    },
+    "generationSemantics": {
+      "initial": "generation starts at firstSeq=1; first write with firstSeq!=1 is sequence_gap",
+      "continuity": "Admission firstSeq=highest reserved contiguous prefix+1, initially appliedThroughSeq+1; execution follows applied predecessor. Duplicates checked before reservation.",
+      "duplicate": "same family+operationId+payloadHash returns original receipt",
+      "gap": "sequence_gap before admission; no receipt mutation",
+      "lineage": "Immutable parent generation/cut/leaf; first write explicitly depends on parent cut unless zero. No ancestor body copies. Head leaf defaults to final new entry; explicit null means before first entry."
+    },
+    "fencing": {
+      "request": "write/barrier/read/receipt carry incarnation; mismatch returns stale_incarnation before admission",
+      "response": "Envelope echoes current incarnation; embedded receipt preserves original generation and incarnation. Stale write rejected before duplicate lookup. Current-fence rehash conflicts with original receipt."
+    },
+    "hashProjection": {
+      "canonicalInput": "Complete write object after removing only requestId and payloadHash. Includes incarnation. Optional absence is preserved; null object fields rejected. RFC8785 JCS, with all integral payload values outside +/- (2^53-1) rejected.",
+      "goldenVectors": [
+        "same body different requestId => same hash",
+        "integer 1 vs 1.0 canonicalizes identically",
+        "1e3 => 1000",
+        "unicode keys use JCS UTF-16 order",
+        "unsafe integer rejected"
+      ]
+    },
+    "responseEnvelope": "Success OR common errorResponse; authenticated malformed request may use requestId=null. Unauthorized is transport HTTP401 before protocol.",
+    "receiptIdentity": "Family+operationId unique; request generation must match original receipt. Duplicate returns authoritative current state, no second enqueue. Missing receipt is outcome_unknown.",
+    "transport": "POST write/barrier/read/receipt/runtime_query/backup accepts canonical envelope; route must match operation. GET health/metrics/reclaim_status are bodyless. Every route has its own body limit (routes.maxBodyBytes). Before parsing, unauthorized401, unknown route404, admission429, body over the route limit413 and deadline408 are transport-only empty responses; no fabricated requestId or protocol receipt.",
+    "routes": {
+      "/v1/write": {
+        "operation": "write",
+        "method": "POST",
+        "maxBodyBytes": 1310720
+      },
+      "/v1/barrier": {
+        "operation": "barrier",
+        "method": "POST",
+        "maxBodyBytes": 65536
+      },
+      "/v1/read/range": {
+        "operation": "read_range",
+        "method": "POST",
+        "maxBodyBytes": 65536
+      },
+      "/v1/read/context": {
+        "operation": "read_context",
+        "method": "POST",
+        "maxBodyBytes": 65536
+      },
+      "/v1/read/children": {
+        "operation": "read_children",
+        "method": "POST",
+        "maxBodyBytes": 65536
+      },
+      "/v1/runtime/query": {
+        "operation": "runtime_query",
+        "method": "POST",
+        "maxBodyBytes": 262144
+      },
+      "/v1/receipt": {
+        "operation": "receipt",
+        "method": "POST",
+        "maxBodyBytes": 65536
+      },
+      "/v1/backup/start": {
+        "operation": "backup_start",
+        "method": "POST",
+        "maxBodyBytes": 16384
+      },
+      "/v1/backup/status": {
+        "operation": "backup_status",
+        "method": "POST",
+        "maxBodyBytes": 16384
+      },
+      "/v1/reclaim/status": {
+        "operation": "reclaim_status",
+        "method": "GET",
+        "maxBodyBytes": 16384
+      },
+      "/health": {
+        "operation": "health",
+        "method": "GET",
+        "maxBodyBytes": 16384
+      },
+      "/metrics": {
+        "operation": "metrics",
+        "method": "GET",
+        "maxBodyBytes": 16384
+      },
+      "/v1/health": {
+        "operation": "health",
+        "method": "GET",
+        "maxBodyBytes": 16384
+      },
+      "/v1/metrics": {
+        "operation": "metrics",
+        "method": "GET",
+        "maxBodyBytes": 16384
+      }
+    },
+    "runtime": "Finite typed CAS records, fixed derived indexes; every changed key has one expected revision check. Tombstones retain revision. Index cursor binds partition revision; changed partition returns conflict. Full response bounded records+bytes.",
+    "conditional": "runtime or expectedThroughSeq requires idle own scope; successors and dependencies on its pending reservation rejected with backpressure. Known CAS/schema rejection is durably receipted without head advance and never degrades storage. No barrier/dependency may use a not_applied receipt.",
+    "nativeEdits": "Addressed replacement/tombstone at operation cut with expectedThroughSeq; original locator stable, old/fork cuts preserved. Tombstone cannot orphan effective children. read_children pages reverse-parent candidates and may return empty progressing pages.",
+    "nativeContext": "head/state frozen at cut; absent write head/state preserves prior effective values. startEntryId inclusive, current default head anchor only; explicit alternate leaf ignores default checkpoint. No OMP semantics in Rust.",
+    "runtimeIndexOrdering": {
+      "default": [
+        "id"
+      ],
+      "attempt_agent": [
+        "created_at",
+        "id"
+      ],
+      "command_agent_pending": [
+        "received_at",
+        "id"
+      ],
+      "session_updated": [
+        "updated_at",
+        "id"
+      ],
+      "inbox_wake": [
+        "deliver_at",
+        "id"
+      ],
+      "inbox_session": [
+        "position",
+        "id"
+      ],
+      "inbox_agent": [
+        "position",
+        "id"
+      ],
+      "event_agent": [
+        "seq",
+        "id"
+      ],
+      "event_attempt": [
+        "event_id",
+        "id"
+      ],
+      "event_all": [
+        "event_id",
+        "id"
+      ],
+      "event_pending": [
+        "event_id",
+        "id"
+      ],
+      "delivery_pending": [
+        "event_id",
+        "id"
+      ],
+      "projection_target": [
+        "position",
+        "id"
+      ],
+      "projection_attempt": [
+        "position",
+        "id"
+      ],
+      "event_projection": [
+        "event_id",
+        "id"
+      ],
+      "event_message": [
+        "message_offset",
+        "event_id",
+        "id"
+      ],
+      "event_message_revision": [
+        "message_offset",
+        "event_id",
+        "id"
+      ],
+      "event_lifecycle": [
+        "event_id DESC",
+        "id"
+      ],
+      "attempt_all": [
+        "row_id",
+        "id"
+      ],
+      "inbox_agent_pending": [
+        "position",
+        "id"
+      ]
+    },
+    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions.",
+    "runtimeSortTypes": "All ordered scalar fields are safe unsigned integers except session.updated_at (ISO string); inbox.deliver_at may be null (sorts before numeric timestamps). after follows declared sort fields with optional final id; after without id excludes all records equal to that sort tuple. event_lifecycle is descending by positive event_id; after uses its original positive value."
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "operation": {
+              "const": "write"
+            }
+          },
+          "required": [
+            "operation",
+            "write"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "barrier"
+            }
+          },
+          "required": [
+            "operation",
+            "barrier"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "read_range"
+            }
+          },
+          "required": [
+            "operation",
+            "read"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "read_context"
+            }
+          },
+          "required": [
+            "operation",
+            "read"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "read_children"
+            },
+            "read": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/read"
+                },
+                {
+                  "required": [
+                    "parentId"
+                  ]
+                }
+              ]
+            }
+          },
+          "required": [
+            "operation",
+            "read"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "receipt"
+            }
+          },
+          "required": [
+            "operation",
+            "receipt"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "runtime_query"
+            }
+          },
+          "required": [
+            "operation",
+            "query"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "health"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "metrics"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "backup_start"
+            }
+          },
+          "required": [
+            "operation",
+            "backup"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "backup_status"
+            }
+          },
+          "required": [
+            "operation",
+            "backup"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "operation": {
+              "const": "reclaim_status"
+            }
+          },
+          "required": [
+            "operation"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "write"
+                ]
+              },
+              {
+                "required": [
+                  "barrier"
+                ]
+              },
+              {
+                "required": [
+                  "read"
+                ]
+              },
+              {
+                "required": [
+                  "receipt"
+                ]
+              },
+              {
+                "required": [
+                  "query"
+                ]
+              },
+              {
+                "required": [
+                  "backup"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
