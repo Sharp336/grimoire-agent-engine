@@ -30,9 +30,15 @@ interface LifecycleContext extends HistoryLifecycleContext {
 	anchors: Array<{ attemptId: string; entryId: string; eventId: number }>;
 }
 const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
-/** An entry above the inline owner budget lives in an entry blob; history reads its verified body. */
+/**
+ * An entry above the inline owner budget lives in an entry blob; history reads its verified body, and refuses
+ * one beyond the materialization budget from its marker size alone.
+ */
 async function nativePayload(entry: StorageEntry): Promise<Record<string, unknown>> {
-	if (!nativeEntryBlobMarker(entry.payload)) return entry.payload;
+	const marker = nativeEntryBlobMarker(entry.payload);
+	if (!marker) return entry.payload;
+	if (marker.bytes > runtimeLimits.bootstrapMaterializedBytes)
+		throw new EngineTargetError("restore_budget", "Native history entry exceeds its read budget");
 	try {
 		return { ...(await decodeNativeEntry(entry, new BlobStore(getBlobsDir()))) };
 	} catch {

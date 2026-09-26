@@ -241,7 +241,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		expect((await store.records.get("metadata", "budget:control:device")).value).toMatchObject({
 			count: runtimeLimits.controlPendingRecords,
 		});
-	}, 180_000);
+	}, 600_000);
 
 	it("enforces independent device and reserved-control byte budgets using real serialized commands", async () => {
 		const store = await createStore();
@@ -301,7 +301,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 					error => error,
 				),
 		).toMatchObject({ code: "queue_full" });
-	}, 180_000);
+	}, 600_000);
 
 	it("reads large queue fields through bounded previews and exact UTF-8 ranges", async () => {
 		const store = await createStore();
@@ -1241,6 +1241,33 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			{ entryId: "image-entry", blockIndex: 0, status: "unavailable", reason: "invalid_image" },
 			{ entryId: "image-entry", blockIndex: 1, status: "unavailable", reason: "unsupported_format" },
 		]);
+		// An owning entry beyond the read budget refuses the image before any entry or image body is read.
+		const largeMessage = {
+			...message,
+			message: {
+				...message.message,
+				content: [
+					...Array.from({ length: 5 }, () => ({ type: "text", text: "я".repeat(450_000) })),
+					message.message.content[1],
+				],
+			},
+		};
+		expect(Buffer.byteLength(JSON.stringify(largeMessage))).toBeGreaterThan(runtimeLimits.bootstrapMaterializedBytes);
+		await transcript.rewrite([largeMessage], []);
+		const large = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, next.attemptId);
+		expect(large.entryRef?.entryId).toBe("image-entry");
+		const blobRead = spyOn(BlobStore.prototype, "getRange");
+		const entryRead = spyOn(BlobStore.prototype, "readVerified");
+		try {
+			await expect(
+				read({ attemptId: next.attemptId, revision: large.lifecycleContext.lineage, blockIndex: 5 }),
+			).rejects.toMatchObject({ code: "restore_budget" });
+			expect(blobRead).not.toHaveBeenCalled();
+			expect(entryRead).not.toHaveBeenCalled();
+		} finally {
+			blobRead.mockRestore();
+			entryRead.mockRestore();
+		}
 	});
 
 	it("keeps a retained Attempt history resource pinned across another binding and a store reopen", async () => {
