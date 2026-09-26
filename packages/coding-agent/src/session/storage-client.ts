@@ -149,12 +149,21 @@ export class StorageClient {
 		return this.#write(write, body).finally(release);
 	}
 
-	/** A barrier confirms durability of accepted writes: any failure but a proven non-application fences. */
-	barrier(input: Omit<StorageBarrier, "requestId" | "incarnation">): Promise<StorageBarrierSuccessResponse> {
-		return this.#request("control", "/v1/barrier", "barrier", "barrier", input, true).then(response => {
-			// An owner that answers but cannot confirm the prefix leaves accepted writes with unknown durability.
-			if (!("durableThroughSeq" in response) || response.durableThroughSeq < input.throughSeq)
-				throw this.#fence("outcome_unknown", "Storage barrier did not confirm its requested prefix");
+	/**
+	 * A writer's barrier confirms durability of its accepted writes: any unknown outcome leaves those writes
+	 * unknown and fences. A reader only settles a prefix it did not write, so its failure is retryable, like a read.
+	 */
+	barrier(
+		input: Omit<StorageBarrier, "requestId" | "incarnation">,
+		confirmsWrites = true,
+	): Promise<StorageBarrierSuccessResponse> {
+		return this.#request("control", "/v1/barrier", "barrier", "barrier", input, confirmsWrites).then(response => {
+			if (!("durableThroughSeq" in response) || response.durableThroughSeq < input.throughSeq) {
+				const message = "Storage barrier did not confirm its requested prefix";
+				throw confirmsWrites
+					? this.#fence("outcome_unknown", message)
+					: new StorageClientError("retryable", message);
+			}
 			return response as StorageBarrierSuccessResponse;
 		});
 	}

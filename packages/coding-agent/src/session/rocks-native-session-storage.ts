@@ -638,14 +638,18 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			this.#validatePage(page, cutSeq);
 			// A writer that stopped without a barrier can leave applied writes past the durable default cut.
 			// The next write must follow that applied prefix, so make it durable once and read again from it.
+			// This reader did not write that prefix, so a failed barrier is retryable and never fences the client.
 			if (cutSeq === undefined && !confirmed && page.liveThroughSeq > page.throughSeq) {
 				confirmed = true;
-				await this.#client.barrier({
-					familyId: this.#familyId,
-					generationId: this.#generationId,
-					throughSeq: page.liveThroughSeq,
-					dependencies: [],
-				});
+				await this.#client.barrier(
+					{
+						familyId: this.#familyId,
+						generationId: this.#generationId,
+						throughSeq: page.liveThroughSeq,
+						dependencies: [],
+					},
+					false,
+				);
 				continue;
 			}
 			const pageCheckpoint = checkpointFrom(page);
