@@ -848,6 +848,8 @@ export class SessionManager {
 			void ticket.completion.catch(error => this.#noteDiskFailure(error));
 			return ticket;
 		} catch (error) {
+			// Storage refused this write before admitting it and nothing changed: reject only these entries.
+			if (error instanceof NativeSessionWriteRejectedError) throw error;
 			throw this.#noteDiskFailure(error);
 		}
 	}
@@ -2914,6 +2916,7 @@ export class SessionManager {
 				this.#trimNativeContext();
 			} catch (error) {
 				if (!admitted || error instanceof NativeSessionWriteRejectedError) this.#restoreNativeBaseline();
+				if (!admitted && error instanceof NativeSessionWriteRejectedError) throw error;
 				throw this.#noteDiskFailure(error);
 			}
 			return;
