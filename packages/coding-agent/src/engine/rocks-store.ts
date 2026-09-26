@@ -1741,6 +1741,8 @@ export class RocksEngineMutations {
 				kind: "profile_route_changed",
 				payload: { profileRoute: state },
 			});
+			// The public projection stamps the same sequence on its detail; an agent without a canonical ref has
+			// no projection, so the retained route is stamped here as well.
 			await tx.put("attempt", target.attemptId, {
 				...(await tx.get<RocksAttempt>("attempt", target.attemptId)),
 				profile_route_state: JSON.stringify({ ...state, eventSeq: event.seq }),
