@@ -264,29 +264,45 @@ it("queues a read behind a full read lane instead of refusing it", async () => {
 	}
 });
 
-it("keeps one runtime scope from consuming the whole required mutation budget", async () => {
+it("queues runtime mutations beyond their admission instead of refusing them", async () => {
 	const release = Promise.withResolvers<void>();
+	const writes: string[] = [];
+	let running = 0;
+	let peak = 0;
 	const client = {
 		runtimeQuery: async (query: { selector: { keys: Array<{ kind: string; id: string }> } }) => ({
 			records: query.selector.keys.map(key => ({ ...key, revision: null, value: null })),
 			nextCursor: null,
 		}),
 		readRange: async () => ({ liveThroughSeq: 0 }),
-		write: async () => {
-			await release.promise;
-			return {};
+		write: async ({ runtime }: { runtime: StorageRuntimeMutation }) => {
+			const id = runtime.puts[0]!.id;
+			writes.push(id);
+			peak = Math.max(peak, ++running);
+			if (id !== "cold") await release.promise;
+			running--;
+			return { throughSeq: 1 };
 		},
 	} as unknown as StorageClient;
 	const records = new RuntimeRecords(client);
-	const mutate = (scope: string, id: number) =>
-		records.mutate(scope, async tx => {
-			await tx.put("metadata", `${scope}-${id}`, { scope, id });
-		});
-	const firstScope = Array.from({ length: 4 }, (_, id) => mutate("hot", id));
-	const secondScope = Array.from({ length: 4 }, (_, id) => mutate("cold", id));
-	expect(() => mutate("hot", 4)).toThrow("admission exhausted");
+	const mutate = (scope: string, id: string) => records.mutate(scope, tx => tx.put("metadata", id, { id }));
+	// Seven parallel tool calls of one turn mutate one scope; the fifth used to be refused outright.
+	const hot = Array.from({ length: 7 }, (_, index) => mutate("hot", `hot-${index}`));
+	// A queued scope runs one mutation at a time, so a neighbor still commits while it is blocked.
+	await mutate("cold", "cold");
+	// Seven blocked neighbors fill the running budget; the next scope waits for a slot instead of failing.
+	const busy = Array.from({ length: 8 }, (_, index) => mutate(`busy-${index}`, `busy-${index}`));
+	// The fake owner answers in microtasks, so one macrotask lets every unblocked mutation reach its write.
+	const tick = Promise.withResolvers<void>();
+	setImmediate(tick.resolve);
+	await tick.promise;
+	expect(running).toBe(8);
+	expect(writes).not.toContain("busy-7");
 	release.resolve();
-	await Promise.all([...firstScope, ...secondScope]);
+	await Promise.all([...hot, ...busy]);
+	expect(peak).toBe(8);
+	expect(writes.filter(id => id.startsWith("hot-"))).toEqual(Array.from({ length: 7 }, (_, index) => `hot-${index}`));
+	expect(writes).toContain("busy-7");
 });
 
 it("reads event mutations outside the event chain while the owner still checks every counter revision", async () => {
