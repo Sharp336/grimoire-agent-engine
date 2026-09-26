@@ -8,7 +8,9 @@ const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
 const cuts = ["intent", "publication_lock", "canonical", "complete"] as const;
 
-it.skipIf(!(executable && runRoot))(
+// Blob body GC is intentionally disabled by S5.5 C1-доп (storage-runtime reports blobs=disabled);
+// S5.6 B1 re-enables it on the new ledger — restore this gate then.
+it.skip(
 	"recovers real writer crashes at every blob publication cut",
 	async () => {
 		const root = await fs.mkdtemp(path.join(runRoot!, "blob-crash-"));
