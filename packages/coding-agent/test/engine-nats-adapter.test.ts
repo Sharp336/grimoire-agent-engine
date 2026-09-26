@@ -1467,6 +1467,136 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		}
 	}, 30000);
 
+	it("takes back its own claim after a failed release instead of redelivering it as in progress forever", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-release-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		let dispatches = 0;
+		const failing = spyOn(runtime, "reconcile").mockImplementation(async () => {
+			dispatches++;
+			throw new Error("ENOENT: reconcile fixture storage is offline");
+		});
+		let releases = 0;
+		const release = spyOn(runtime.store, "releaseCommand").mockImplementation(async () => {
+			releases++;
+			throw new Error("release fixture storage is offline");
+		});
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
+			onError: () => {},
+			commandAttempts: 3,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			const consumer = `engine_${adapter.engineRoute}`;
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-release-failing",
+				op: "reconcile",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: "agent-release-failing",
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {},
+			};
+			await js.publish(adapter.commandSubject(command.agentInstanceId, "reconcile"), JSON.stringify(command), {
+				msgID: "delivery-1",
+			});
+			// Every failed release leaves the claim on this generation; the next delivery is the next attempt.
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
+				return dispatches === 3 && info.num_pending === 0 && info.num_ack_pending === 0;
+			}, 15_000);
+			expect(releases).toBe(2);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: {
+					outcome: "rejected",
+					detail: {
+						code: "command_failed",
+						message: "Command failed after 3 attempts: ENOENT: reconcile fixture storage is offline",
+					},
+				},
+			});
+		} finally {
+			failing.mockRestore();
+			release.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("ends a peer message that keeps failing after the bounded delivery budget", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-mailbox-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		let deliveries = 0;
+		const delivering = spyOn(runtime, "deliverPeerMessage").mockImplementation(async message => {
+			deliveries++;
+			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+		});
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
+			commandAttempts: 2,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			await adapter.provisionMailbox("agent-c");
+			const message = {
+				schema: "grimoire.agent.message.v1",
+				messageId: "message-failing",
+				fromAgentInstanceId: "agent-a",
+				toAgentInstanceId: "agent-c",
+				authorityGeneration: 1,
+				sentAt: Date.now(),
+				kind: "text",
+				payload: { body: "never delivered" },
+			};
+			await js.publish(adapter.messageSubject("agent-a", "agent-c"), JSON.stringify(message), {
+				msgID: message.messageId,
+			});
+			// Work-queue retention drops the message once it is terminated; a redelivered one stays in the stream.
+			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 0, 15_000);
+			expect(deliveries).toBe(2);
+		} finally {
+			delivering.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
 	it("rejects a Start whose admission keeps failing with a durable receipt instead of dropping it", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-admission-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);

@@ -13,6 +13,9 @@
 - A native Engine chat reopened after an unclean stop now confirms writes that were applied but not yet durable, so its next message follows them instead of failing with `write does not follow accepted prefix`.
 - After an Engine restart the model can read a chat's original attachments again; the read resolves them in the active context instead of requiring the full native history.
 - A native Engine Start that is refused before its Attempt exists, such as a queued wake with a file under a profile without `read`, no longer leaves a pending Start in the chat summary, so Stop and a new Start work again.
+- An Engine command whose claim could not be released after a failure is no longer redelivered as in progress until an Engine restart: the next delivery takes the claim back as a new attempt, so the command ends with a terminal failed receipt after its attempt budget.
+- A peer message that keeps failing to deliver is dropped after the same bounded delivery budget instead of being redelivered every second forever.
+- An Engine event committed together with its command settlement now projects that command as settled.
 - Long answers from fast models no longer stop with `Stream admission capacity exceeded: maxEvents`: the Engine persists the first streamed delta of each block at once and coalesces the rest into at most one durable update per 100 ms or 8 KiB, so model streaming no longer waits on storage for every token.
 - An answer interrupted by a stream capacity limit keeps the text already streamed in chat history instead of showing only the trace, and the overflow no longer escapes as an unhandled rejection that could stop the Engine.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
