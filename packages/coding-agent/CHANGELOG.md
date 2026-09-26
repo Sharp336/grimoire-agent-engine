@@ -6,6 +6,7 @@
 
 - Optional voice runtime and associated native audio bindings; automatic Codex credit redemption, excess uploaders, Ruby/Julia eval, built-in opinionated rules, and terminal animation extras.
 - Removed Advisor background reviews and Prewalk while preserving PlanYolo and normal agents.
+- `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
 
@@ -23,6 +24,8 @@
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.
 
 - Agent tools no longer inherit private Grimoire transport credentials or provider binding keys from the Engine process.
+- Agent tools, including a nested `omp` started from bash, no longer inherit the Engine's contour body root (`PI_BLOBS_DIR`), so their image bodies stay in their own store instead of becoming ownerless bodies the storage worker reclaims.
+- The Engine publishes every body into a storage contour through one asynchronous protocol: an intent pins the body until the record that owns it is applied, and an abandoned or crashed publication leaves the body to the storage worker's reclaim instead of a completion marker written before the owner record.
 - An idle binding reused for a new Attempt now starts the AgentProfile maxChildren ceiling from zero instead of inheriting the previous Attempt's child launch count; failed launches still consume the allowance and the cap still holds within a single Attempt.
 
 ### Added

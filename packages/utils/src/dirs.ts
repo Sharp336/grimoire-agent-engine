@@ -796,12 +796,26 @@ export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
 }
 
+let adoptedBlobsDir: string | undefined;
+
+/**
+ * Keep a storage contour's `PI_BLOBS_DIR` for this process only. Tool children (bash, a nested `omp`)
+ * inherit the process environment and would otherwise write unowned bodies into the contour root,
+ * which the storage worker reclaims; without the variable they use their own agent store.
+ */
+export function adoptBlobsDirFromEnv(): void {
+	const contourRoot = process.env.PI_BLOBS_DIR;
+	adoptedBlobsDir = contourRoot && path.isAbsolute(contourRoot) ? contourRoot : undefined;
+	delete process.env.PI_BLOBS_DIR;
+}
+
 /**
  * Get the content-addressed blob store directory (~/.omp/agent/blobs).
- * Without an explicit agent dir, an absolute `PI_BLOBS_DIR` (a storage contour's own body root) wins.
+ * Without an explicit agent dir, an absolute `PI_BLOBS_DIR` (a storage contour's own body root) wins,
+ * including one adopted by {@link adoptBlobsDirFromEnv}.
  */
 export function getBlobsDir(agentDir?: string): string {
-	const contourRoot = agentDir === undefined ? process.env.PI_BLOBS_DIR : undefined;
+	const contourRoot = agentDir === undefined ? (process.env.PI_BLOBS_DIR ?? adoptedBlobsDir) : undefined;
 	if (contourRoot && path.isAbsolute(contourRoot)) return contourRoot;
 	return dirs.agentSubdir(agentDir, "blobs", "data");
 }

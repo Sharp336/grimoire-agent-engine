@@ -1691,7 +1691,21 @@ export class SessionManager {
 
 	/** Puts a binary blob into the blob store and returns the blob reference. */
 	async putBlob(data: Buffer, options?: BlobPutOptions, signal?: AbortSignal): Promise<BlobPutResult> {
-		return this.#blobs.put(data, options, signal);
+		signal?.throwIfAborted();
+		if (!this.#nativeStorage) return this.#blobs.put(data, options);
+		// A native contour root accepts only managed publication. These bytes are a context image whose
+		// native entry owns the same body, so the pin is not needed past this display link.
+		const publication = await this.#blobs.publish(data, { extension: options?.extension, signal });
+		await publication.release();
+		const { hash } = publication;
+		return {
+			hash,
+			path: publication.path,
+			displayPath: publication.displayPath,
+			get ref() {
+				return `blob:sha256:${hash}`;
+			},
+		};
 	}
 
 	/** Synchronous variant of {@link putBlob} for rebuild-only render paths. */

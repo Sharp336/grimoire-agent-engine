@@ -438,8 +438,8 @@ export class EngineAttachmentUploads {
 						if (!bytesWritten) throw new Error("Attachment write made no progress");
 						written += bytesWritten;
 					}
-					// No per-chunk fsync: import copies, hashes and syncs the canonical blob, so an OS crash
-					// that tears staged bytes fails the final SHA-256 check instead of publishing them.
+					// No per-chunk fsync: publication hashes the staged bytes once before linking them, so an
+					// OS crash that tears staged bytes fails the final SHA-256 check instead of publishing them.
 					currentBytes = offset + chunk.length;
 				}
 			} finally {
@@ -447,12 +447,17 @@ export class EngineAttachmentUploads {
 			}
 			if (currentBytes === attachment.bytes) {
 				await this.#publish(principalId, attachment, "publishing");
-				await this.blobs.importFile(
-					payload,
-					{ hash: attachment.contentHash.slice(7), bytes: attachment.bytes },
-					signal,
+				const publication = await this.blobs.publish(
+					{ file: payload, hash: attachment.contentHash.slice(7), bytes: attachment.bytes },
+					{ signal },
 				);
-				await this.#publish(principalId, attachment, "ready");
+				try {
+					await this.#publish(principalId, attachment, "ready");
+				} catch (error) {
+					await publication.abandon();
+					throw error;
+				}
+				await publication.release();
 				await this.#save(dir, { ...manifest, state: "ready" });
 				await fs.promises.unlink(payload);
 			}
@@ -545,27 +550,26 @@ export class EngineAttachmentUploads {
 		for (const attachment of attachments) {
 			if (!SUPPORTED_IMAGE_MIME_TYPES.has(attachment.mediaType)) continue;
 			signal?.throwIfAborted();
-			const data = Buffer.alloc(attachment.bytes);
-			const hash = new Bun.SHA256();
+			const data = Buffer.allocUnsafe(attachment.bytes);
 			let offset = 0;
-			while (offset < data.length) {
-				signal?.throwIfAborted();
-				const range = await this.blobs.getRange(
+			let present: boolean;
+			try {
+				present = await this.blobs.readVerified(
 					attachment.contentHash.slice(7),
-					offset,
-					Math.min(BLOB_RANGE_BYTES, data.length - offset),
+					attachment.bytes,
+					chunk => {
+						offset += chunk.copy(data, offset);
+					},
+					signal,
 				);
-				if (!range || range.totalBytes !== data.length || !range.data.length)
-					throw new EngineTargetError("source_unavailable", "Attachment bytes changed or are no longer retained");
-				range.data.copy(data, offset);
-				hash.update(range.data);
-				offset += range.data.length;
-			}
-			if (`sha256:${hash.digest("hex")}` !== attachment.contentHash)
+			} catch {
+				signal?.throwIfAborted();
 				throw new EngineTargetError(
 					"source_unavailable",
 					"Attachment SHA-256 no longer matches its uploaded bytes",
 				);
+			}
+			if (!present) throw new EngineTargetError("source_unavailable", "Attachment bytes are no longer retained");
 			if (parseImageMetadata(data)?.mimeType !== attachment.mediaType)
 				throw new EngineTargetError("invalid_request", "Attachment bytes do not match the declared image type");
 			images.push({ type: "image", mimeType: attachment.mediaType, data: data.toString("base64") });
