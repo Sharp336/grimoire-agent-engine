@@ -10,17 +10,49 @@ import {
 	EngineControlQueryClient,
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
+import type { EngineBindingSnapshot } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	bindTestsToStorageWorker();
 	let tempDir: string | undefined;
+
+	/** Complete a running Attempt on a durable native transcript: the owner settles completion only with one. */
+	async function completeNative(runtime: EngineRuntime, binding: EngineBindingSnapshot, event: EngineTransitionEvent) {
+		const familyId = `family-${binding.attemptId}`;
+		const client = runtime.store.storageClient;
+		await client.write({
+			operationId: `transcript-${binding.attemptId}`,
+			familyId,
+			generationId: "main",
+			firstSeq: 1,
+			entries: [
+				{
+					entryId: "leaf",
+					parentId: null,
+					kind: "message",
+					payload: { type: "message", message: { role: "assistant", content: "done" } },
+				},
+			],
+			durability: "required",
+			dependencies: [],
+		});
+		await runtime.store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [event], {
+			transcriptCheckpoint: {
+				sessionId: familyId,
+				sessionPath: `native:${familyId}/main`,
+				leafEntryId: "leaf",
+				byteBoundary: 0,
+				native: { familyId, generationId: "main", throughSeq: 1, incarnation: client.incarnation },
+			},
+		});
+	}
 
 	afterEach(() => {
 		if (tempDir) removeSyncWithRetries(tempDir);
@@ -70,7 +102,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			expect(
 				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
 			).toEqual({ removed: true });
-			await assert.rejects(client.request("attachments.stage", request), /removed/);
+			// Removal discards the staged bytes: the upload can only start over at offset zero.
+			await assert.rejects(
+				client.request("attachments.stage", { ...request, offset: bytes.length }),
+				/offset zero/,
+			);
 			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
 		} finally {
 			await server.close();
@@ -81,6 +117,13 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	it("serves authenticated durable commands and restart-safe oldest-first queries", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-query-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		// The owner projects Attempt events only for AgentInstances with a canonical ref, as every launch carries.
+		for (const id of ["agent-a", "agent-b", "agent-failed", "agent-cancelled"])
+			await runtime.store.registerAgent({
+				agentInstanceId: id,
+				agentInstanceRef: `grimoire://tasks/grimoire/control-query/agents/${id}`,
+				authorityGeneration: 2,
+			});
 		const binding = {
 			bindingId: "binding-a",
 			commandId: "start-a",
@@ -95,7 +138,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			authorityGeneration: 2,
 		};
 		await runtime.store.putBinding(binding);
-		await runtime.store.putAttempt(binding, "completed");
+		await runtime.store.commitAttemptTransition(binding, "running", [], { requireNew: true });
 		await runtime.store.appendEvent({
 			...binding,
 			causationCommandId: "trace-a",
@@ -103,8 +146,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			payload: { state: "completed", reasoning: "must-not-leak" },
 		});
 		const full = "x".repeat(ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS + 20);
-		await runtime.store.appendEvent({
-			...binding,
+		await completeNative(runtime, binding, {
 			causationCommandId: "complete-a",
 			kind: "completed",
 			payload: { assistantFinal: full, transcriptRef: "history://Engine-a" },
@@ -120,9 +162,8 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			profileDigest: "profile-b",
 		};
 		await runtime.store.putBinding(secondBinding);
-		await runtime.store.putAttempt(secondBinding, "completed");
-		await runtime.store.appendEvent({
-			...secondBinding,
+		await runtime.store.commitAttemptTransition(secondBinding, "running", [], { requireNew: true });
+		await completeNative(runtime, secondBinding, {
 			causationCommandId: "complete-b",
 			kind: "completed",
 			payload: { assistantFinal: "second" },
@@ -583,13 +624,14 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			bindingGeneration: 1,
 		};
 		await runtime.store.commitAttemptTransition(binding, "running", [{ kind: "running" }]);
-		const sql = new SQL(`sqlite:${path.join(tempDir, "engine.sqlite").replaceAll("\\", "/")}`);
-		await sql.unsafe(
-			`WITH RECURSIVE children(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM children WHERE n<?)
-			INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at)
-			SELECT 'budget-child-'||n,'grimoire://tasks/grimoire/control-budget/agents/child-'||n,'budget-root','owner',1,1,1 FROM children`,
-			[runtimeLimits.branchControlRecords],
-		);
+		for (let n = 1; n <= runtimeLimits.branchControlRecords; n++)
+			await runtime.store.registerAgent({
+				agentInstanceId: `budget-child-${n}`,
+				agentInstanceRef: `grimoire://tasks/grimoire/control-budget/agents/child-${n}`,
+				parentAgentInstanceId: "budget-root",
+				principalId: "owner",
+				authorityGeneration: 1,
+			});
 		let profileCalls = 0;
 		const server = await startEngineControlQueryServer({
 			runtime,
@@ -636,28 +678,27 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				target: command.browserTarget,
 				error: { code: "restore_budget" },
 			});
+			expect(await runtime.store.intent(binding.agentInstanceId)).toMatchObject({ intentRevision: 0 });
+			expect(await runtime.store.intent("budget-child-1")).toMatchObject({ intentRevision: 0, holds: [] });
 			expect(
-				(await sql.unsafe("SELECT SUM(intent_revision) AS revision FROM engine_agent_identity"))[0]?.revision,
-			).toBe(0);
-			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
-			expect(await sql.unsafe("SELECT * FROM engine_effects")).toHaveLength(0);
-			expect(await sql.unsafe("SELECT kind FROM engine_event_outbox WHERE kind='holds_changed'")).toHaveLength(0);
+				(await runtime.store.pendingEvents(1000)).filter(event => event.kind === "holds_changed"),
+			).toHaveLength(0);
 			expect(profileCalls).toBe(0);
-			await client.request("command", { command }).then(
+			// A retry replays the durable rejection instead of applying the command.
+			const retried = await client.request("command", { command }).then(
 				() => null,
 				(error: unknown) => error,
 			);
-			const records = await sql.unsafe("SELECT command_id,state FROM engine_commands WHERE command_id=?", [
-				command.commandId,
-			]);
-			expect(records).toHaveLength(1);
-			expect(records[0]).toMatchObject({ command_id: command.commandId, state: "settled" });
+			expect(retried).toMatchObject({ message: (denied as Error).message });
+			expect(
+				await client.request("runtime.command.get", { principalId: "owner", commandId: command.commandId }),
+			).toMatchObject({ stage: "rejected", error: { code: "restore_budget" } });
+			expect(await runtime.store.intent(binding.agentInstanceId)).toMatchObject({ intentRevision: 0 });
 		} finally {
 			await server.close();
-			await sql.end();
 			await runtime.dispose();
 		}
-	});
+	}, 120_000);
 	it("serves an exact paused tool baseline through the native request validator", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
