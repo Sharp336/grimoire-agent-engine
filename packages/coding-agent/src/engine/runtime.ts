@@ -54,6 +54,7 @@ import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BLOB_HASH_RE, BlobStore } from "../session/blob-store";
+import { NativeSessionWriteRejectedError } from "../session/native-session-storage";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import {
@@ -76,7 +77,7 @@ import {
 	SessionManager,
 } from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
-import { readStorageBinding, StorageClient } from "../session/storage-client";
+import { readStorageBinding, StorageClient, StorageClientError } from "../session/storage-client";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
@@ -4932,7 +4933,16 @@ export class EngineRuntime {
 						: expectedState === "running")
 				)
 					return false;
-				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+				let transcriptCheckpoint: SessionDurabilityCheckpoint | undefined;
+				try {
+					transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+				} catch (error) {
+					// Unknown durability keeps the Attempt nonterminal (a later Stop can still cut it). A write the
+					// owner definitively rejected never becomes durable, so a failure settles without a new cut.
+					if (state === "completed" || !isRejectedTranscriptWrite(error)) throw error;
+					const detail = error instanceof Error ? error.message : String(error);
+					cause = cause ? `${cause}; transcript not persisted: ${detail}` : `Transcript not persisted: ${detail}`;
+				}
 				const previousHold = binding.manualHold;
 				binding.state = "idle";
 				binding.attemptState = state;
@@ -6625,6 +6635,16 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 
 function isEexist(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+/** The storage owner rejected the transcript write itself; retrying the same prefix cannot make it durable. */
+function isRejectedTranscriptWrite(error: unknown): boolean {
+	for (let current = error, depth = 0; current instanceof Error && depth < 8; current = current.cause, depth++) {
+		if (current instanceof NativeSessionWriteRejectedError) return true;
+		if (current instanceof StorageClientError)
+			return !["outcome_unknown", "retryable", "backpressure"].includes(current.code);
+	}
+	return false;
 }
 
 /** Non-image files reach the model only through the read tool (attachment:// URIs). */

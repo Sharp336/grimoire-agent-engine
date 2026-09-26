@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { StreamAdmissionError } from "@oh-my-pi/pi-ai/utils/stream-admission";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
 import { type EngineLaunchProfile, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES } from "./contracts";
@@ -52,6 +54,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let controlQuery: EngineControlQueryServer | undefined;
 	let retentionTimer: ReturnType<typeof setInterval> | undefined;
 	let retentionSweep: Promise<void> | undefined;
+	const releaseCapacityGuard = interceptUnhandledRejections(isLateStreamCapacityRejection);
 	try {
 		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
 		const artifactRpc =
@@ -160,6 +163,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		});
 		await Promise.race([stop ? Promise.race([stop, processStopSignal()]) : processStopSignal(), brokerExit]);
 	} finally {
+		releaseCapacityGuard();
 		if (retentionTimer) clearInterval(retentionTimer);
 		await controlQuery?.close().catch(reportServiceError);
 		await bridge?.stopAdmission().catch(reportServiceError);
@@ -179,6 +183,15 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		await writeStatus(config, { status: "stopped", pid: process.pid }).catch(() => {});
 		await serviceLock.release().catch(reportServiceError);
 	}
+}
+
+/** A stream capacity failure is delivered out of band: its streams fail and the owning Attempt settles as
+ * interrupted. A provider producer may still reject with the same shared error after the abort; that late
+ * rejection must not end the whole Engine. Every other unhandled rejection stays fatal. */
+export function isLateStreamCapacityRejection(reason: unknown): boolean {
+	if (!(reason instanceof StreamAdmissionError)) return false;
+	logger.debug("Late stream capacity rejection after its Attempt was interrupted", { limit: reason.limit });
+	return true;
 }
 
 export async function launchLocalEngineChild(
