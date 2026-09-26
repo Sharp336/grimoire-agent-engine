@@ -185,12 +185,12 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	}
 }
 
-/** A stream capacity failure is delivered out of band: its streams fail and the owning Attempt settles as
- * interrupted. A provider producer may still reject with the same shared error after the abort; that late
- * rejection must not end the whole Engine. Every other unhandled rejection stays fatal. */
+/** Insurance only: stream capacity failures are delivered out of band (failed streams, aborted signal) and no
+ * producer is thrown into. A rejection that still escapes carries the shared capacity error; it must not end the
+ * whole Engine, but it is a defect worth a warning. Every other unhandled rejection stays fatal. */
 export function isLateStreamCapacityRejection(reason: unknown): boolean {
 	if (!(reason instanceof StreamAdmissionError)) return false;
-	logger.debug("Late stream capacity rejection after its Attempt was interrupted", { limit: reason.limit });
+	logger.warn("Unhandled stream capacity rejection after its Attempt was interrupted", { limit: reason.limit });
 	return true;
 }
 

@@ -1633,14 +1633,23 @@ export class Agent {
 			const bufferedCursorResults = this.#cursorToolResultBuffer.map(({ toolResult }) => toolResult);
 			const retainedToolCallIds = new Set(completedToolCallIds);
 			for (const { toolCallId } of bufferedCursorResults) retainedToolCallIds.add(toolCallId);
+			// A capacity abort fails the loop's own stream, so its aborted-message path cannot run. Text the model
+			// already produced survives that abort exactly as it survives Stop.
+			const keepPartial =
+				shouldEmitVisibleError ||
+				assistantPartial?.content.some(
+					block =>
+						(block.type === "text" && block.text.trim().length > 0) ||
+						(block.type === "thinking" && block.thinking.trim().length > 0),
+				) === true;
 			const errorMsg: AssistantMessage =
-				shouldEmitVisibleError && assistantPartial
+				keepPartial && assistantPartial
 					? {
 							...assistantPartial,
 							content: assistantPartial.content.filter(
 								block => block.type !== "toolCall" || retainedToolCallIds.has(block.id),
 							),
-							stopReason: "error",
+							stopReason: shouldEmitVisibleError ? "error" : "aborted",
 							errorMessage,
 						}
 					: {
@@ -1713,6 +1722,7 @@ export class Agent {
 			} else {
 				this.appendMessage(errorMsg);
 				this.#state.error = errorMessage;
+				if (keepPartial && assistantPartial) this.#emit({ type: "message_end", message: errorMsg });
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {

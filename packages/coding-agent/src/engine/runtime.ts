@@ -156,6 +156,10 @@ const MAX_HISTORY_MESSAGE_CHARS = 48_000;
 const MAX_HISTORY_ACTIVITY_CHARS = 48_000;
 const ASSISTANT_SNAPSHOT_GROWTH_CHARS = 192;
 const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
+// Persisted assistant text is coalesced per block: the first delta of a block is written at once, later
+// deltas at most once per window or byte budget. Replay concatenates the same text either way.
+const ASSISTANT_DELTA_WINDOW_MS = 100;
+const ASSISTANT_DELTA_WINDOW_BYTES = 8 * 1024;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
 const MAX_NATIVE_RESTORE_BYTES = 128 * 1024 * 1024;
@@ -365,6 +369,7 @@ interface AssistantStreamState {
 	streamingSnapshots: number;
 	settled: boolean;
 	blocks: Map<number, AssistantBlockState>;
+	flushTimer?: NodeJS.Timeout;
 }
 
 interface AssistantBlockState {
@@ -377,6 +382,11 @@ interface AssistantBlockState {
 	pendingSurrogate: string;
 	hash: crypto.Hash;
 	settled: boolean;
+	/** Well-formed text received but not yet persisted. */
+	pending: string;
+	pendingBytes: number;
+	/** Queued flush that has not started; it takes all pending text when it runs. */
+	flush?: Promise<void>;
 }
 
 interface ToolInvocationRecord {
@@ -3823,20 +3833,25 @@ export class EngineRuntime {
 							current() ? manager.flushAndCheckpoint() : undefined,
 						);
 						const failed = (error: unknown) => {
-							if (current()) binding.messageWriteError ??= error;
+							if (current() && !(error instanceof StreamAdmissionError)) binding.messageWriteError ??= error;
 						};
 						// Earlier history writes may need this lane; drain them before acquiring it.
 						this.#trackRun(
-							enqueueStreamWork(binding.streamAdmission, checkpoint, target, async () => {
-								const durable = await checkpoint;
-								await this.#inLane(target.agentInstanceId, async () => {
-									if (!durable || !current()) return;
-									await this.#commitAttemptTransition(binding, binding.attemptState, [], {
-										expectedStates: [binding.attemptState],
-										transcriptCheckpoint: durable,
+							enqueueStreamWork(
+								binding.streamAdmission?.signal.aborted ? undefined : binding.streamAdmission,
+								checkpoint,
+								target,
+								async () => {
+									const durable = await checkpoint;
+									await this.#inLane(target.agentInstanceId, async () => {
+										if (!durable || !current()) return;
+										await this.#commitAttemptTransition(binding, binding.attemptState, [], {
+											expectedStates: [binding.attemptState],
+											transcriptCheckpoint: durable,
+										});
 									});
-								});
-							}).catch(failed),
+								},
+							).catch(failed),
 						);
 					}
 				}
@@ -4808,10 +4823,8 @@ export class EngineRuntime {
 			configuredLimits?.maxEventBytes ?? Math.min(ENGINE_STREAM_ADMISSION_MAX_EVENT_BYTES, maxQueuedBytes);
 		const admission = new StreamAdmission({ ...configuredLimits, maxQueuedBytes, maxEventBytes });
 		binding.streamAdmission = admission;
-		const detach = admission.onAbort(error => {
-			binding.messageWriteError ??= error;
-			binding.session.agent.abort(error);
-		});
+		// Capacity failure stops the model; it is not a storage failure, so the already produced text still settles.
+		const detach = admission.onAbort(error => binding.session.agent.abort(error));
 		try {
 			await runWithStreamAdmission(admission, () =>
 				this.#runAdmittedPrompt(binding, input, identity, kind, context, selection, images),
@@ -4901,12 +4914,11 @@ export class EngineRuntime {
 		state: "completed" | "failed" | "interrupted",
 		cause?: string,
 	): Promise<void> {
+		// A response that never reached message_end still owns its coalesced text.
+		if (binding.assistantStream) this.#flushAssistantStream(binding, binding.assistantStream);
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) {
-			const error =
-				binding.messageWriteError instanceof StreamAdmissionError
-					? binding.messageWriteError
-					: new Error("Engine message content could not be persisted", { cause: binding.messageWriteError });
+			const error = new Error("Engine message content could not be persisted", { cause: binding.messageWriteError });
 			if (state === "completed") throw error;
 			cause = error.message;
 		}
@@ -5078,6 +5090,8 @@ export class EngineRuntime {
 				pendingSurrogate: "",
 				hash: crypto.createHash("sha256"),
 				settled: false,
+				pending: "",
+				pendingBytes: 0,
 			};
 			state.blocks.set(index, block);
 		}
@@ -5091,10 +5105,7 @@ export class EngineRuntime {
 			parsedAt: auditSource?.sourceCorrelation === "direct" ? auditSource.parsedAt : undefined,
 			sourceCorrelation: auditSource?.sourceCorrelation,
 		});
-		// The interceptor runs before the public subscriber. Also drain the preceding
-		// message's final write before a new provider block can get ahead of storage.
-		await binding.traceWriteTail;
-		latencyFirst(auditSource, "persistence_tail_ready", auditStream);
+		// The interceptor runs before the public subscriber, so a failed write stops the stream here.
 		if (binding.messageWriteError) throw binding.messageWriteError;
 		if (
 			event.type !== "text_delta" &&
@@ -5122,9 +5133,42 @@ export class EngineRuntime {
 		}
 		const wellFormed = text.toWellFormed();
 		attachLatencyPersistence(block, auditSource, wellFormed === event.delta);
-		await this.#persistAssistantWrite(binding, wellFormed, () =>
-			this.#appendAssistantBlock(binding, state, block, wellFormed, "streaming"),
-		);
+		block.pending += wellFormed;
+		block.pendingBytes += Buffer.byteLength(wellFormed);
+		// The first text of a block is durable before the provider moves on. Later text never waits for storage:
+		// it is written once per window or byte budget, and a queued write takes everything pending when it runs.
+		if (block.revision === 0) await this.#flushAssistantBlock(binding, state, block);
+		else if (block.pendingBytes >= ASSISTANT_DELTA_WINDOW_BYTES)
+			void this.#flushAssistantBlock(binding, state, block);
+		else state.flushTimer ??= setTimeout(() => this.#flushAssistantStream(binding, state), ASSISTANT_DELTA_WINDOW_MS);
+	}
+
+	/** Queue one write for a block's coalesced text; a flush that has not started yet takes all later text too. */
+	#flushAssistantBlock(binding: LiveBinding, state: AssistantStreamState, block: AssistantBlockState): Promise<void> {
+		if (block.flush) return block.flush;
+		const flush = this.#persistAssistantWrite(binding, block.pending, async () => {
+			block.flush = undefined;
+			const text = block.pending;
+			block.pending = "";
+			block.pendingBytes = 0;
+			if (text && !block.settled) await this.#appendAssistantBlock(binding, state, block, text, "streaming");
+		});
+		// A write dropped before it ran leaves its text pending for the next flush or the settle.
+		const done = () => {
+			if (block.flush === flush) block.flush = undefined;
+		};
+		void flush.then(done, done);
+		block.flush = flush;
+		return flush;
+	}
+
+	#flushAssistantStream(binding: LiveBinding, state: AssistantStreamState): void {
+		clearTimeout(state.flushTimer);
+		state.flushTimer = undefined;
+		if (state.attemptId !== binding.attemptId) return;
+		for (const block of state.blocks.values()) {
+			if (block.pending) void this.#flushAssistantBlock(binding, state, block);
+		}
 	}
 
 	async #reconcileAssistantBlock(
@@ -5138,16 +5182,16 @@ export class EngineRuntime {
 		let block = this.#assistantBlock(state, index, stream);
 		if (block.settled) return;
 		const text = content.toWellFormed();
+		let tail = block.pendingSurrogate;
+		block.pendingSurrogate = "";
 		if (block.receivedChars < content.length) {
-			const missing = block.pendingSurrogate + content.slice(block.receivedChars);
-			block.pendingSurrogate = "";
+			tail += content.slice(block.receivedChars);
 			block.receivedChars = content.length;
-			await this.#appendAssistantBlock(binding, state, block, missing.toWellFormed(), "streaming");
-		} else if (block.pendingSurrogate) {
-			const pending = block.pendingSurrogate;
-			block.pendingSurrogate = "";
-			await this.#appendAssistantBlock(binding, state, block, pending.toWellFormed(), "streaming");
 		}
+		const missing = block.pending + tail.toWellFormed();
+		block.pending = "";
+		block.pendingBytes = 0;
+		if (missing) await this.#appendAssistantBlock(binding, state, block, missing, "streaming");
 		if (block.hash.copy().digest("hex") !== crypto.createHash("sha256").update(text).digest("hex")) {
 			block = {
 				...block,
@@ -5156,6 +5200,7 @@ export class EngineRuntime {
 				offset: 0,
 				receivedChars: content.length,
 				pendingSurrogate: "",
+				flush: undefined,
 				hash: crypto.createHash("sha256"),
 			};
 			state.blocks.set(index, block);
@@ -5229,13 +5274,17 @@ export class EngineRuntime {
 
 	#queueBindingWrite<T>(binding: LiveBinding, payload: unknown, work: () => Promise<T>): Promise<T> {
 		const failed = (error: unknown) => {
+			// A capacity abort already stopped the model; the write it dropped is not a storage failure.
+			if (error instanceof StreamAdmissionError) return;
 			binding.messageWriteError ??= error;
 			binding.session.agent.abort(error);
 			logger.error("Engine bounded write failed", { error: error instanceof Error ? error.message : String(error) });
 		};
+		// After a capacity abort only bounded teardown writes remain (settled text, checkpoints); they must land.
+		const admission = binding.streamAdmission?.signal.aborted ? undefined : binding.streamAdmission;
 		let write: Promise<T>;
 		try {
-			write = enqueueStreamWork(binding.streamAdmission, binding.traceWriteTail, payload, work);
+			write = enqueueStreamWork(admission, binding.traceWriteTail, payload, work);
 		} catch (error) {
 			failed(error);
 			write = Promise.reject(error);
@@ -5256,6 +5305,9 @@ export class EngineRuntime {
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
 		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, message.timestamp);
 		if (state.attemptId !== binding.attemptId || state.settled) return;
+		// The settle reconciles every block, pending coalesced text included.
+		clearTimeout(state.flushTimer);
+		state.flushTimer = undefined;
 		// These are the exact native blocks which may execute next, not a guess
 		// based on the latest text or wall-clock timestamps. Replace per response.
 		binding.toolOrigins = {

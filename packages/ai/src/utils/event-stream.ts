@@ -1,6 +1,6 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent } from "../types";
-import { getStreamAdmission } from "./stream-admission";
+import { getStreamAdmission, StreamAdmissionError } from "./stream-admission";
 
 /** Anything a stream watchdog can consult for in-flight consumer-side local work. */
 export interface LocalWorkSource {
@@ -58,7 +58,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		if (this.done) return;
 		this.deliver(event);
 
-		if (this.isComplete(event)) {
+		if (!this.done && this.isComplete(event)) {
 			this.done = true;
 			this.resultSettled = true;
 			this.resolveFinalResult(this.extractResult(event));
@@ -87,7 +87,16 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 				sharedPartialEnvelope = value.partial;
 			}
 		}
-		const release = this.#admission?.reserve(event, sharedPartialEnvelope);
+		let release: (() => void) | undefined;
+		try {
+			release = this.#admission?.reserve(event, sharedPartialEnvelope);
+		} catch (error) {
+			if (!(error instanceof StreamAdmissionError)) throw error;
+			// Capacity failure is out of band: consumers see this failed stream and producers the
+			// aborted admission signal. Throwing into a producer would only leak its rejection.
+			this.fail(error);
+			return;
+		}
 		const waiter = this.waiting.shift();
 		if (waiter) {
 			const result = { value: event, done: false };
@@ -209,7 +218,14 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	 * the event silence while it is pending as a provider stall.
 	 */
 	async trackLocalWork<TWork>(work: Promise<TWork>): Promise<TWork> {
-		const release = this.#admission?.reserveLocalWork();
+		let release: (() => void) | undefined;
+		try {
+			release = this.#admission?.reserveLocalWork();
+		} catch (error) {
+			// The caller stops waiting here; the already-started work must not leak its rejection.
+			work.catch(() => {});
+			throw error;
+		}
 		this.#pendingLocalWork++;
 		try {
 			return await work;
