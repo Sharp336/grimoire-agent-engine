@@ -220,12 +220,15 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 }
 
 export class BlobStore {
+	/** Absolute: Windows lifts MAX_PATH only for absolute paths, and `.abandoned` intent names run long. */
+	readonly dir: string;
 	readonly #checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "lock_wait", hash: string) => void;
 	/** `checkpoint` is a fault-injection seam for isolated publication crash tests. */
 	constructor(
-		readonly dir: string,
+		dir: string,
 		checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "lock_wait", hash: string) => void,
 	) {
+		this.dir = path.resolve(dir);
 		this.#checkpoint = checkpoint;
 	}
 	get liveDir(): string {
