@@ -349,4 +349,17 @@ describe("BlobStore async publication responsiveness", () => {
 			await holder.exited;
 		}
 	}, 15_000);
+
+	it("settles an abandoned pin under a relative root whose absolute paths exceed MAX_PATH", async () => {
+		using tempDir = TempDir.createSync("@artel-s56-long-root-");
+		// Windows extends only absolute paths past 260 characters; the intent's `.abandoned` name is the longest.
+		const root = path.relative(process.cwd(), path.join(tempDir.path(), "r".repeat(200), "blobs"));
+		const store = new BlobStore(root);
+		const data = Buffer.from("long root publication");
+		const publication = await store.publish(data);
+		await publication.abandon();
+		expect(await fs.readdir(path.join(store.intentsDir, publication.hash))).toEqual([
+			expect.stringMatching(/\.abandoned$/),
+		]);
+	});
 });
