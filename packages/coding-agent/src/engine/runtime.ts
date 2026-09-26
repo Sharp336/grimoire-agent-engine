@@ -596,7 +596,7 @@ export class EngineRuntime {
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
 		if (store instanceof RocksEngineStore) {
-			await runtime.attachmentUploads.reconcileReady();
+			await runtime.attachmentUploads.sweepAbandoned();
 			runtime.#nativeDeleteRun = store.reconcilePendingNativeDeletes().catch(error => {
 				logger.warn("Native generation deletion recovery failed", { error: String(error) });
 			});
