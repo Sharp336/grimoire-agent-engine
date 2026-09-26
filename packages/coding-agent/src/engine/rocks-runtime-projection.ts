@@ -1,4 +1,4 @@
-import type { StorageRuntimeIndex } from "../session/storage-protocol";
+import type { StorageRuntimeIndex, StorageRuntimeKey } from "../session/storage-protocol";
 import { type EngineEvent, type EngineInboxItem, type EngineTarget, EngineTargetError } from "./contracts";
 import { encodeCursor } from "./rocks-runtime-cursor";
 import type {
@@ -44,6 +44,40 @@ const summaryEvents = new Set([
 ]);
 export const projectionId = (subtype: string, ...parts: string[]) =>
 	`projection_${new Bun.CryptoHasher("sha256").update(JSON.stringify([subtype, ...parts])).digest("hex")}`;
+/** Rows `projectEvent` reads for this event whatever their values, so one owner round trip loads them. */
+export function eventReadKeys(
+	event: Pick<EngineEvent, "agentInstanceId" | "attemptId" | "kind" | "payload" | "causationCommandId">,
+): StorageRuntimeKey[] {
+	const agent = event.agentInstanceId;
+	const keys: StorageRuntimeKey[] = [{ kind: "identity", id: agent }];
+	if (event.attemptId)
+		keys.push(
+			{ kind: "attempt", id: event.attemptId },
+			{ kind: "projection", id: projectionId("ownership", "events", event.attemptId) },
+		);
+	if (event.causationCommandId)
+		keys.push({ kind: "projection", id: projectionId("ownership", "command", event.causationCommandId) });
+	if (event.kind === "message_updated") {
+		const value = event.payload ?? {};
+		const message = String(value.messageId);
+		keys.push(
+			{
+				kind: "projection",
+				id: projectionId("message", event.attemptId, message, String(value.blockId), String(value.stream)),
+			},
+			{ kind: "projection", id: projectionId("ownership", agent, message) },
+		);
+	}
+	if (summaryEvents.has(event.kind))
+		keys.push(
+			{ kind: "metadata", id: "engine" },
+			{ kind: "binding", id: agent },
+			{ kind: "metadata", id: `budget:ordinary:${agent}` },
+			{ kind: "metadata", id: "budget:control:device" },
+			...["pause", "stop", "recovery"].map(hold => ({ kind: "hold" as const, id: `${agent}:${hold}` })),
+		);
+	return keys;
+}
 export interface RocksProjection {
 	subtype: string;
 	agent_instance_id: string;
@@ -243,6 +277,14 @@ export async function projectedHolds(
 		if (seen.has(current.agent_instance_id) || seen.size >= runtimeLimits.ancestorRecords)
 			throw new EngineTargetError("restore_budget", "Ancestor projection exceeds its bounded acyclic path");
 		seen.add(current.agent_instance_id);
+		const agent = current.agent_instance_id;
+		// One owner round trip per ancestor level: its holds and its parent.
+		await tx.prefetch([
+			...["pause", "stop", "recovery"].map(hold => ({ kind: "hold" as const, id: `${agent}:${hold}` })),
+			...(current.parent_agent_instance_id
+				? [{ kind: "identity" as const, id: current.parent_agent_instance_id }]
+				: []),
+		]);
 		for (const kind of ["pause", "stop", "recovery"]) {
 			const hold = await tx.get<RocksHold>("hold", `${current.agent_instance_id}:${kind}`);
 			if (work) {

@@ -24,7 +24,7 @@ import {
 	restoreDescriptor,
 	validateRestorePlan,
 } from "./rocks-restore-workspace";
-import { projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
+import { eventReadKeys, projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
 	bindingTarget,
@@ -986,8 +986,34 @@ export class RocksEngineMutations {
 		}
 	}
 
+	/** Starts an event: marks its counters and loads the rows its projection (and `fence`) read in one round trip. */
+	async eventReads(
+		tx: RuntimeTransaction,
+		target: EventTarget,
+		event: EngineTransitionEvent,
+		fence = false,
+	): Promise<void> {
+		const counters = [`agent-seq:${target.agentInstanceId}`, "events"];
+		tx.sequence(...counters);
+		await tx.prefetch([
+			...(fence
+				? [
+						{ kind: "metadata" as const, id: "engine" },
+						{ kind: "binding" as const, id: target.agentInstanceId },
+					]
+				: []),
+			...counters.map(id => ({ kind: "metadata" as const, id })),
+			...eventReadKeys({
+				agentInstanceId: target.agentInstanceId,
+				attemptId: target.attemptId,
+				kind: event.kind,
+				payload: event.payload,
+				causationCommandId: event.causationCommandId ?? target.commandId,
+			}),
+		]);
+	}
 	async append(tx: RuntimeTransaction, target: EventTarget, event: EngineTransitionEvent): Promise<EngineEvent> {
-		await tx.reserveEvents();
+		await this.eventReads(tx, target, event);
 		const seq = await this.counter(tx, `agent-seq:${target.agentInstanceId}`, "agent_seq", 1);
 		const eventId = await this.counter(tx, "events", "event_counter", 1);
 		const stored: RocksEvent = {
@@ -1009,7 +1035,7 @@ export class RocksEngineMutations {
 			attempt_id: target.attemptId,
 			published_at: null,
 		};
-		await tx.put("event", String(eventId), stored);
+		await tx.create("event", String(eventId), stored);
 		await this.projectEvent(tx, stored);
 		return stored;
 	}
@@ -1043,6 +1069,7 @@ export class RocksEngineMutations {
 			event.agentInstanceId,
 			async tx => {
 				const target = { ...event, commandId: event.causationCommandId };
+				await this.eventReads(tx, target, event, true);
 				await this.assertFence(tx, target);
 				return this.append(tx, target, { kind: event.kind, payload: event.payload });
 			},
@@ -1059,6 +1086,7 @@ export class RocksEngineMutations {
 		receipt: EngineCommandReceipt | "applied" | "rejected" = "applied",
 	): Promise<EngineEvent> {
 		return this.mutation(target.agentInstanceId, async tx => {
+			await this.eventReads(tx, target, event, true);
 			await this.assertFence(tx, target);
 			const result = await this.append(tx, target, event);
 			if (command) await this.settle(tx, command, typeof receipt === "string" ? { outcome: receipt } : receipt);

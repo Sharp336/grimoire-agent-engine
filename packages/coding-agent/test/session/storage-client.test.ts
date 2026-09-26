@@ -1,7 +1,12 @@
 import { expect, it } from "bun:test";
 import { RuntimeRecords } from "../../src/engine/runtime-records";
-import { StorageClient, storageCanonicalJson } from "../../src/session/storage-client";
-import { STORAGE_PROTOCOL_SCHEMA_HASH, type StorageWrite } from "../../src/session/storage-protocol";
+import { StorageClient, StorageClientError, storageCanonicalJson } from "../../src/session/storage-client";
+import {
+	STORAGE_PROTOCOL_SCHEMA_HASH,
+	type StorageRuntimeMutation,
+	type StorageRuntimeRecord,
+	type StorageWrite,
+} from "../../src/session/storage-protocol";
 
 interface TestRequest {
 	operation: string;
@@ -235,6 +240,71 @@ it("keeps one runtime scope from consuming the whole required mutation budget", 
 	expect(() => mutate("hot", 4)).toThrow("admission exhausted");
 	release.resolve();
 	await Promise.all([...firstScope, ...secondScope]);
+});
+
+it("reads event mutations outside the event chain while the owner still checks every counter revision", async () => {
+	// Owner model: revision +1 per applied put, a stale check rejects the whole batch, seqs follow receipts.
+	const rows = new Map<string, StorageRuntimeRecord>();
+	const seqs = new Map<string, number>();
+	const calls = { query: 0, cut: 0 };
+	const slow = Promise.withResolvers<void>();
+	const slowStarted = Promise.withResolvers<void>();
+	const client = {
+		runtimeQuery: async (query: { selector: { keys: Array<{ kind: "metadata"; id: string }> } }) => {
+			calls.query++;
+			if (query.selector.keys.some(key => key.id === "slow")) {
+				slowStarted.resolve();
+				await slow.promise;
+			}
+			return {
+				records: query.selector.keys.map(key => rows.get(key.id) ?? { ...key, revision: null, value: null }),
+				nextCursor: null,
+			};
+		},
+		readRange: async ({ familyId }: { familyId: string }) => {
+			calls.cut++;
+			return { liveThroughSeq: seqs.get(familyId) ?? 0 };
+		},
+		write: async ({
+			familyId,
+			firstSeq,
+			runtime,
+		}: {
+			familyId: string;
+			firstSeq: number;
+			runtime: StorageRuntimeMutation;
+		}) => {
+			if (firstSeq !== (seqs.get(familyId) ?? 0) + 1) throw new StorageClientError("sequence_gap", "gap");
+			if (runtime.checks.some(check => (rows.get(check.id)?.revision ?? null) !== check.revision))
+				throw new StorageClientError("conflict", "runtime record revision mismatch");
+			for (const put of runtime.puts) rows.set(put.id, { ...put, revision: (rows.get(put.id)?.revision ?? 0) + 1 });
+			seqs.set(familyId, firstSeq);
+			return { throughSeq: firstSeq };
+		},
+	} as unknown as StorageClient;
+	const records = new RuntimeRecords(client);
+	const event = (scope: string, reads: string[] = []) =>
+		records.mutate(scope, async tx => {
+			tx.sequence("events");
+			for (const id of reads) await tx.get("metadata", id);
+			const count = ((await tx.get<{ count: number }>("metadata", "events"))?.count ?? 0) + 1;
+			await tx.put("metadata", "events", { count });
+			return count;
+		});
+
+	expect(await event("warm")).toBe(1);
+	const blocked = event("blocked", ["slow"]);
+	await slowStarted.promise;
+	// A neighbor's slow read does not hold the chain: this event commits meanwhile, warm, in one write.
+	const before = { ...calls };
+	expect(await event("warm")).toBe(2);
+	expect(calls).toEqual(before);
+	slow.resolve();
+	expect(await blocked).toBe(3);
+	// Another writer bumps the counter: the cached revision conflicts, and the retry reads it again.
+	rows.set("events", { kind: "metadata", id: "events", revision: 99, value: { count: 10 } });
+	expect(await event("warm")).toBe(11);
+	expect(rows.get("events")).toMatchObject({ revision: 100, value: { count: 11 } });
 });
 
 it("fences all later calls after the owner incarnation changes", async () => {
