@@ -12,6 +12,7 @@ import {
 	type ProjectedEvent,
 	projectEvent,
 	projectedHolds,
+	projectedReceipt,
 	projectionId,
 	type RocksProjection,
 	runtimeReceipt,
@@ -1012,9 +1013,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 						return (
 							kind === source.kind &&
 							// State has no top-level attemptId, so the owner indexes it in the agent channel.
-							// Its nested target still fences delivery to the selected Attempt.
+							// Its nested target fences delivery to the selected Attempt exactly: an Attempt-less
+							// state reaches only an agent without one. Receipts and queue notices are AGI-level.
 							(source.agentOnly
-								? attempt == null || (change.kind === "state" && attempt === source.attempt)
+								? change.kind === "state"
+									? (attempt ?? null) === (source.attempt ?? null)
+									: attempt == null
 								: attempt === source.attempt)
 						);
 					});
@@ -1153,7 +1157,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 						: row.operation === "start" && attempt && terminal.has(attempt.state)
 							? "execution_terminal"
 							: "applied",
-			receipt: row.receipt ?? undefined,
+			receipt: projectedReceipt(row) ?? undefined,
 			rawCanonicalHash: row.canonical_hash,
 			browserPayloadHash: identity.browserPayloadHash,
 			target: {
