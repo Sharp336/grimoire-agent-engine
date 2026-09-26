@@ -12,8 +12,12 @@ import type {
 
 const recordKey = (kind: StorageRuntimeKind, id: string) => `${kind}\0${id}`;
 const scopeId = (scope: string) => `runtime_${new Bun.CryptoHasher("sha256").update(scope).digest("hex")}`;
-const PENDING_LIMITS = { required: 8, buffered: 32 } as const;
-const PER_SCOPE_PENDING_LIMITS = { required: 4, buffered: 16 } as const;
+// A family runs one mutation at a time; the rest wait, oldest first, in its tail. These bound only that waiting
+// memory, so a caller is refused just when a runaway scope or Engine has queued far beyond any real turn.
+const PENDING_LIMITS = { required: 1024, buffered: 4096 } as const;
+const PER_SCOPE_PENDING_LIMITS = { required: 64, buffered: 256 } as const;
+// Family heads that may run at once; a head beyond them waits, oldest first, for a finishing head's slot.
+const RUNNING_LIMITS = { required: 8, buffered: 32 } as const;
 // Owner records are at most 256 KiB, so seven exact keys fit the 2 MiB client response budget.
 const BATCH_KEYS = 7;
 const BATCH_BYTES = 2 * 1024 * 1024;
@@ -26,6 +30,9 @@ export class RuntimeRecords {
 	#eventTail = Promise.resolve();
 	readonly #pendingByFamily = new Map<string, { required: number; buffered: number }>();
 	#pending = { required: 0, buffered: 0 };
+	readonly #running = { required: 0, buffered: 0 };
+	/** Family heads waiting for a running slot, oldest first. A finishing head hands its slot to the first. */
+	readonly #runQueue = { required: [] as Array<() => void>, buffered: [] as Array<() => void> };
 	/** Last applied runtime seq per family. A family writes through one tail, so its receipt is the next cut. */
 	readonly #cuts = new Map<string, number>();
 	/** Committed event counter rows. Only event-chain holders write them, so under the chain they are current. */
@@ -86,6 +93,24 @@ export class RuntimeRecords {
 		await previous;
 		return () => next.resolve();
 	}
+	/**
+	 * No deadline of its own: every running head is bounded by its storage requests' deadlines and a fence fails it
+	 * at once, so the wait is too. A timer here would only turn a slow owner back into refused mutations.
+	 */
+	async #takeSlot(durability: "required" | "buffered"): Promise<void> {
+		if (this.#running[durability] < RUNNING_LIMITS[durability]) {
+			this.#running[durability]++;
+			return;
+		}
+		const turn = Promise.withResolvers<void>();
+		this.#runQueue[durability].push(turn.resolve);
+		await turn.promise;
+	}
+	#handOverSlot(durability: "required" | "buffered"): void {
+		const next = this.#runQueue[durability].shift();
+		if (next) next();
+		else this.#running[durability]--;
+	}
 	mutate<T>(
 		scope: string,
 		work: (tx: RuntimeTransaction) => Promise<T>,
@@ -104,6 +129,7 @@ export class RuntimeRecords {
 		this.#pendingByFamily.set(familyId, familyPending);
 		let releaseEvents: (() => void) | undefined;
 		const run = (this.#tails.get(familyId) ?? Promise.resolve())
+			.then(() => this.#takeSlot(durability))
 			.then(async () => {
 				for (let attempt = 0; attempt < 4; attempt++) {
 					// Every mutation depends on its read/check prefix. Keep those reads on the
@@ -168,7 +194,10 @@ export class RuntimeRecords {
 				}
 				throw new StorageClientError("conflict", "Runtime mutation conflict budget exhausted");
 			})
-			.finally(() => releaseEvents?.());
+			.finally(() => {
+				releaseEvents?.();
+				this.#handOverSlot(durability);
+			});
 		const tail = run.then(
 			() => {},
 			() => {},
