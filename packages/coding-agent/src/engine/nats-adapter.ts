@@ -981,6 +981,8 @@ export async function dispatchEngineCommand(options: {
 						context,
 						agentInstanceId: command.agentInstanceId,
 						agentInstanceRef,
+						displayName: optionalRecordString(command.payload, "displayName"),
+						delegationHint: optionalRecordString(command.payload, "delegationHint"),
 						parentAgentInstanceId: optionalRecordString(
 							command as unknown as Record<string, unknown>,
 							"parentAgentInstanceId",

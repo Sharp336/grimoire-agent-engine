@@ -429,6 +429,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
 			commandA.agentInstanceRef = "grimoire://tasks/grimoire/nats-test/agents/agent-a";
 			commandA.payload.clientMessageId = "client-message-a";
+			commandA.payload = {
+				...commandA.payload,
+				displayName: "Runtime Gardener",
+				delegationHint: "Engine broker integration",
+			};
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
@@ -476,6 +481,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						clientMessageId: "client-message-a",
 					},
 				],
+			});
+			expect(runtime.agentRegistry.get(engineAgentId("agent-a"))).toMatchObject({
+				id: engineAgentId("agent-a"),
+				displayName: "Runtime Gardener",
+				delegationHint: "Engine broker integration",
 			});
 
 			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
