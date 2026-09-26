@@ -2148,8 +2148,9 @@ export class RocksEngineMutations {
 						await this.mutation(id, async tx => {
 							const identity = await tx.get<RocksIdentity>("identity", id);
 							if (!identity) return [];
-							const hold = await tx.get<RocksHold>("hold", `${id}:recovery`);
-							if (hold?.command_id === `recovery:${generation}`) return [];
+							// A recovery hold from an earlier restart still waits for the user; placing it again
+							// would only bump the intent revision and stale every pending UI command.
+							if (await tx.get<RocksHold>("hold", `${id}:recovery`)) return [];
 							identity.intent_revision++;
 							await tx.put("identity", id, identity);
 							await tx.put("hold", `${id}:recovery`, {

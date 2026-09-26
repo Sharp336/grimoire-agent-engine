@@ -132,6 +132,7 @@ describe("EngineRuntime", () => {
 		enableLsp: false,
 	};
 
+
 	it("keeps each launch's actual settings on its initiating native message after profile change and restart", async () => {
 		const mock = createMockModel({ reasoning: true, handler: { content: ["done"] } });
 		Object.assign(mock, {

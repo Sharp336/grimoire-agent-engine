@@ -431,6 +431,7 @@ export class EngineTargetError extends Error {
 			| "launch_failed"
 			| "attachment_requires_read"
 			| "attachment_expired"
+			| "attachment_requires_images"
 			| "command_failed"
 			| "cancelled",
 		message: string,

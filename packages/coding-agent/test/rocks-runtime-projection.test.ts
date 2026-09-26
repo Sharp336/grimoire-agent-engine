@@ -65,6 +65,8 @@ class Rows extends RuntimeRecords {
 					return row.kind === "event" && v?.message_content_id === key[0] && v?.message_revision === key[1];
 				case "event_message":
 					return row.kind === "event" && v?.message_content_id === key[0];
+				case "kind_primary":
+					return row.kind === key[0];
 				default:
 					return false;
 			}
@@ -376,6 +378,32 @@ describe("Rocks runtime atomic public projections", () => {
 		);
 		const summary = await store.runtimeSummary({ principalId: "p", agentInstanceRef: ref });
 		expect((summary.summary as Record<string, unknown>).pendingStart).toBeNull();
+	});
+
+	test("a restart keeps an existing recovery hold instead of placing it again", async () => {
+		const rows = fixture();
+		rows.seed("attempt", "attempt", { ...(await rows.get("attempt", "attempt")).value, state: "completed" });
+		// A message queued before the Engine was lost stays pending across restarts until the user acts.
+		rows.seed("inbox", "queued", {
+			subtype: "item",
+			agent_instance_id: "a",
+			disposition: "pending",
+			engine_generation: 1,
+		});
+		const store = storeWith(rows);
+		spyOn(store.records, "mutate").mockImplementation(async (_scope, work) => {
+			const tx = new RuntimeTransaction(rows);
+			const result = await work(tx);
+			const { puts, deletes } = tx.mutation();
+			for (const put of puts) rows.seed(put.kind, put.id, put.value);
+			for (const row of deletes) rows.values.delete(`${row.kind}:${row.id}`);
+			return result;
+		});
+		expect((await store.interruptGeneration(2)).map(event => event.kind)).toEqual(["holds_changed"]);
+		const held = await store.intent("a");
+		expect(held.holds).toMatchObject([{ kind: "recovery" }]);
+		expect(await store.interruptGeneration(3)).toEqual([]);
+		expect(await store.intent("a")).toEqual(held);
 	});
 	test("new input and its attention/detail appear in the same mutation; resolution removes pending input", async () => {
 		const tx = new RuntimeTransaction(fixture());
