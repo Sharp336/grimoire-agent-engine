@@ -127,6 +127,8 @@ import { waitForEngineWake } from "./wake";
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
+// The full result shares one bounded storage write with its terminal event; beyond it the transcript ref serves it.
+const MAX_TERMINAL_RESULT_BYTES = 512 * 1024;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 const MAX_HISTORY_MESSAGE_CHARS = 48_000;
@@ -4162,7 +4164,9 @@ export class EngineRuntime {
 	#completionPayload(binding: LiveBinding, attemptMessageStart: number, full = false): EngineCompletionPayload {
 		const yielded = terminalYield(binding.session.messages, attemptMessageStart);
 		const final = yielded.found ? JSON.stringify(yielded.data) : (binding.session.getLastAssistantText() ?? "");
-		const outputTruncated = !full && final.length > MAX_ASSISTANT_FINAL_CHARS;
+		const outputTruncated =
+			final.length > MAX_ASSISTANT_FINAL_CHARS &&
+			!(full && Buffer.byteLength(JSON.stringify(final)) <= MAX_TERMINAL_RESULT_BYTES);
 		return {
 			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,
 			...(!yielded.found && binding.lastAssistantMessageId

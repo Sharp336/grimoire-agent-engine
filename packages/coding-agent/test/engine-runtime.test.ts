@@ -4156,6 +4156,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(maxInFlightBytes).toBeLessThanOrEqual(runtimeLimits.deliveryBatchBytes);
 		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
 		expect(completedAttempt?.state, completedAttempt?.cause ?? undefined).toBe("completed");
+		// A result beyond one storage write stays bounded; its transcript serves the rest.
+		expect(completedAttempt?.result_payload).toMatchObject({
+			outputTruncated: true,
+			transcriptRef: `history://${started.engineAgentId}`,
+		});
 		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
 		const page = await runtime.store.runtimeMessages(request);
 		const baseline = (page.items as Array<Record<string, unknown>>)[0];
@@ -4406,6 +4411,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			responses: [taskCalls, { content: ["done first"] }, taskCalls, { content: ["done second"] }],
 		});
 		const launches: string[] = [];
+		let failedSecondRound = false;
 		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
 			resolveSessionProfile: async () => ({
 				options: { model: mock.model },
@@ -4414,7 +4420,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}),
 			launchChild: async request => {
 				launches.push(request.parentAttemptId);
-				if (request.parentAttemptId === "attempt-b" && request.toolCallId === "tool-child-0") {
+				// Parallel task calls reserve the ceiling in any order, so the second round fails its first launch.
+				if (request.parentAttemptId === "attempt-b" && !failedSecondRound) {
+					failedSecondRound = true;
 					throw new Error("child unavailable");
 				}
 				return {
@@ -4463,19 +4471,33 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(
 			runtime.agentRegistry.get(first.engineAgentId)?.session,
 		);
-		// The second round's last model call sees both rounds' task results in order.
-		const texts = mock.calls
+		// The second round's last model call sees both rounds' task results; each round has its own three.
+		const results = mock.calls
 			.at(-1)!
 			.context.messages.flatMap(message =>
-				message.role === "toolResult" ? [message.content.find(part => part.type === "text")?.text ?? ""] : [],
+				message.role === "toolResult"
+					? [{ id: message.toolCallId, text: message.content.find(part => part.type === "text")?.text ?? "" }]
+					: [],
 			);
-		const resultsA = texts.slice(0, 3);
-		const resultsB = texts.slice(3);
-		expect(resultsA.slice(0, 2)).toEqual(["done tool-child-0", "done tool-child-1"]);
-		expect(resultsA[2]).toContain("maxChildren ceiling (2) reached");
-		expect(resultsB[0]).toContain("Task execution failed: child unavailable");
-		expect(resultsB[1]).toBe("done tool-child-1");
-		expect(resultsB[2]).toContain("maxChildren ceiling (2) reached");
+		expect(results).toHaveLength(6);
+		const outcomes = results.map(({ id, text }) => {
+			if (text === `done ${id}`) return "done";
+			if (text.includes("Task execution failed: child unavailable")) return "failed";
+			if (text.includes("maxChildren ceiling (2) reached")) return "ceiling";
+			return text;
+		});
+		for (const [start, expected] of [
+			[0, ["ceiling", "done", "done"]],
+			[3, ["ceiling", "done", "failed"]],
+		] as const) {
+			expect(
+				results
+					.slice(start, start + 3)
+					.map(result => result.id)
+					.sort(),
+			).toEqual(["tool-child-0", "tool-child-1", "tool-child-2"]);
+			expect(outcomes.slice(start, start + 3).sort()).toEqual([...expected]);
+		}
 		expect(launches).toEqual(["attempt-a", "attempt-a", "attempt-b", "attempt-b"]);
 		const entries = (await nativeHistory(runtime, "parent-reuse-agent")).entries;
 		expect(entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
@@ -4593,48 +4615,52 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const foreignParentChildId = "history-child-foreign-parent";
 		const foreignTaskChildId = "history-child-foreign-task";
 		let runtimeRef: EngineRuntime;
-		let advertised = "";
-		const reads = new Map<string, string>();
-
-		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-			if (input === "spawn truncated child") {
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine parent did not expose task");
-				const result = await task.execute("spawn-history-child", {
-					profileRef: "gctx:2222222222222222",
-					workStepId: "child-history",
-					assignment: "Inspect child history",
-				});
-				advertised = result.content.find(part => part.type === "text")?.text ?? "";
-				session.sessionManager.appendMessage({
-					role: "toolResult",
-					toolCallId: "spawn-history-child",
-					toolName: "task",
-					content: [{ type: "text", text: advertised }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-			}
-			if (input === "read retained children") {
-				const read = session.getToolByName("read");
-				if (!read) throw new Error("Engine parent did not expose read");
-				for (const childId of [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId]) {
-					const childEngineId = `Engine-${new Bun.SHA256().update(childId).digest("hex").slice(0, 32)}`;
-					try {
-						const result = await read.execute(`read-${childId}`, { path: `history://${childEngineId}` });
-						reads.set(childId, result.content.find(part => part.type === "text")?.text ?? "");
-					} catch (error) {
-						reads.set(childId, error instanceof Error ? error.message : String(error));
-					}
+		const childIds = [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId];
+		const engineIdOf = (id: string) => `Engine-${new Bun.SHA256().update(id).digest("hex").slice(0, 32)}`;
+		// The parent spawns through task, then reads child history after restart, both through the agent loop.
+		const mock = createMockModel({
+			handler: context => {
+				if (context.messages.at(-1)?.role === "toolResult") return { content: ["done"] };
+				const user = context.messages.filter(message => message.role === "user").at(-1)!;
+				if (JSON.stringify(user.content).includes("spawn truncated child")) {
+					return {
+						content: [
+							{
+								type: "toolCall" as const,
+								id: "spawn-history-child",
+								name: "task",
+								arguments: {
+									profileRef: "gctx:2222222222222222",
+									workStepId: "child-history",
+									assignment: "Inspect child history",
+								},
+							},
+						],
+					};
 				}
-			}
+				return {
+					content: childIds.map(childId => ({
+						type: "toolCall" as const,
+						id: `read-${childId}`,
+						name: "read",
+						arguments: { path: `history://${engineIdOf(childId)}` },
+					})),
+				};
+			},
+		});
+		const textOf = (toolCallId: string) =>
+			toolResultOf(mock, toolCallId)?.content.find(part => part.type === "text")?.text ?? "";
+
+		// Children keep their input as a plain transcript; only the parent runs the model.
+		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			if (input === "spawn truncated child" || input === "read retained children") return session.prompt(input);
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			return true;
 		};
 
 		const created = await createRuntime(dispatch, {
 			resolveSessionProfile: async () => ({
-				options: {},
+				options: { model: mock.model },
 				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
 				dispose() {},
 			}),
@@ -4696,9 +4722,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			parentProfile,
 		);
 		await runtimeRef.drain();
-		expect(advertised).toContain(
-			`history://Engine-${new Bun.SHA256().update(visibleChildId).digest("hex").slice(0, 32)}`,
-		);
+		expect(textOf("spawn-history-child")).toContain(`history://${engineIdOf(visibleChildId)}`);
 
 		const startForeign = async (id: string, agentInstanceRef: string, parentAgentInstanceId: string) => {
 			const request = {
@@ -4765,10 +4789,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			parentProfile,
 		);
 		await restarted.drain();
-		expect(reads.get(visibleChildId)).toContain("retained child transcript marker");
-		expect(reads.get(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
-		expect(reads.get(foreignParentChildId)).toContain("Unknown agent");
-		expect(reads.get(foreignTaskChildId)).toContain("Unknown agent");
+		expect(textOf(`read-${visibleChildId}`)).toContain("retained child transcript marker");
+		expect(textOf(`read-${unadvertisedChildId}`)).toContain(`private marker ${unadvertisedChildId}`);
+		expect(textOf(`read-${foreignParentChildId}`)).toContain("Unknown agent");
+		expect(textOf(`read-${foreignTaskChildId}`)).toContain("Unknown agent");
 		await restarted.dispose();
 	}, 60_000);
 
@@ -5535,10 +5559,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const enabledTools = new Map<string, string[]>();
 		const { runtime, cwd } = await createRuntime(
 			async (session, input) => {
+				// A carried fork holds only the working context; its archive is not materialized.
 				priorUserMessages.set(
 					input,
 					session.sessionManager
-						.getBranch()
+						.getContextBranch()
 						.flatMap(entry =>
 							entry.type === "message" &&
 							entry.message.role === "user" &&
@@ -5725,7 +5750,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 	it("removes only an uncommitted carried transcript when a pending start is cancelled", async () => {
-		const { runtime, cwd } = await createRuntime(async (session, input) => {
+		const { runtime, cwd, options } = await createRuntime(async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
 		});
@@ -5830,11 +5855,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			sessionId: queued.item.sessionId,
 			disposition: "pending",
 		});
-		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+		// A later processor generation replays the durable rejection instead of starting the cancelled command.
+		await runtime.dispose();
+		const restarted = await openRuntime(options);
+		expect(await restarted.store.admitCommand(command, restarted.engineGeneration)).toMatchObject({
 			status: "replay",
 			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
 		});
-		await runtime.dispose();
 	}, 60_000);
 
 	it("aborts profile resolution only after a pending Start is durably cancelled", async () => {
@@ -5842,7 +5869,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const releaseResolution = Promise.withResolvers<void>();
 		let promptCalls = 0;
 		let disposeCalls = 0;
-		const { runtime, cwd } = await createRuntime(
+		const { runtime, cwd, options } = await createRuntime(
 			async () => {
 				promptCalls += 1;
 				return true;
@@ -5924,11 +5951,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					(event.kind.startsWith("model_") || event.kind.startsWith("tool_")),
 			),
 		).toEqual([]);
-		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+		await runtime.dispose();
+		const restarted = await openRuntime(options);
+		expect(await restarted.store.admitCommand(command, restarted.engineGeneration)).toMatchObject({
 			status: "replay",
 			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
 		});
-		await runtime.dispose();
 	}, 60_000);
 
 	it("applies a Stop compiled before Start binding using only the persisted source revision", async () => {

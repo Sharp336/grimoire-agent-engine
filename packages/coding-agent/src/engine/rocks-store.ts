@@ -1174,7 +1174,12 @@ export class RocksEngineMutations {
 		} satisfies RocksBinding);
 	}
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
-		await this.mutation(binding.agentInstanceId, tx => this.bind(tx, binding));
+		await this.mutation(binding.agentInstanceId, async tx => {
+			// Releasing an idle binding after a newer authority registered: that authority's own bind replaces the row.
+			const identity = await tx.get<RocksIdentity>("identity", binding.agentInstanceId);
+			if (identity && binding.authorityGeneration < identity.authority_generation) return;
+			await this.bind(tx, binding);
+		});
 	}
 	async commitBindingEvent(
 		binding: EngineBindingSnapshot,
