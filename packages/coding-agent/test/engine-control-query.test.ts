@@ -4,18 +4,18 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { EngineBindingSnapshot } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 	ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS,
 	EngineControlQueryClient,
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
-import type { EngineBindingSnapshot } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
+import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
@@ -103,10 +103,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
 			).toEqual({ removed: true });
 			// Removal discards the staged bytes: the upload can only start over at offset zero.
-			await assert.rejects(
-				client.request("attachments.stage", { ...request, offset: bytes.length }),
-				/offset zero/,
-			);
+			await assert.rejects(client.request("attachments.stage", { ...request, offset: bytes.length }), /offset zero/);
 			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
 		} finally {
 			await server.close();
@@ -680,9 +677,9 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			});
 			expect(await runtime.store.intent(binding.agentInstanceId)).toMatchObject({ intentRevision: 0 });
 			expect(await runtime.store.intent("budget-child-1")).toMatchObject({ intentRevision: 0, holds: [] });
-			expect(
-				(await runtime.store.pendingEvents(1000)).filter(event => event.kind === "holds_changed"),
-			).toHaveLength(0);
+			expect((await runtime.store.pendingEvents(1000)).filter(event => event.kind === "holds_changed")).toHaveLength(
+				0,
+			);
 			expect(profileCalls).toBe(0);
 			// A retry replays the durable rejection instead of applying the command.
 			const retried = await client.request("command", { command }).then(

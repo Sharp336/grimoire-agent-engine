@@ -17,7 +17,7 @@ import { type RuntimeChange, runtimeLimits, runtimeToolPageRecords, validateRunt
 import { publicRuntimeQueueItem } from "./runtime-queue";
 import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
 import type { RuntimeTransaction } from "./runtime-records";
-import type { EngineTransitionEvent } from "./store";
+import type { EngineCommandReceipt, EngineTransitionEvent } from "./store";
 
 export const terminal = new Set(["completed", "cancelled", "failed", "interrupted"]);
 const summaryEvents = new Set([
@@ -209,6 +209,13 @@ export async function settleRuntimeMessages(
 	}
 	return events;
 }
+/** A retained receipt beyond one live change replays and projects as an explicit partial marker. */
+export function boundedReceipt(receipt: EngineCommandReceipt): EngineCommandReceipt {
+	return Buffer.byteLength(JSON.stringify(receipt)) > runtimeLimits.liveChangeBytes
+		? { outcome: receipt.outcome, detail: { partial: true, unavailable: "result_exceeds_projection_limit" } }
+		: receipt;
+}
+
 export function runtimeReceipt(
 	row: RocksCommand,
 	identity: RocksIdentity | undefined,
@@ -240,8 +247,7 @@ export function runtimeReceipt(
 			receipt.detail = detail.item ? { ...detail, item: projected } : { item: projected };
 		} else if (Array.isArray(detail.items)) receipt.detail = { reordered: detail.items.length };
 	}
-	if (receipt && Buffer.byteLength(JSON.stringify(receipt)) > runtimeLimits.liveChangeBytes)
-		receipt = { outcome: receipt.outcome, detail: { partial: true, unavailable: "result_exceeds_projection_limit" } };
+	if (receipt) receipt = boundedReceipt(receipt);
 	const canonical: RuntimeReceiptRow = {
 		command_id: row.command_id,
 		operation: row.operation,

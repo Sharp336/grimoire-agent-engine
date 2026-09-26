@@ -69,9 +69,10 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		let adapter: NatsEngineAdapter | undefined;
 		try {
 			await runtime.store.admitCommand(identity, runtime.engineGeneration);
+			// Beyond one live change, below one storage write: the receipt is retained whole but projected bounded.
 			await runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
 				outcome: "applied",
-				detail: { text: "legacy".repeat(1_400_000) },
+				detail: { text: "legacy".repeat(20_000) },
 			});
 			server = await startEngineControlQueryServer(options);
 			adapter = await NatsEngineAdapter.connect(options);
@@ -79,7 +80,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const receipt = await native.request("command", { command });
 			expect(receipt).toEqual({
 				outcome: "applied",
-				detail: { partial: true, unavailable: "legacy_result_exceeds_projection_limit" },
+				detail: { partial: true, unavailable: "result_exceeds_projection_limit" },
 			});
 			expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThan(runtimeLimits.liveChangeBytes);
 			expect(

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
-import type { StorageClient } from "../session/storage-client";
+import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
 import type { StorageDependency } from "../session/storage-protocol";
 import type {
 	EngineAttemptState,
@@ -25,7 +25,13 @@ import {
 	restoreDescriptor,
 	validateRestorePlan,
 } from "./rocks-restore-workspace";
-import { eventReadKeys, projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
+import {
+	boundedReceipt,
+	eventReadKeys,
+	projectionId,
+	runtimeReceipt,
+	settleRuntimeMessages,
+} from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
 	bindingTarget,
@@ -697,13 +703,14 @@ export class RocksEngineMutations {
 				if (old.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
 				if (old.state === "settled") {
 					if (!old.receipt) throw new Error("Settled command has no receipt");
-					return { status: "replay", receipt: old.receipt };
+					return { status: "replay", receipt: boundedReceipt(old.receipt) };
 				}
 				if (old.processor_generation === processorGeneration) return { status: "in_progress" };
 				if (old.processor_generation !== null || command.engineGeneration < processorGeneration) {
-					const receipt = this.interruptedReceipt();
-					await this.settle(tx, command.commandId, receipt, command.canonicalHash);
-					return { status: "replay", receipt };
+					return {
+						status: "replay",
+						receipt: await this.settleInterrupted(tx, command.commandId, processorGeneration),
+					};
 				}
 				await tx.put("command", command.commandId, {
 					...old,
@@ -753,22 +760,41 @@ export class RocksEngineMutations {
 				}
 			}
 			if (command.engineGeneration < processorGeneration) {
-				const receipt = this.interruptedReceipt();
-				await this.settle(tx, command.commandId, receipt);
-				return { status: "replay", receipt };
+				return {
+					status: "replay",
+					receipt: await this.settleInterrupted(tx, command.commandId, processorGeneration),
+				};
 			}
 			return { status: "claimed" };
 		});
 	}
-	interruptedReceipt(): EngineCommandReceipt {
-		return {
-			outcome: "rejected",
+	/** An interrupted command never runs: settle it and publish its rejection like any other refused command. */
+	async settleInterrupted(tx: RuntimeTransaction, id: string, generation: number): Promise<EngineCommandReceipt> {
+		const receipt = {
+			outcome: "rejected" as const,
 			detail: {
 				code: "interrupted",
 				message: "Execution was interrupted; explicit Continue is required",
 				requiresExplicitContinue: true,
 			},
 		};
+		await this.settle(tx, id, receipt);
+		const { identity: command } = (await tx.get<RocksCommand>("command", id))!;
+		await this.append(
+			tx,
+			{
+				commandId: id,
+				agentInstanceId: command.agentInstanceId,
+				executionId: command.executionId ?? "",
+				attemptId: command.attemptId ?? "",
+				bindingId: command.bindingId ?? "",
+				engineGeneration: generation,
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			},
+			{ kind: "rejected", payload: receipt.detail, causationCommandId: id },
+		);
+		return receipt;
 	}
 	startExpected(command: EngineCommandIdentity): number | undefined {
 		if (!command.serializedCommand) return undefined;
@@ -826,7 +852,11 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const fenced = validateStartFence(target);
 			const start = await this.targetStart(tx, target);
-			if (!start && !fenced) return { status: "not_found" };
+			// A Start already applied has left the pending index: its Attempt exists, so the Stop is too late here.
+			if (!start && !fenced)
+				return (await tx.get<RocksAttempt>("attempt", target.attemptId))
+					? { status: "too_late" }
+					: { status: "not_found" };
 			if (start?.state === "settled")
 				return start.receipt?.outcome === "rejected" && start.receipt.detail?.code === "cancelled"
 					? {
@@ -952,7 +982,9 @@ export class RocksEngineMutations {
 		}
 		if (hash && hash !== row.canonical_hash) throw new EngineCommandConflictError(id);
 		if (row.state === "settled") {
-			if (JSON.stringify(row.receipt) !== JSON.stringify(receipt)) throw new EngineCommandConflictError(id);
+			// The owner returns rows with canonically ordered keys; an identical receipt may differ only in order.
+			if (storageCanonicalJson(row.receipt) !== storageCanonicalJson(receipt))
+				throw new EngineCommandConflictError(id);
 			return;
 		}
 		if (row.pending_accounted)
@@ -2202,7 +2234,7 @@ export class RocksEngineMutations {
 				await this.mutation(id, async tx => {
 					const current = await tx.get<RocksCommand>("command", command.command_id);
 					if (current?.state === "received" && current.engine_generation < generation)
-						await this.settle(tx, current.command_id, this.interruptedReceipt());
+						await this.settleInterrupted(tx, current.command_id, generation);
 				});
 			}
 			for (const observed of attempts) {
