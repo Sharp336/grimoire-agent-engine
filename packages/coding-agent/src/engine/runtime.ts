@@ -355,6 +355,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	lastAssistantMessageId?: string;
 	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
+	/** Uploads of direct Start/steer messages by clientMessageId, consumed once the user entry is durable. */
+	directUploads: Map<string, EngineMessageAttachments>;
 	pendingInput?: PendingInput;
 }
 
@@ -809,6 +811,7 @@ export class EngineRuntime {
 				item ? "consumed" : "applied",
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
+			if (references && !item?.attachments) binding.directUploads.set(request.clientMessageId!, references);
 			try {
 				await binding.session.steer(
 					item?.deliveryPayload ?? request.message ?? "",
@@ -3348,6 +3351,7 @@ export class EngineRuntime {
 				});
 			});
 		}
+		if (references && !queuedItem?.attachments) binding.directUploads.set(request.clientMessageId!, references);
 		this.#trackRun(
 			this.#runPrompt(
 				binding,
@@ -3794,6 +3798,7 @@ export class EngineRuntime {
 				modelCallSequence: 0,
 				assistantMessageSequence: 0,
 				activeModelCalls: new Set(),
+				directUploads: new Map(),
 			};
 			liveBinding = binding;
 			this.#bindMessagePersistence(binding);
@@ -3848,6 +3853,18 @@ export class EngineRuntime {
 								target,
 								async () => {
 									const durable = await checkpoint;
+									const uploads = entry.clientMessageId
+										? binding.directUploads.get(entry.clientMessageId)
+										: undefined;
+									if (durable && uploads && this.store instanceof RocksEngineStore) {
+										binding.directUploads.delete(entry.clientMessageId!);
+										// The durable entry owns the bodies now; a row left behind only waits for its TTL.
+										await this.store.consumeUploads(uploads).catch(error =>
+											logger.warn("Delivered upload rows remain until their TTL", {
+												error: error instanceof Error ? error.message : String(error),
+											}),
+										);
+									}
 									await this.#inLane(target.agentInstanceId, async () => {
 										if (!durable || !current()) return;
 										await this.#commitAttemptTransition(binding, binding.attemptState, [], {

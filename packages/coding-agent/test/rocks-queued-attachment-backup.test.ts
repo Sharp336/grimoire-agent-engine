@@ -1,14 +1,16 @@
 import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import type { EngineAttachmentDescriptor, EngineBindingSnapshot } from "../src/engine/contracts";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { engineAgentInstanceId } from "../src/engine/route";
 import { EngineRuntime } from "../src/engine/runtime";
-import { EngineAttachmentUploads } from "../src/engine/runtime-attachments";
+import { attachmentUploadKey, EngineAttachmentUploads } from "../src/engine/runtime-attachments";
 import type { EngineCommandIdentity } from "../src/engine/store";
+import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
@@ -117,9 +119,11 @@ it.skipIf(!(executable && runRoot))(
 			);
 			expect(queued.created).toBe(true);
 			expect(queued.item.attachmentDescriptors).toEqual([attachment, imageAttachment]);
-			await uploads.remove(principalId, uploadId);
-			await uploads.remove(principalId, imageUploadId);
-			await expect(uploads.resolve(principalId, clientMessageId, uploadId)).rejects.toThrow();
+			// The accepted queue item owns the bodies; both ready rows went in its mutation (C5 consumed).
+			for (const id of [uploadId, imageUploadId])
+				await expect(uploads.resolve(principalId, clientMessageId, id)).rejects.toMatchObject({
+					code: "attachment_expired",
+				});
 			const blobPath = await blobs.existingPath(hash);
 			expect(blobPath).not.toBeNull();
 			const old = new Date(Date.now() - 600_000);
@@ -258,6 +262,104 @@ it.skipIf(!(executable && runRoot))(
 				else process.env.PI_BLOBS_DIR = previousBlobs;
 			}
 		} finally {
+			await worker.stop();
+		}
+	},
+	60_000,
+);
+
+it.skipIf(!(executable && runRoot))(
+	"consumes a direct Start's ready upload row once its user entry is durable",
+	async () => {
+		const root = await fs.mkdtemp(path.join(runRoot!, "direct-attachment-"));
+		const worker = await startStorageWorker(executable!, root, `${crypto.randomUUID()}${crypto.randomUUID()}`, 1);
+		const previousBinding = process.env.GRIMOIRE_STORAGE_BINDING;
+		const previousBlobs = process.env.PI_BLOBS_DIR;
+		process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
+		process.env.PI_BLOBS_DIR = storageBlobsDir(root);
+		let runtime: EngineRuntime | undefined;
+		try {
+			registerMockApi("rocks-direct-attachment");
+			const auth = await AuthStorage.create(path.join(root, "auth.db"));
+			auth.setRuntimeApiKey("mock", "test-key");
+			const mock = createMockModel({ handler: { content: ["seen"] } });
+			mock.input.push("image");
+			runtime = await EngineRuntime.create({
+				databasePath: path.join(root, "engine.sqlite"),
+				attachmentBlobStore: new BlobStore(storageBlobsDir(root)),
+				sessionDefaults: {
+					cwd: root,
+					agentDir: root,
+					settings: await Settings.loadReadOnly({ cwd: root, agentDir: root }),
+					model: mock.model,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+					modelRegistry: new ModelRegistry(auth, path.join(root, "models.yml")),
+				},
+				dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
+				resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
+				resolveSessionContinuation: async launch => `test:${launch.profileDigest}`,
+			});
+			const suffix = crypto.randomUUID();
+			const principalId = `owner-${suffix}`;
+			const agentInstanceRef = `grimoire://tasks/grimoire/direct-fixture/agents/${suffix}`;
+			const clientMessageId = `message-${suffix}`;
+			const uploadId = `image-${suffix}`;
+			const image = Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+				"base64",
+			);
+			await runtime.attachmentUploads.stage(principalId, {
+				uploadId,
+				clientMessageId,
+				name: "pixel.png",
+				mediaType: "image/png",
+				bytes: image.length,
+				contentHash: `sha256:${new Bun.SHA256().update(image).digest("hex")}`,
+				offset: 0,
+				contentBase64: image.toString("base64"),
+			});
+			const records = (runtime.store as RocksEngineStore).records;
+			const row = async () =>
+				(await records.get("metadata", `blob-upload:${attachmentUploadKey(principalId, uploadId).key}`)).value;
+			expect(await row()).not.toBeNull();
+			await runtime.start(
+				{
+					commandId: `start-${suffix}`,
+					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+					agentInstanceRef,
+					principalId,
+					clientMessageId,
+					attachmentUploadIds: [uploadId],
+					executionId: `execution-${suffix}`,
+					attemptId: `attempt-${suffix}`,
+					authorityGeneration: 1,
+					cwd: root,
+					input: "What is in the picture?",
+				},
+				{ spawns: "", profileDigest: "fixture-profile", enableMCP: false, enableLsp: false },
+			);
+			const result = await runtime.store.waitAttemptResult(
+				engineAgentInstanceId(agentInstanceRef),
+				`start-${suffix}`,
+				`attempt-${suffix}`,
+			);
+			expect(result).toMatchObject({ state: "completed" });
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(1);
+			// The durable native entry owns the body; the draft's ready row is consumed (C5).
+			expect(await row()).toBeNull();
+		} finally {
+			await runtime?.dispose();
+			if (previousBinding === undefined) delete process.env.GRIMOIRE_STORAGE_BINDING;
+			else process.env.GRIMOIRE_STORAGE_BINDING = previousBinding;
+			if (previousBlobs === undefined) delete process.env.PI_BLOBS_DIR;
+			else process.env.PI_BLOBS_DIR = previousBlobs;
 			await worker.stop();
 		}
 	},
