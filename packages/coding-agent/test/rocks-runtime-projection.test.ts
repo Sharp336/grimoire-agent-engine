@@ -332,6 +332,51 @@ describe("Rocks runtime atomic public projections", () => {
 			pendingStart: null,
 		});
 	});
+	test("an event committed with its command settlement projects the command as settled", async () => {
+		const rows = fixture();
+		rows.seed("binding", "a", {
+			agent_instance_id: "a",
+			execution_id: "execution",
+			attempt_id: "attempt",
+			binding_id: "binding",
+			engine_generation: 1,
+			binding_generation: 1,
+			authority_generation: 1,
+		});
+		const store = storeWith(rows);
+		spyOn(store.records, "mutate").mockImplementation(async (_scope, work) => {
+			const tx = new RuntimeTransaction(rows);
+			const result = await work(tx);
+			for (const put of tx.mutation().puts) rows.seed(put.kind, put.id, put.value);
+			return result;
+		});
+		const start: EngineCommandIdentity = {
+			commandId: "start-refused",
+			operation: "start",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			agentInstanceId: "a",
+			agentInstanceRef: ref,
+			executionId: "execution-refused",
+			attemptId: "attempt-refused",
+			authorityGeneration: 1,
+			principalId: "p",
+			payloadHash: "refused",
+			canonicalHash: "refused",
+		};
+		expect(await store.admitCommand(start, 1)).toEqual({ status: "claimed" });
+		const detail = { code: "invalid_request", message: "refused" };
+		// A non-browser Start emits no receipt event, so the transition event carries the last summary.
+		await store.commitEvent(
+			target,
+			{ kind: "rejected", payload: detail, causationCommandId: start.commandId },
+			start.commandId,
+			{ outcome: "rejected", detail },
+		);
+		const summary = await store.runtimeSummary({ principalId: "p", agentInstanceRef: ref });
+		expect((summary.summary as Record<string, unknown>).pendingStart).toBeNull();
+	});
 	test("new input and its attention/detail appear in the same mutation; resolution removes pending input", async () => {
 		const tx = new RuntimeTransaction(fixture());
 		await append(tx, "input_requested", {

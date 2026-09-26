@@ -1088,9 +1088,9 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			await this.eventReads(tx, target, event, true);
 			await this.assertFence(tx, target);
-			const result = await this.append(tx, target, event);
+			// Settle before the event: its summary must no longer project the command as pending.
 			if (command) await this.settle(tx, command, typeof receipt === "string" ? { outcome: receipt } : receipt);
-			return result;
+			return this.append(tx, target, event);
 		});
 	}
 	async commitUnboundStartRejection(
