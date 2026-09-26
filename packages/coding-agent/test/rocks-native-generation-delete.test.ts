@@ -5,6 +5,7 @@ import type { EngineBindingSnapshot } from "../src/engine/contracts";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
+import type { StorageRuntimeIndex } from "../src/session/storage-protocol";
 import { startStorageWorker } from "./helpers/storage-worker-fixture";
 
 const workerExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
@@ -143,6 +144,20 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				if (remaining.length) await Bun.sleep(50);
 			}
 			expect(remaining).toEqual([]);
+			// Reclaim then drops the chat's runtime rows through its agent index; the identity stays as the deleted marker.
+			const progressKey = `native-delete-progress:${agentInstanceId}`;
+			while (
+				Date.now() < deadline &&
+				(await restarted.records.get("metadata", progressKey)).value?.runtime_reclaimed !== true
+			)
+				await Bun.sleep(50);
+			expect((await restarted.records.get("metadata", progressKey)).value?.runtime_reclaimed).toBe(true);
+			expect(
+				(await restarted.records.query("agent_records" as StorageRuntimeIndex, [agentInstanceId])).records,
+			).toEqual([]);
+			expect((await restarted.records.get("binding", agentInstanceId)).value).toBeNull();
+			expect((await restarted.records.get("identity", agentInstanceId)).value?.deleted_at).toBeNumber();
+			expect((await restarted.records.query("delete_pending", [])).records).toEqual([]);
 		} finally {
 			await worker?.stop();
 		}
