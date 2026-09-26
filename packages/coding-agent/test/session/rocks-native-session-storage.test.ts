@@ -268,6 +268,28 @@ it("admits an entry whose image and text exceed the 8 MiB entry budget by trimmi
 	});
 }, 30_000);
 
+it("rejects one entry that cannot fit the 8 MiB entry budget without poisoning the session", async () => {
+	await withContourBlobs(async () => {
+		const client = new MemoryNativeClient();
+		const manager = SessionManager.createNative(
+			"/unsplittable",
+			new RocksNativeSessionStorage(client, "big", "root"),
+		);
+		const kept = manager.appendMessage({ role: "user", content: "before", timestamp: 1 });
+		// Strings shorter than the trim floor cannot shrink, so this entry stays above 8 MiB.
+		const parts = Array.from({ length: 9_000 }, () => ({ type: "text" as const, text: "s".repeat(1_000) }));
+		expect(() => manager.appendMessage({ role: "user", content: parts, timestamp: 2 })).toThrow(
+			NativeSessionWriteRejectedError,
+		);
+		expect(manager.getLeafId()).toBe(kept);
+		const next = manager.appendMessage({ role: "user", content: "after", timestamp: 3 });
+		await manager.flushAndCheckpoint();
+		const reopened = await SessionManager.openNative(new RocksNativeSessionStorage(client, "big", "root"));
+		expect(reopened.getLeafId()).toBe(next);
+		expect(reopened.getEntry(next)?.parentId).toBe(kept);
+	});
+}, 30_000);
+
 it("keeps image references through a native fork and a history edit", async () => {
 	await withContourBlobs(async blobs => {
 		const client = new MemoryNativeClient();
@@ -443,7 +465,6 @@ it("rejects bounded append admission without leaving the rejected entry in the m
 		manager.appendMessage({ role: "user", content: String(index), timestamp: index });
 	expect(() => manager.appendMessage({ role: "user", content: "rejected", timestamp: 2 })).toThrow("admission budget");
 	expect(manager.getContextBranch()).toHaveLength(2);
-	await expect(manager.flush()).rejects.toThrow("admission budget");
 	await client.apply(0);
 	await client.apply(1);
 	expect(client.writes.map(write => write.input.firstSeq)).toEqual([1, 2]);
