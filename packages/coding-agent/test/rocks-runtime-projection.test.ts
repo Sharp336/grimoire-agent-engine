@@ -65,8 +65,14 @@ class Rows extends RuntimeRecords {
 					return row.kind === "event" && v?.message_content_id === key[0] && v?.message_revision === key[1];
 				case "event_message":
 					return row.kind === "event" && v?.message_content_id === key[0];
-				case "kind_primary":
-					return row.kind === key[0];
+				case "attempt_open":
+					return (
+						row.kind === "attempt" && !["completed", "failed", "cancelled", "interrupted"].includes(`${v?.state}`)
+					);
+				case "command_received":
+					return row.kind === "command" && v?.state === "received";
+				case "inbox_pending":
+					return row.kind === "inbox" && v?.subtype === "item" && v?.disposition === "pending";
 				default:
 					return false;
 			}

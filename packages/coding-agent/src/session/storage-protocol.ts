@@ -148,7 +148,11 @@ export type StorageRuntimeIndex =
 	| "identity_root"
 	| "event_lifecycle"
 	| "attempt_all"
-	| "kind_primary";
+	| "kind_primary"
+	| "delete_pending"
+	| "attempt_open"
+	| "command_received"
+	| "inbox_pending";
 
 export interface StorageRuntimeQuery {
 	requestId: string;

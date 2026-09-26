@@ -101,21 +101,13 @@ function readRequest(request: RuntimePageRequest | RuntimeQueueRequest, type: st
 
 /** Current projections and native history share the owner; this class never opens a legacy database. */
 export class RocksEngineStore extends RocksEngineMutations {
+	/** Only unfinished chat deletions are indexed; startup cost follows pending deletions, not history. */
 	async reconcilePendingNativeDeletes(): Promise<void> {
 		let after: string | undefined;
 		for (;;) {
-			const page = await this.records.query(
-				"kind_primary",
-				["metadata"],
-				undefined,
-				100,
-				after ? [after] : undefined,
-				true,
-			);
+			const page = await this.records.query("delete_pending", [], undefined, 100, after ? [after] : undefined, true);
 			for (const row of page.records) {
-				if (row.value?.subtype === "native_delete_progress" && row.value.complete !== true) {
-					await this.reconcileDeletedNativeGenerations(String(row.value.agent_instance_id));
-				}
+				if (row.value) await this.reconcileDeletedNativeGenerations(String(row.value.agent_instance_id));
 			}
 			if (!page.nextCursor) return;
 			after = page.records.at(-1)!.id;
