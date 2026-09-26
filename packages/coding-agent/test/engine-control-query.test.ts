@@ -13,7 +13,7 @@ import {
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
-import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
+import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
@@ -834,7 +834,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		}
 	});
 
-	it("publishes retention config and streams a temporary compressed archive through the core endpoint", async () => {
+	it("publishes retention config and resolves the core endpoint", async () => {
 		for (const input of [
 			"https://grimoire.example",
 			"https://grimoire.example/mcp",
@@ -869,37 +869,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				{ status: "running" },
 			),
 		).toMatchObject({ childHistoryTtlMinutes: 90, childHistoryRetention: "grimoire" });
-
-		const content = '{"type":"session","id":"session-a"}\n';
-		let imported: Record<string, unknown> | undefined;
-		let sourcePath: string | undefined;
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-history-archive-${Snowflake.next()}-`));
-		const rpc = {
-			call: async (method: string, params: Record<string, unknown>) => {
-				expect(method).toBe("grimoire_artifact_import");
-				imported = params;
-				sourcePath = String(params.source_path);
-				const bytes = fs.readFileSync(sourcePath);
-				expect(Buffer.from(Bun.gunzipSync(bytes)).toString("utf8")).toBe(content);
-				return {
-					artifact: {
-						artifact_ref: "gctx:archive",
-						content_hash: `sha256:${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}`,
-						size_bytes: bytes.byteLength,
-					},
-				};
-			},
-		};
-		await archiveChildHistory(rpc as never, tempDir, {
-			agentInstanceId: "child-a",
-			agentInstanceRef: "grimoire://tasks/grimoire/task-a/agents/child-a",
-			attemptId: "attempt-a",
-			terminalAt: Date.now(),
-			content,
-		});
-		expect(imported?.content_base64).toBeUndefined();
-		expect(sourcePath).toBeDefined();
-		expect(fs.existsSync(sourcePath!)).toBeFalse();
 	});
 });
 

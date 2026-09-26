@@ -546,6 +546,9 @@ export class RocksEngineMutations {
 			(!existing.parent_agent_instance_id && identity.parentAgentInstanceId);
 		if (completingIdentity) {
 			// A checked registry guard protects alias/ancestry empty predicates from concurrent registration.
+			// Every registration writes this one row, so it commits under the event chain like a counter:
+			// optimistic retries alone exhaust their budget when several agents register at once.
+			tx.sequence("engine");
 			const engine = await tx.get<{ subtype: string; generation: number; identity_revision?: number }>(
 				"metadata",
 				"engine",

@@ -4320,40 +4320,35 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
-		let taskResults: string[] = [];
+		const taskCall = (index: number) => ({
+			type: "toolCall" as const,
+			id: `tool-child-${index}`,
+			name: "task",
+			arguments: {
+				profileRef: "gctx:2222222222222222",
+				workStepId: `child-step-${index}`,
+				assignment: `Do child step ${index}`,
+			},
+		});
+		const mock = createMockModel({
+			responses: [{ content: Array.from({ length: 7 }, (_, index) => taskCall(index)) }, { content: ["done"] }],
+		});
 		const launches: Array<{ toolCallId: string; workStepId?: string; maxSpawnDepth: number }> = [];
-		const { runtime, cwd } = await createRuntime(
-			async session => {
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine root did not expose task");
-				const results = await Promise.all(
-					Array.from({ length: 7 }, (_, index) =>
-						task.execute(`tool-child-${index}`, {
-							profileRef: "gctx:2222222222222222",
-							workStepId: `child-step-${index}`,
-							assignment: `Do child step ${index}`,
-						}),
-					),
-				);
-				taskResults = results.map(result => result.content.find(part => part.type === "text")?.text ?? "");
-				return true;
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			resolveSessionProfile: async () => ({
+				options: { model: mock.model },
+				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+				dispose() {},
+			}),
+			launchChild: async request => {
+				launches.push(request);
+				return {
+					agentInstanceId: `child-${request.toolCallId}`,
+					status: "completed",
+					assistantFinal: `done ${request.toolCallId}`,
+				};
 			},
-			{
-				resolveSessionProfile: async () => ({
-					options: {},
-					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
-					dispose() {},
-				}),
-				launchChild: async request => {
-					launches.push(request);
-					return {
-						agentInstanceId: `child-${request.toolCallId}`,
-						status: "completed",
-						assistantFinal: `done ${request.toolCallId}`,
-					};
-				},
-			},
-		);
+		});
 		await runtime.start(
 			{
 				commandId: "command-parent",
@@ -4375,6 +4370,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		);
 		await runtime.drain();
 		expect(launches).toHaveLength(6);
+		const taskResults = Array.from(
+			{ length: 7 },
+			(_, index) =>
+				toolResultOf(mock, `tool-child-${index}`)?.content.find(part => part.type === "text")?.text ?? "",
+		);
 		expect(taskResults.slice(0, 6)).toEqual(Array.from({ length: 6 }, (_, index) => `done tool-child-${index}`));
 		expect(taskResults[6]).toContain("maxChildren ceiling (6) reached");
 		expect(launches[0]).toMatchObject({
@@ -4390,47 +4390,40 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 	it("resets the child launch ceiling when an idle root binding is reused for a new Attempt", async () => {
-		let resultsA: string[] = [];
-		let resultsB: string[] = [];
-		const launches: string[] = [];
-		const { runtime, cwd } = await createRuntime(
-			async (session, input) => {
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine root did not expose task");
-				const results = await Promise.all(
-					Array.from({ length: 3 }, (_, index) =>
-						task.execute(`tool-child-${index}`, {
-							profileRef: "gctx:2222222222222222",
-							workStepId: `child-step-${index}`,
-							assignment: `Do child step ${index}`,
-						}),
-					),
-				);
-				const texts = results.map(result => result.content.find(part => part.type === "text")?.text ?? "");
-				if (input === "first round") resultsA = texts;
-				else resultsB = texts;
-				return true;
-			},
-			{
-				resolveSessionProfile: async () => ({
-					options: {},
-					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
-					dispose() {},
-				}),
-				launchChild: async request => {
-					launches.push(request.parentAttemptId);
-					if (request.parentAttemptId === "attempt-b" && request.toolCallId === "tool-child-0") {
-						throw new Error("child unavailable");
-					}
-					return {
-						agentInstanceId: `child-${request.toolCallId}`,
-						status: "completed",
-						assistantFinal: `done ${request.toolCallId}`,
-					};
+		const taskCalls = {
+			content: Array.from({ length: 3 }, (_, index) => ({
+				type: "toolCall" as const,
+				id: `tool-child-${index}`,
+				name: "task",
+				arguments: {
+					profileRef: "gctx:2222222222222222",
+					workStepId: `child-step-${index}`,
+					assignment: `Do child step ${index}`,
 				},
+			})),
+		};
+		const mock = createMockModel({
+			responses: [taskCalls, { content: ["done first"] }, taskCalls, { content: ["done second"] }],
+		});
+		const launches: string[] = [];
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			resolveSessionProfile: async () => ({
+				options: { model: mock.model },
+				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+				dispose() {},
+			}),
+			launchChild: async request => {
+				launches.push(request.parentAttemptId);
+				if (request.parentAttemptId === "attempt-b" && request.toolCallId === "tool-child-0") {
+					throw new Error("child unavailable");
+				}
+				return {
+					agentInstanceId: `child-${request.toolCallId}`,
+					status: "completed",
+					assistantFinal: `done ${request.toolCallId}`,
+				};
 			},
-		);
+		});
 		const parentProfile: EngineLaunchProfile = {
 			...profile,
 			spawns: "*",
@@ -4470,6 +4463,14 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(
 			runtime.agentRegistry.get(first.engineAgentId)?.session,
 		);
+		// The second round's last model call sees both rounds' task results in order.
+		const texts = mock.calls
+			.at(-1)!
+			.context.messages.flatMap(message =>
+				message.role === "toolResult" ? [message.content.find(part => part.type === "text")?.text ?? ""] : [],
+			);
+		const resultsA = texts.slice(0, 3);
+		const resultsB = texts.slice(3);
 		expect(resultsA.slice(0, 2)).toEqual(["done tool-child-0", "done tool-child-1"]);
 		expect(resultsA[2]).toContain("maxChildren ceiling (2) reached");
 		expect(resultsB[0]).toContain("Task execution failed: child unavailable");
@@ -4490,19 +4491,36 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const descriptions = new Map<string, string>();
 		const results = new Map<string, boolean | undefined>();
 		const launches: string[] = [];
+		// Both parents share this model concurrently, so each call answers from its own context.
+		const mock = createMockModel({
+			handler: context =>
+				context.messages.at(-1)?.role === "toolResult"
+					? { content: ["done"] }
+					: {
+							content: [
+								{
+									type: "toolCall" as const,
+									id: "delegate",
+									name: "task",
+									arguments: {
+										profileRef: "gctx:2222222222222222",
+										workStepId: "child",
+										assignment: "Do child work",
+									},
+								},
+							],
+						},
+		});
 		const { runtime, cwd } = await createRuntime(
 			async (session, input) => {
 				const task = session.getToolByName("task");
 				if (!task) throw new Error("Engine root did not expose task");
 				descriptions.set(input, task.description);
-				const result = await task.execute("delegate", {
-					profileRef: "gctx:2222222222222222",
-					workStepId: "child",
-					assignment: "Do child work",
-				});
-				results.set(input, result.isError);
+				await session.prompt(input);
+				const result = session.messages.find(message => message.role === "toolResult");
+				results.set(input, result?.role === "toolResult" ? result.isError : undefined);
 				if (input === "first") {
-					expect(result.content).toEqual([
+					expect(result?.content).toEqual([
 						{ type: "text", text: "Task execution failed: WorkStep child is unavailable" },
 					]);
 				}
@@ -4510,7 +4528,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			},
 			{
 				resolveSessionProfile: async () => ({
-					options: {},
+					options: { model: mock.model },
 					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
 					dispose() {},
 				}),
@@ -5001,22 +5019,25 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const failedRead = spyOn(RocksNativeSessionStorage.prototype, "readContext").mockRejectedValue(
 			new Error("injected retained storage failure"),
 		);
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-retained-read-b",
-					agentInstanceId: first.agentInstanceId,
-					agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
-					executionId: "execution-retained-read-b",
-					attemptId: "attempt-retained-read-b",
-					authorityGeneration: 1,
-					cwd,
-					input: "Must not silently reset",
-				},
-				{ ...profile, systemPrompt: "changed profile" },
-			),
-		).rejects.toThrow("Retained AgentSession conversation could not be loaded");
-		failedRead.mockRestore();
+		try {
+			await expect(
+				runtime.start(
+					{
+						commandId: "command-retained-read-b",
+						agentInstanceId: first.agentInstanceId,
+						agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
+						executionId: "execution-retained-read-b",
+						attemptId: "attempt-retained-read-b",
+						authorityGeneration: 1,
+						cwd,
+						input: "Must not silently reset",
+					},
+					{ ...profile, systemPrompt: "changed profile" },
+				),
+			).rejects.toThrow("Retained AgentSession conversation could not be loaded");
+		} finally {
+			failedRead.mockRestore();
+		}
 		await runtime.dispose();
 	}, 60_000);
 
