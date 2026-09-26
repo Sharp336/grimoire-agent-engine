@@ -662,7 +662,6 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 			const firstEvents = (await runtime.store.pendingEvents()).filter(
 				event => event.attemptId === "s31-openai-stream-attempt-1",
 			);
-			expect(runtime.storageMode).toBe("native");
 			expect(interrupted?.state).toBe("interrupted");
 			expect(requests).toBe(1);
 			expect(firstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);

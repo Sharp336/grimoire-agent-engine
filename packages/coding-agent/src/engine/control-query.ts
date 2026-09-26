@@ -15,7 +15,7 @@ import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
-import type { EngineRestoreHistoryTarget, EngineRuntime } from "./runtime";
+import { type EngineRuntime, nativeArchiveUnsupported } from "./runtime";
 import type { EngineAttachmentStageRequest } from "./runtime-attachments";
 import { RuntimeQueryError } from "./runtime-projection";
 import {
@@ -288,10 +288,7 @@ async function handleFrame(
 		const request = validateRequest(value);
 		requestId = request.requestId;
 		if (!sameSecret(request.token, token)) return failure(requestId, "unauthorized", "Invalid local token", false);
-		const result =
-			request.method === "storage.reclaim"
-				? await options.runtime.reclaimStorage()
-				: await options.runtime.runControlQuery(() => dispatchRequest(request, options, signal));
+		const result = await options.runtime.runControlQuery(() => dispatchRequest(request, options, signal));
 		return success(requestId, result);
 	} catch (error) {
 		if (error instanceof RuntimeQueryError) return failure(requestId, error.code, error.message, false, error.work);
@@ -523,36 +520,20 @@ async function dispatchRequest(
 				optionalLimit(params.limit),
 			);
 		case "session.archive":
-			return await options.runtime.sessionArchive(
-				requiredString(params, "agentInstanceId"),
-				optionalString(params.expectedContentHash),
-				optionalNonNegativeInteger(params.offset),
-				optionalArchiveLimit(params.limit),
-			);
 		case "session.archive.verify":
-			return await options.runtime.sessionArchiveVerify(
-				requiredTarget(params),
-				requiredString(params, "contentHash"),
-			);
 		case "session.archive.retire":
-			return await options.runtime.sessionArchiveRetire(
-				requiredTarget(params),
-				requiredString(params, "contentHash"),
-				requiredString(params, "archivePath"),
-				requiredString(params, "operationId"),
-			);
 		case "session.archive.restore":
-			return await options.runtime.sessionArchiveRestore(
-				requiredTarget(params),
-				requiredString(params, "contentHash"),
-				requiredString(params, "operationId"),
-			);
+		case "session.restore.history":
+		case "session.restore.stage":
+		case "storage.reclaim":
+			throw nativeArchiveUnsupported();
 		case "chat.lifecycle": {
 			const action = requiredString(params, "action");
 			if (!(["status", "archive", "unarchive", "delete"] as string[]).includes(action))
 				throw new EngineTargetError("invalid_request", "Unknown chat lifecycle action");
 			return options.runtime.chatLifecycle(
-				requiredString(params, "agentInstanceRef"), requiredString(params, "principalId"),
+				requiredString(params, "agentInstanceRef"),
+				requiredString(params, "principalId"),
 				action as "status" | "archive" | "unarchive" | "delete",
 				optionalString(params.operationId),
 				params.expectedRevision === undefined ? undefined : requiredNonNegativeInteger(params, "expectedRevision"),
@@ -560,32 +541,6 @@ async function dispatchRequest(
 		}
 		case "chat.archived.list":
 			return options.runtime.archivedChats(requiredString(params, "principalId"), optionalString(params.cursor));
-		case "session.restore.history":
-			return await listSessionHistory(
-				options.runtime,
-				requiredString(params, "agentInstanceId"),
-				optionalString(params.cursor),
-				optionalLimit(params.limit),
-				{
-					agentInstanceRef: requiredString(params, "agentInstanceRef"),
-					authorityGeneration: requiredNonNegativeInteger(params, "authorityGeneration"),
-					restoreCheckpoint: {
-						restoreId: requiredString(params, "restoreId"),
-						contentHash: requiredString(params, "contentHash"),
-					},
-				},
-			);
-		case "session.restore.stage":
-			return await options.runtime.sessionRestoreStage({
-				agentInstanceId: requiredString(params, "agentInstanceId"),
-				agentInstanceRef: requiredString(params, "agentInstanceRef"),
-				authorityGeneration: requiredNonNegativeInteger(params, "authorityGeneration"),
-				contentHash: requiredString(params, "contentHash"),
-				totalBytes: requiredNonNegativeInteger(params, "totalBytes"),
-				offset: requiredNonNegativeInteger(params, "offset"),
-				contentBase64: requiredString(params, "contentBase64"),
-				replaceRetainedBinding: optionalBoolean(params.replaceRetainedBinding),
-			});
 		case "attachments.stage": {
 			validateRuntimeValue("nativeAttachmentStageRequest", params);
 			const { principalId, ...chunk } = params;
@@ -972,66 +927,24 @@ async function listSessionHistory(
 	agentInstanceId: string,
 	cursor: string | undefined,
 	limit: number,
-	restore?: EngineRestoreHistoryTarget,
 ) {
-	if (runtime.storageMode === "native" && !restore) {
-		const binding = await runtime.store.getBinding(agentInstanceId);
-		const identity = binding && (await runtime.store.getStartConversationIdentity(binding.commandId));
-		if (!identity?.agentInstanceRef)
-			throw new EngineTargetError("agent_not_found", "Native history requires its canonical AgentInstance identity");
-		const page = await runtime.sessionHistoryPage(agentInstanceId, identity.agentInstanceRef, cursor, limit);
-		return {
-			schema: "grimoire.engine.session_history.v1",
-			agentInstanceId,
-			sessionId: page.sessionId,
-			leafEntryId: page.anchor,
-			sessionLeafEntryId: page.anchor,
-			entries: page.entries,
-			previousCursor: page.nextCursor,
-			hasMore: page.nextCursor !== null,
-			resyncRequired: false,
-			activityCompleteness: page.activityCompleteness,
-			...(page.entryRef ? { entryRef: page.entryRef } : {}),
-		};
-	}
-	const epoch = await runtime.store.getStoreEpoch();
-	const history = await runtime.sessionHistory(agentInstanceId, restore);
-	const scope = restore ? JSON.stringify([agentInstanceId, restore]) : agentInstanceId;
-	const decoded = decodeCursor(cursor, "history", epoch, scope);
-	const end = cursor ? decoded.position : history.entries.length;
-	const anchorMatches =
-		!cursor || (end === 0 ? decoded.anchor === undefined : history.entries[end - 1]?.entryId === decoded.anchor);
-	if (decoded.resyncRequired || end > history.entries.length || !anchorMatches) {
-		return {
-			schema: "grimoire.engine.session_history.v1",
-			agentInstanceId,
-			sessionId: history.sessionId,
-			leafEntryId: history.leafEntryId,
-			sessionLeafEntryId: history.sessionLeafEntryId,
-			entries: [],
-			previousCursor: null,
-			hasMore: history.entries.length > 0,
-			resyncRequired: true,
-			activityCompleteness: "partial",
-		};
-	}
-	const start = Math.max(0, end - limit);
-	const entries = fitResponsePage(history.entries.slice(start, end).reverse()).reverse();
-	const pageStart = end - entries.length;
+	const binding = await runtime.store.getBinding(agentInstanceId);
+	const identity = binding && (await runtime.store.getStartConversationIdentity(binding.commandId));
+	if (!identity?.agentInstanceRef)
+		throw new EngineTargetError("agent_not_found", "Native history requires its canonical AgentInstance identity");
+	const page = await runtime.sessionHistoryPage(agentInstanceId, identity.agentInstanceRef, cursor, limit);
 	return {
 		schema: "grimoire.engine.session_history.v1",
 		agentInstanceId,
-		sessionId: history.sessionId,
-		leafEntryId: history.leafEntryId,
-		sessionLeafEntryId: history.sessionLeafEntryId,
-		entries,
-		previousCursor:
-			pageStart > 0
-				? encodeCursor("history", epoch, pageStart, scope, history.entries[pageStart - 1]?.entryId)
-				: null,
-		hasMore: pageStart > 0,
+		sessionId: page.sessionId,
+		leafEntryId: page.anchor,
+		sessionLeafEntryId: page.anchor,
+		entries: page.entries,
+		previousCursor: page.nextCursor,
+		hasMore: page.nextCursor !== null,
 		resyncRequired: false,
-		activityCompleteness: history.activityCompleteness,
+		activityCompleteness: page.activityCompleteness,
+		...(page.entryRef ? { entryRef: page.entryRef } : {}),
 	};
 }
 
@@ -1387,14 +1300,6 @@ function optionalNonNegativeInteger(value: unknown): number {
 	if (value === undefined) return 0;
 	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
 		throw new EngineTargetError("invalid_request", "offset must be a non-negative safe integer");
-	}
-	return value;
-}
-
-function optionalArchiveLimit(value: unknown): number {
-	if (value === undefined) return 24_000;
-	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 24_000) {
-		throw new EngineTargetError("invalid_request", "session archive limit must be between 1 and 24000 bytes");
 	}
 	return value;
 }

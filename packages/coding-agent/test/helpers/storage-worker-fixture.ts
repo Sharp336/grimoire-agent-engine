@@ -1,3 +1,4 @@
+import { afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readStorageBinding, StorageClient } from "../../src/session/storage-client";
@@ -60,4 +61,46 @@ export async function startStorageWorker(executable: string, root: string, token
 	child.kill();
 	await child.exited;
 	throw new Error("Storage worker readiness timed out");
+}
+
+export const storageTestExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
+export const storageTestRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
+/** Real-owner Engine tests run only when the caller supplies a runtime copy and an existing run root. */
+export const storageWorkerUnavailable = !(storageTestExecutable && storageTestRunRoot);
+
+/**
+ * Give every test in the enclosing scope its own real Rust owner. Each EngineRuntime the test creates,
+ * restarts included, binds to that owner through the ClientHost environment, as `engine serve` does.
+ * Tests must dispose their runtimes before they finish.
+ */
+export function bindTestsToStorageWorker(): { readonly blobsDir: () => string } {
+	let root = "";
+	let worker: { stop(): Promise<void> } | undefined;
+	let saved: { binding?: string; blobs?: string } = {};
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(storageTestRunRoot!, "engine-test-"));
+		const started = await startStorageWorker(
+			storageTestExecutable!,
+			root,
+			`${crypto.randomUUID()}${crypto.randomUUID()}`,
+			1,
+		);
+		worker = started;
+		saved = { binding: process.env.GRIMOIRE_STORAGE_BINDING, blobs: process.env.PI_BLOBS_DIR };
+		process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(started.binding);
+		process.env.PI_BLOBS_DIR = storageBlobsDir(root);
+	});
+	afterEach(async () => {
+		await worker?.stop();
+		worker = undefined;
+		for (const [name, value] of [
+			["GRIMOIRE_STORAGE_BINDING", saved.binding],
+			["PI_BLOBS_DIR", saved.blobs],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5 });
+	});
+	return { blobsDir: () => storageBlobsDir(root) };
 }

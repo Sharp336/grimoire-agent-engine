@@ -18,11 +18,9 @@ import {
 	type EngineCommandEnvelope,
 	type EngineEventEnvelope,
 } from "./nats-adapter";
+import type { RocksEngineStore } from "./rocks-runtime-store";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
-import type { EngineRuntimeStore } from "./runtime";
-import type { LegacyOwnershipProof } from "./runtime-ownership";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
-import { EngineStore } from "./store";
 import { waitForEngineWake } from "./wake";
 
 interface BridgeClaim {
@@ -287,7 +285,7 @@ export interface HostedEngineBridgeOptions {
 	rpc: GrimoireRpc;
 	/** Optional lifecycle projection for locally admitted children; never schedules execution. */
 	projectionRpc?: GrimoireRpc;
-	eventStore?: EngineRuntimeStore;
+	eventStore?: RocksEngineStore;
 	deviceId: string;
 	engineId: string;
 	engineGeneration: number;
@@ -392,65 +390,6 @@ export class HostedEngineBridge {
 		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
-		if (this.#options.eventStore instanceof EngineStore) this.#track(this.#ownershipLoop());
-	}
-
-	async #ownershipLoop(): Promise<void> {
-		const store = this.#options.eventStore!;
-		if (!(store instanceof EngineStore)) return;
-		while (this.#accepting && !this.#stopping) {
-			try {
-				let cursor: string | undefined;
-				let unresolved = 0;
-				do {
-					const page = await store.reconcileLegacyOwnershipPage(
-						this.#options.deviceId,
-						this.#options.engineId,
-						cursor,
-					);
-					unresolved += page.unresolved.length;
-					let candidates = page.candidates;
-					while (candidates.length && this.#accepting && !this.#stopping) {
-						const response = await this.#options.rpc.call(
-							"grimoire_agent_engine_bridge",
-							{
-								action: "ownership",
-								device_id: this.#options.deviceId,
-								engine_id: this.#options.engineId,
-								candidates,
-							},
-							this.#admissionCancellation.signal,
-						);
-						if (response.status !== "ok" || !Array.isArray(response.results))
-							throw new Error("Legacy ownership proof endpoint is unavailable");
-						const proofs = response.results as LegacyOwnershipProof[];
-						const results = await store.enrollLegacyOwnership(candidates, proofs);
-						unresolved += results.filter(
-							result => !["enrolled", "known", "deferred"].includes(result.status),
-						).length;
-						const deferred = candidates.filter((_candidate, index) => proofs[index].status === "deferred");
-						if (deferred.length === candidates.length)
-							throw new Error("Legacy ownership proof page made no progress");
-						candidates = deferred;
-					}
-					cursor = page.nextCursor ?? undefined;
-					// Yield between bounded transactions so migration cannot occupy the control lane.
-					await Bun.sleep(0);
-				} while (cursor && this.#accepting && !this.#stopping);
-				if (this.#accepting)
-					await store.recordOwnershipMigration(unresolved ? "incomplete" : "complete", unresolved);
-			} catch (error) {
-				if (this.#accepting) {
-					await store.recordOwnershipMigration("unavailable", null);
-					this.#report(error);
-				}
-			}
-			await waitForEngineWake(
-				this.#stop.promise,
-				runtimeLimits.reconciliationMs,
-				this.#admissionCancellation.signal,
-			);
-		}
 	}
 
 	async #claimCommands(lane: "ordinary" | "control"): Promise<void> {
