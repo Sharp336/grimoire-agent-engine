@@ -430,6 +430,7 @@ export class EngineTargetError extends Error {
 			| "history_expired"
 			| "launch_failed"
 			| "attachment_requires_read"
+			| "attachment_expired"
 			| "command_failed"
 			| "cancelled",
 		message: string,
