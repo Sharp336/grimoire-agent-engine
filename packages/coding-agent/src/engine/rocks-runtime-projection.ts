@@ -1,5 +1,11 @@
 import type { StorageRuntimeIndex, StorageRuntimeKey } from "../session/storage-protocol";
-import { type EngineEvent, type EngineInboxItem, type EngineTarget, EngineTargetError } from "./contracts";
+import {
+	type EngineEvent,
+	type EngineInboxItem,
+	type EngineProfileRouteState,
+	type EngineTarget,
+	EngineTargetError,
+} from "./contracts";
 import { encodeCursor } from "./rocks-runtime-cursor";
 import type {
 	RocksAttempt,
@@ -714,6 +720,12 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 				event.attemptId,
 			),
 		);
+	// The detail reports the route this event made durable, so its sequence is known before projecting.
+	if (event.kind === "profile_route_changed" && attempt) {
+		// commitAttemptProfileRoute stages this payload in the same batch.
+		const route = event.payload?.profileRoute as EngineProfileRouteState;
+		attempt.profile_route_state = JSON.stringify({ ...route, eventSeq: event.seq });
+	}
 	let detail: Record<string, unknown> | null = null;
 	if (summaryEvents.has(event.kind) || toolEvent || event.kind === "profile_route_changed") {
 		detail = await projectedDetail(tx, identity, attempt, event.eventId);
