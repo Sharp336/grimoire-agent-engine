@@ -9,6 +9,7 @@ import type {
 	StorageRuntimeQueryResponse,
 	StorageRuntimeRecord,
 } from "../session/storage-protocol";
+import { EngineTargetError } from "./contracts";
 
 const recordKey = (kind: StorageRuntimeKind, id: string) => `${kind}\0${id}`;
 const scopeId = (scope: string) => `runtime_${new Bun.CryptoHasher("sha256").update(scope).digest("hex")}`;
@@ -254,7 +255,7 @@ export class RuntimeTransaction {
 	}
 	async put(kind: StorageRuntimeKind, id: string, value: object): Promise<void> {
 		await this.get(kind, id);
-		if (this.#read.size > 100) throw new StorageClientError("backpressure", "Runtime atomic record budget exceeded");
+		if (this.#read.size > 100) throw new EngineTargetError("restore_budget", "Runtime atomic record budget exceeded");
 		const key = recordKey(kind, id);
 		this.#deletes.delete(key);
 		const payload = JSON.parse(
@@ -280,7 +281,7 @@ export class RuntimeTransaction {
 		if (!records) {
 			const page = await this.records.query(index, key, undefined, 100, undefined, this.control);
 			if (page.nextCursor)
-				throw new StorageClientError("backpressure", "Atomic runtime mutation exceeds its bounded index page");
+				throw new EngineTargetError("restore_budget", "Atomic runtime mutation exceeds its bounded index page");
 			records = page.records;
 		}
 		this.#pages.set(pageKey, records);
@@ -305,7 +306,7 @@ export class RuntimeTransaction {
 		];
 	}
 	#checkBudget(): void {
-		if (this.#read.size > 100) throw new StorageClientError("backpressure", "Runtime atomic record budget exceeded");
+		if (this.#read.size > 100) throw new EngineTargetError("restore_budget", "Runtime atomic record budget exceeded");
 	}
 	mutation(): StorageRuntimeMutation {
 		return {

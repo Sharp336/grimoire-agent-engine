@@ -5,8 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
@@ -28,7 +28,6 @@ import {
 	type EngineCommandEnvelope,
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { RocksEngineStore } from "@oh-my-pi/pi-coding-agent/engine/rocks-runtime-store";
 import { engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import {
@@ -51,8 +50,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/rocks-native-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { StorageClientError } from "@oh-my-pi/pi-coding-agent/session/storage-client";
-import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
@@ -179,7 +178,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			undefined,
 			runtimeLimits.httpPageRecords,
 		);
-		return { ...page, leafEntryId: page.anchor, sessionLeafEntryId: page.anchor };
+		// elapsedMs measures the read itself, not the history.
+		const { elapsedMs: _elapsedMs, ...stable } = page;
+		return { ...stable, leafEntryId: page.anchor, sessionLeafEntryId: page.anchor };
 	}
 
 	/** Header and entries of a retained native session, in the shape of a loaded session file. */
@@ -194,6 +195,29 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	/**
+	 * A model that calls one tool, then answers. Native storage settles a tool effect only once its toolResult is
+	 * durable, so tool scenarios run through the agent loop instead of calling `execute` directly.
+	 */
+	function toolTurnModel(toolCallId: string, name: string, args: Record<string, unknown>) {
+		return createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall" as const, id: toolCallId, name, arguments: args }] },
+				{ content: ["done"] },
+			],
+		});
+	}
+
+	/** The toolResult the model received for one call, if the loop got that far. */
+	function toolResultOf(mock: MockModel, toolCallId: string) {
+		return mock.calls
+			.flatMap(call => call.context.messages)
+			.find(
+				(message): message is ToolResultMessage =>
+					message.role === "toolResult" && message.toolCallId === toolCallId,
+			);
+	}
 
 	it("lets a native text model read an uploaded file without UI and retains the original handle after restart", async () => {
 		const payload = "first line\nORIGINAL_FILE_CONTENT_42\nlast line\n";
@@ -542,9 +566,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					profile,
 				);
 				await reopened.drain();
-				const forked = await nativeSession(reopened, fork.sessionFile!);
+				// The fork's working context inherits the selected prefix; its own records hold only new entries.
+				const { familyId, generationId } = parseNativeSessionLocator(fork.sessionFile!);
+				const forked = await SessionManager.openNative(
+					new RocksNativeSessionStorage(reopened.store.storageClient, familyId, generationId),
+				);
 				const forkUser = forked
-					.getEntries()
+					.getContextBranch()
 					.find(entry => entry.type === "message" && entry.message.role === "user");
 				expect(forkUser).toHaveProperty("originalAttachments", [originalAttachment]);
 			}
@@ -598,17 +626,17 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			body: "",
 			attachments: { principalId: "alice", uploadIds: ["image"] },
 		});
-		await runtime.attachmentUploads.remove("alice", "image");
 		const queuedRequest = {
 			...request,
 			attachmentUploadIds: undefined,
 			queueId: queued.item.queueId,
 			expectedRevision: queued.item.revision,
-			mutationId: "consume-removed",
+			mutationId: "consume-refused",
 			expectedIntentRevision: (await runtime.store.intent(request.agentInstanceId)).intentRevision,
 			explicitContinue: true,
 		};
-		await expect(runtime.start(queuedRequest, profile)).rejects.toThrow("removed");
+		// The queued message owns its accepted image, so delivery fails on the route, not on the upload.
+		await expect(runtime.start(queuedRequest, profile)).rejects.toMatchObject({ code: "attachment_requires_images" });
 		expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
 		expect(mock.calls).toHaveLength(0);
 	});
@@ -1201,6 +1229,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			{
 				commandId: "budget-context-start",
 				agentInstanceId: "budget-context-root",
+				agentInstanceRef: "grimoire://tasks/grimoire/context-budget/agents/root",
 				executionId: "budget-context-execution",
 				attemptId: "budget-context-attempt",
 				authorityGeneration: 1,
@@ -1256,7 +1285,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		} finally {
 			await runtime.dispose();
 		}
-	});
+	}, 120_000);
 	it("keeps failed resume held and failed running steer pending, with rejected durable replay", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -2395,6 +2424,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			{
 				commandId: "command-indexed-start",
 				agentInstanceId: "agent-indexed",
+				// Input revisions are guarded on the projected input, which only refs are projected into.
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-indexed",
 				executionId: "execution-indexed",
 				attemptId: "attempt-indexed",
 				authorityGeneration: 1,
@@ -2565,9 +2596,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				replicated.push(entry.id);
 			};
 			const newerReplicate = (_entry: { id: string }) => {};
-			const createManager = SessionManager.create.bind(SessionManager);
+			const createManager = SessionManager.createNative.bind(SessionManager);
 			let observedManager: SessionManager | undefined;
-			const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+			const creation = spyOn(SessionManager, "createNative").mockImplementation((...args) => {
 				const manager = createManager(...args);
 				if (args[0] === cwd) {
 					manager.onEntryAppended = replicate;
@@ -2713,8 +2744,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			{ model: mock.model },
 		);
 		let stopOnAppend: (() => void) | undefined;
-		const createManager = SessionManager.create.bind(SessionManager);
-		const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+		const createManager = SessionManager.createNative.bind(SessionManager);
+		const creation = spyOn(SessionManager, "createNative").mockImplementation((...args) => {
 			const manager = createManager(...args);
 			if (args[0] === cwd) {
 				manager.onEntryAppended = entry => {
@@ -2881,14 +2912,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 	it("waits for an explicit permit decision before executing a tool", async () => {
-		let executed = false;
-		const { runtime, cwd } = await createRuntime(async session => {
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-permit", { path: "permit.txt" });
-			executed = true;
-			return true;
-		});
+		const mock = toolTurnModel("read-permit", "read", { path: "permit.txt" });
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
 		fs.writeFileSync(path.join(cwd, "permit.txt"), "approved");
 		const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
 		const started = await runtime.start(
@@ -2905,7 +2934,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		);
 		const approval = await approvalRequested;
 		const approvalId = String(approval.payload?.approvalId);
-		expect(executed).toBeFalse();
+		expect(toolResultOf(mock, "read-permit")).toBeUndefined();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
 		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
@@ -2917,7 +2946,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			decision: "approve",
 		});
 		await runtime.drain();
-		expect(executed).toBeTrue();
+		expect(toolResultOf(mock, "read-permit")).toMatchObject({ isError: false });
+		expect(JSON.stringify(toolResultOf(mock, "read-permit")?.content)).toContain("approved");
 		const events = await runtime.store.pendingEvents();
 		expect(events.filter(event => event.kind.startsWith("tool_")).map(event => event.kind)).toEqual([
 			"tool_approval_requested",
@@ -3010,20 +3040,22 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("settles a tracked async effect only after its owner job finishes", async () => {
 		const release = Promise.withResolvers<string>();
+		const mock = toolTurnModel("read-tracked", "read", { path: "tracked.txt" });
 		let runtime!: EngineRuntime;
 		let cwd = "";
-		({ runtime, cwd } = await createRuntime(async session => {
-			const jobId = runtime.asyncJobManager.register("bash", "tracked", () => release.promise, {
-				ownerId: session.getAgentId(),
-				attemptId: session.getAttemptId(),
-				sourceToolCallId: "read-tracked",
-			});
-			runtime.asyncJobManager.watchJobs([jobId]);
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-tracked", { path: "tracked.txt" });
-			return true;
-		}));
+		({ runtime, cwd } = await createRuntime(
+			(session, input) => {
+				const jobId = runtime.asyncJobManager.register("bash", "tracked", () => release.promise, {
+					ownerId: session.getAgentId(),
+					attemptId: session.getAttemptId(),
+					sourceToolCallId: "read-tracked",
+				});
+				runtime.asyncJobManager.watchJobs([jobId]);
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		));
 		fs.writeFileSync(path.join(cwd, "tracked.txt"), "tracked");
 		const toolStarted = nextEngineEvent(runtime, "tool_started");
 		const started = await runtime.start(
@@ -3056,20 +3088,22 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("keeps a background effect open while paused and settles only after resume", async () => {
 		const release = Promise.withResolvers<string>();
+		const mock = toolTurnModel("read-paused-background", "read", { path: "paused.txt" });
 		let runtime!: EngineRuntime;
 		let cwd = "";
-		({ runtime, cwd } = await createRuntime(async session => {
-			const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
-				ownerId: session.getAgentId(),
-				attemptId: session.getAttemptId(),
-				sourceToolCallId: "read-paused-background",
-			});
-			runtime.asyncJobManager.watchJobs([jobId]);
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-paused-background", { path: "paused.txt" });
-			return true;
-		}));
+		({ runtime, cwd } = await createRuntime(
+			(session, input) => {
+				const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
+					ownerId: session.getAgentId(),
+					attemptId: session.getAttemptId(),
+					sourceToolCallId: "read-paused-background",
+				});
+				runtime.asyncJobManager.watchJobs([jobId]);
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		));
 		fs.writeFileSync(path.join(cwd, "paused.txt"), "paused");
 		const toolStarted = nextEngineEvent(runtime, "tool_started");
 		const started = await runtime.start(
@@ -3107,20 +3141,26 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		"executes write→xd with a distinct durable device effect and honors %s",
 		async decision => {
 			let deviceResult: string | undefined;
-			const { runtime, cwd } = await createRuntime(async session => {
-				const write = session.getToolByName("write");
-				if (!write) throw new Error("write tool is unavailable");
-				const args = {
-					path: "xd://grep",
-					content: JSON.stringify({ pattern: "needle", path: "fixture.txt" }),
-				};
-				const result = await write.execute("outer-write", args);
-				if (!result.isError) {
-					deviceResult = JSON.stringify(result.content);
-					await expect(write.execute("outer-write", args)).rejects.toThrow();
-				}
-				return true;
-			});
+			const args = {
+				path: "xd://grep",
+				content: JSON.stringify({ pattern: "needle", path: "fixture.txt" }),
+			};
+			const mock = toolTurnModel("outer-write", "write", args);
+			const { runtime, cwd } = await createRuntime(
+				async (session, input) => {
+					await session.prompt(input);
+					const result = toolResultOf(mock, "outer-write");
+					if (result && !result.isError) {
+						deviceResult = JSON.stringify(result.content);
+						const write = session.getToolByName("write");
+						if (!write) throw new Error("write tool is unavailable");
+						await expect(write.execute("outer-write", args)).rejects.toThrow();
+					}
+					return true;
+				},
+				{},
+				{ model: mock.model },
+			);
 			try {
 				fs.writeFileSync(path.join(cwd, "fixture.txt"), "needle\n");
 				const requested = nextEngineEvent(runtime, "tool_approval_requested");
@@ -3184,12 +3224,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	);
 
 	it("records unrestricted tools without exposing their raw input", async () => {
-		const { runtime, cwd } = await createRuntime(async session => {
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-unrestricted", { path: "secret-name.txt" });
-			return true;
-		});
+		const mock = toolTurnModel("read-unrestricted", "read", { path: "secret-name.txt" });
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
 		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
 		await runtime.start(
 			{
@@ -3884,6 +3924,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				await releaseFinal.promise;
 				yield { content: [fullFinal] };
 			})(),
+			// Publishes the directly appended hidden entry through the next Attempt's transcript.
+			handler: { content: ["after the hidden entry"] },
 		});
 		const { runtime, cwd } = await createRuntime(
 			(session, input) => {
@@ -4015,6 +4057,23 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
+		await retainedSessionManager?.flush();
+		// A terminal Attempt's history is cut at its own transcript; the next Attempt carries the hidden entry.
+		await runtime.start(
+			{
+				commandId: "command-hidden-reasoning",
+				agentInstanceId: started.agentInstanceId,
+				executionId: "execution-hidden-reasoning",
+				attemptId: "attempt-hidden-reasoning",
+				authorityGeneration: 1,
+				cwd,
+				input: "continue after hidden reasoning",
+				expectedIntentRevision: (await runtime.store.intent(started.agentInstanceId)).intentRevision,
+				explicitContinue: true,
+			},
+			{ ...profile, toolNames: ["read"], restrictToolNames: true },
+		);
+		await runtime.drain();
 		const hiddenHistory = await nativeHistory(runtime, started.agentInstanceId);
 		expect(hiddenHistory.entries.find(entry => entry.entryId === hiddenEntry)?.blocks).toEqual([
 			expect.objectContaining({ kind: "reasoning", status: "unavailable" }),

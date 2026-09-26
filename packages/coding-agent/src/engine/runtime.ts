@@ -3043,22 +3043,30 @@ export class EngineRuntime {
 	#bindMessagePersistence(binding: LiveBinding): void {
 		binding.session.setMessagePersistedHandler(async message => {
 			if (message.role !== "toolResult") return;
-			const record = [...this.#toolInvocations.values()].find(
-				candidate =>
-					candidate.target.bindingId === binding.bindingId &&
-					candidate.target.attemptId === binding.attemptId &&
-					candidate.toolCallId === message.toolCallId,
-			);
-			if (!record) return;
+			// A device invocation (`<outer>:xd:<name>`) has no toolResult of its own: the outer result makes it durable.
+			const device = `${message.toolCallId}:xd:`;
+			const records = [...this.#toolInvocations.values()]
+				.filter(
+					candidate =>
+						candidate.target.bindingId === binding.bindingId &&
+						candidate.target.attemptId === binding.attemptId &&
+						(candidate.toolCallId === message.toolCallId || candidate.toolCallId.startsWith(device)),
+				)
+				// Devices settle before the call that ran them.
+				.sort((a, b) => Number(a.toolCallId === message.toolCallId) - Number(b.toolCallId === message.toolCallId));
+			if (!records.length) return;
 			// Runs inside the persistence slot: draining that slot here would deadlock.
-			record.checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
-			if (record.outcome)
-				await this.#completeToolInvocation(
-					record,
-					record.outcome.status,
-					record.outcome.error,
-					record.outcome.jobIds,
-				);
+			const checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
+			for (const record of records) {
+				record.checkpoint = checkpoint;
+				if (record.outcome)
+					await this.#completeToolInvocation(
+						record,
+						record.outcome.status,
+						record.outcome.error,
+						record.outcome.jobIds,
+					);
+			}
 		});
 	}
 
