@@ -6,12 +6,16 @@ import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fi
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
-const cuts = ["intent", "publication_lock", "canonical", "complete"] as const;
+const cuts = ["intent", "publication_lock", "canonical"] as const;
 
-// Blob body GC is intentionally disabled by S5.5 C1-доп (storage-runtime reports blobs=disabled);
-// S5.6 B1 re-enables it on the new ledger — restore this gate then.
-it.skip(
-	"recovers real writer crashes at every blob publication cut",
+const exists = (file: string) =>
+	fs.stat(file).then(
+		() => true,
+		() => false,
+	);
+
+it.skipIf(!(executable && runRoot))(
+	"reclaims ownerless bodies after real writer crashes at every publication cut and after abandon",
 	async () => {
 		const root = await fs.mkdtemp(path.join(runRoot!, "blob-crash-"));
 		console.log(`Blob crash fixture: ${root}`);
@@ -36,7 +40,7 @@ it.skip(
 				const reader = child.stdout.getReader();
 				const entered = await Promise.race([
 					reader.read(),
-					Bun.sleep(5_000).then(() => {
+					Bun.sleep(10_000).then(() => {
 						throw new Error(`Writer did not reach ${cut}`);
 					}),
 				]);
@@ -47,60 +51,38 @@ it.skip(
 				if (child.exitCode === null) child.kill();
 				await child.exited;
 			}
-			const intentDir = path.join(blobsDir, ".managed", "intents", hash);
-			expect((await fs.readdir(intentDir)).length).toBe(1);
+			// The dead producer's intent is the only trace the storage owner needs to recover the hash.
+			expect(await fs.readdir(path.join(store.intentsDir, hash))).toHaveLength(1);
 			const canonical = path.join(store.liveDir, hash);
-			if (cut === "intent" || cut === "publication_lock") {
-				expect(
-					await fs.stat(canonical).then(
-						() => true,
-						() => false,
-					),
-				).toBe(false);
-			} else {
-				expect(await fs.readFile(canonical)).toEqual(Buffer.from(body));
-			}
+			if (cut === "canonical") expect(await fs.readFile(canonical)).toEqual(Buffer.from(body));
+			else expect(await exists(canonical)).toBe(false);
 			if (cut === "publication_lock") {
 				const lock = path.join(store.locksDir, `${hash}.lock`);
-				expect(
-					await fs.stat(lock).then(
-						() => true,
-						() => false,
-					),
-				).toBe(true);
-				// A new writer must take over the exact dead process lock and publish immutable bytes.
-				expect(store.putSync(Buffer.from(body), { extension: "png" }).hash).toBe(hash);
-				expect(
-					await fs.stat(lock).then(
-						() => true,
-						() => false,
-					),
-				).toBe(false);
-			}
-			if (cut === "complete") {
-				expect((await fs.readdir(store.completedDir)).length).toBeGreaterThan(0);
-			}
-			for (const file of [canonical, `${canonical}.png`]) {
-				await fs.utimes(file, new Date(Date.now() - 600_000), new Date(Date.now() - 600_000)).catch(error => {
-					if (error.code !== "ENOENT") throw error;
-				});
+				expect(await exists(lock)).toBe(true);
+				// A new producer takes over the dead process lock, publishes, then gives the body back.
+				const publication = await store.publish(Buffer.from(body), { extension: "png" });
+				expect(await exists(lock)).toBe(false);
+				expect(await fs.readFile(publication.displayPath)).toEqual(Buffer.from(body));
+				await publication.abandon();
 			}
 		}
+		const abandoned = await store.publish(Buffer.from(`abandoned-${crypto.randomUUID()}`), { extension: "png" });
+		await abandoned.abandon();
+		hashes.push(abandoned.hash);
+
 		const token = `${crypto.randomUUID()}${crypto.randomUUID()}`;
 		const worker = await startStorageWorker(executable!, root, token, 1);
 		try {
 			let complete = false;
+			// The real worker reclaims on its own maintenance clock; the managed tree is the only signal to poll.
 			for (let attempt = 0; attempt < 1_200; attempt++) {
 				const inventory = await Promise.all([
 					fs.readdir(store.intentsDir),
 					fs.readdir(store.stagingDir),
-					fs.readdir(store.completedDir),
 					fs.readdir(store.locksDir),
+					fs.readdir(store.liveDir),
 				]);
-				if (
-					inventory.every(items => items.length === 0) &&
-					hashes.every(hash => !Bun.file(path.join(store.liveDir, hash)).size)
-				) {
+				if (inventory.every(items => items.length === 0)) {
 					complete = true;
 					break;
 				}
@@ -118,5 +100,5 @@ it.skip(
 			await worker.stop();
 		}
 	},
-	90_000,
+	120_000,
 );

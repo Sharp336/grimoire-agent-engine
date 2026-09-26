@@ -1,7 +1,5 @@
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { getBlobsDir } from "@oh-my-pi/pi-utils";
-import { BLOB_RANGE_BYTES, BlobStore, parseBlobRef } from "./blob-store";
+import { type BlobPublication, BlobStore, parseBlobRef } from "./blob-store";
 import {
 	type NativeSessionCheckpoint,
 	type NativeSessionPosition,
@@ -18,8 +16,6 @@ import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
 
 const NATIVE_ENTRY_BLOB_SCHEMA = "omp.native.entry.blob.v1" as const;
-export const NATIVE_ENTRY_BLOB_GC_GUARD_FILE = ".native-entry-blobs";
-const NATIVE_ENTRY_BLOB_GC_GUARD_CONTENT = '{"schema":"omp.native.entry.blob.gc-guard.v1"}\n';
 const NATIVE_INLINE_ENTRY_PAYLOAD_BYTES = 192 * 1024;
 const NATIVE_ENTRY_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const NATIVE_WRITE_INPUT_MAX_BYTES = 1024 * 1024 - 4096;
@@ -52,56 +48,6 @@ function nativeEntryBlobMarker(payload: StoragePayload): NativeEntryBlobMarker |
 	return payload as NativeEntryBlobMarker;
 }
 
-function errorCode(error: unknown): string | undefined {
-	return typeof error === "object" && error !== null && "code" in error
-		? String((error as { code?: unknown }).code)
-		: undefined;
-}
-
-async function ensureNativeEntryBlobGcGuard(blobs: BlobStore): Promise<void> {
-	await fs.mkdir(blobs.dir, { recursive: true });
-	const guard = path.join(blobs.dir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE);
-	const temporary = `${guard}.${crypto.randomUUID()}.tmp`;
-	let failed = false;
-	let failure: unknown;
-	try {
-		const handle = await fs.open(temporary, "wx");
-		try {
-			await handle.writeFile(NATIVE_ENTRY_BLOB_GC_GUARD_CONTENT);
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		try {
-			await fs.link(temporary, guard);
-		} catch (error) {
-			if (errorCode(error) !== "EEXIST") throw error;
-			const existing = await fs.lstat(guard);
-			if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("Native entry blob GC guard is unsafe");
-		}
-		if (process.platform !== "win32") {
-			const directory = await fs.open(blobs.dir, "r");
-			try {
-				await directory.sync();
-			} finally {
-				await directory.close();
-			}
-		}
-	} catch (error) {
-		failed = true;
-		failure = error;
-	}
-	try {
-		await fs.unlink(temporary);
-	} catch (error) {
-		if (errorCode(error) !== "ENOENT" && !failed) {
-			failed = true;
-			failure = error;
-		}
-	}
-	if (failed) throw failure;
-}
-
 /**
  * Detach one entry into its native record: images become blob references, over-long strings are
  * trimmed, and if the JSON still exceeds one entry blob the longest strings are trimmed further.
@@ -129,13 +75,12 @@ function nativeRecord(entry: SessionEntry, bodies: Map<string, Buffer>): NativeR
  * Assemble the write around records whose payloads are serialized exactly once. The envelope is
  * serialized once with `{}` placeholders, which detaches the checkpoint and measures every wire byte;
  * records above 192 KiB, then the largest ones until the request fits, move into entry blobs.
- * `referencesBlobs` reports whether any assembled payload names a blob.
  */
 function prepareNativeWrite(
 	envelope: NativeWriteInput,
 	records: readonly NativeRecord[],
 	bodies: Map<string, Buffer>,
-): { write: NativeWriteInput; bytes: number; referencesBlobs: boolean } {
+): { write: NativeWriteInput; bytes: number } {
 	const serialized = JSON.stringify(envelope);
 	const write = JSON.parse(serialized) as NativeWriteInput;
 	const targets = [...write.entries, ...(write.nativeEdits ?? []).flatMap(edit => (edit.entry ? [edit.entry] : []))];
@@ -162,9 +107,7 @@ function prepareNativeWrite(
 		throw new NativeSessionWriteRejectedError("Native write exceeds the storage request byte budget");
 	for (const [index, target] of targets.entries())
 		target.payload = payloads[index] ?? (JSON.parse(records[index].json) as StoragePayload);
-	const referencesBlobs =
-		bodies.size > 0 || targets.some(target => nativePayloadBlobHashes(target.payload).length > 0);
-	return { write, bytes, referencesBlobs };
+	return { write, bytes };
 }
 
 /** Every blob one native entry payload names (C2-A): its entry-blob body, or its image and upload references. */
@@ -191,26 +134,20 @@ async function decodeEntry(entry: StorageEntry, blobs: BlobStore): Promise<Sessi
 	if (marker) {
 		const hash = parseBlobRef(marker.ref);
 		if (!hash) throw new Error("Native entry blob marker has an invalid reference");
-		const chunks: Buffer[] = [];
-		const digest = new Bun.SHA256();
+		const data = Buffer.allocUnsafe(marker.bytes);
 		let offset = 0;
-		while (offset < marker.bytes) {
-			const range = await blobs.getRange(hash, offset, BLOB_RANGE_BYTES);
-			if (!range) throw new Error(`Native entry blob ${hash} is missing`);
-			if (range.totalBytes !== marker.bytes) throw new Error(`Native entry blob ${hash} has the wrong byte length`);
-			if (!range.data.byteLength || offset + range.data.byteLength > marker.bytes)
-				throw new Error(`Native entry blob ${hash} returned an invalid byte range`);
-			chunks.push(range.data);
-			digest.update(range.data);
-			const nextOffset = offset + range.data.byteLength;
-			if (range.nextOffset !== (nextOffset < marker.bytes ? nextOffset : null))
-				throw new Error(`Native entry blob ${hash} returned a discontinuous byte range`);
-			offset = nextOffset;
+		let present: boolean;
+		try {
+			present = await blobs.readVerified(hash, marker.bytes, chunk => {
+				offset += chunk.copy(data, offset);
+			});
+		} catch (error) {
+			throw new Error(`Native entry blob ${hash} size or hash does not match its marker`, { cause: error });
 		}
-		if (digest.digest("hex") !== hash) throw new Error(`Native entry blob ${hash} hash does not match its contents`);
+		if (!present) throw new Error(`Native entry blob ${hash} is missing`);
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(Buffer.concat(chunks, marker.bytes).toString("utf8"));
+			parsed = JSON.parse(data.toString("utf8"));
 		} catch (error) {
 			throw new Error(`Native entry blob ${hash} does not contain valid JSON`, { cause: error });
 		}
@@ -403,9 +340,18 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		if (this.#pendingBytes + bytes > this.#maxPendingBytes)
 			throw new NativeSessionWriteRejectedError("Native pending byte admission budget exhausted");
 		const submit = async () => {
-			for (const [hash, data] of bodies) await this.#blobs.restore(hash, data);
-			if (prepared.referencesBlobs) await ensureNativeEntryBlobGcGuard(this.#blobs);
-			return this.#client.write(prepared.write);
+			// Each body stays pinned by its intent until the record that owns it is applied (C3).
+			const publications: BlobPublication[] = [];
+			try {
+				for (const data of bodies.values()) publications.push(await this.#blobs.publish(data));
+				const receipt = await this.#client.write(prepared.write);
+				await Promise.all(publications.map(publication => publication.release()));
+				return receipt;
+			} catch (error) {
+				// Also right when the outcome is unknown: the owner keeps any body an applied record owns.
+				await Promise.all(publications.map(publication => publication.abandon()));
+				throw error;
+			}
 		};
 		// Buffered writes resolve at application, not WAL durability. The next prefix
 		// cannot overtake it; a failed prefix also rejects all already admitted successors.

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as url from "node:url";
 import {
 	__resetProfileSnapshotForTests,
+	adoptBlobsDirFromEnv,
 	getActiveProfile,
 	getAgentDbPath,
 	getAgentDir,
@@ -265,6 +266,26 @@ describe("profile directories", () => {
 			if (previous === undefined) delete process.env.PI_BLOBS_DIR;
 			else process.env.PI_BLOBS_DIR = previous;
 		}
+	});
+
+	it("keeps an adopted contour blob root for this process while tool children no longer inherit it", async () => {
+		const previous = process.env.PI_BLOBS_DIR;
+		const contour = path.join(tempRoot, "storage", "blobs");
+		try {
+			process.env.PI_BLOBS_DIR = contour;
+			adoptBlobsDirFromEnv();
+			expect(getBlobsDir()).toBe(contour);
+			// A nested `omp` started by a tool must fall back to its own store, not the storage worker's root.
+			const child = Bun.spawn([process.execPath, "-e", "process.stdout.write(process.env.PI_BLOBS_DIR ?? '')"], {
+				stdout: "pipe",
+			});
+			expect(await new Response(child.stdout).text()).toBe("");
+			expect(await child.exited).toBe(0);
+		} finally {
+			adoptBlobsDirFromEnv();
+			if (previous !== undefined) process.env.PI_BLOBS_DIR = previous;
+		}
+		expect(getBlobsDir()).toBe(previous && path.isAbsolute(previous) ? previous : path.join(getAgentDir(), "blobs"));
 	});
 });
 

@@ -6490,10 +6490,15 @@ function decodeCanonicalBase64(value: string, label: string): Buffer {
 	return bytes;
 }
 
+/** SQLite-mode archive restore: the JSONL session reads these bodies from the flat root. */
 async function restoreCheckpointBlobs(checkpoint: NativeSessionCheckpoint): Promise<void> {
 	const store = new BlobStore(getBlobsDir());
-	for (const blob of checkpoint.blobs ?? [])
-		await store.restore(blob.name, decodeCanonicalBase64(blob.contentBase64, "Archive image"));
+	for (const blob of checkpoint.blobs ?? []) {
+		const data = decodeCanonicalBase64(blob.contentBase64, "Archive image");
+		if (new Bun.SHA256().update(data).digest("hex") !== blob.name)
+			throw new Error("Archived blob hash does not match");
+		await store.put(data);
+	}
 }
 
 function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {

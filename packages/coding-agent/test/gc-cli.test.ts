@@ -6,12 +6,6 @@ import * as path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { NATIVE_ENTRY_BLOB_GC_GUARD_FILE } from "@oh-my-pi/pi-coding-agent/session/rocks-native-session-storage";
-import * as storageClient from "@oh-my-pi/pi-coding-agent/session/storage-client";
-import {
-	STORAGE_PROTOCOL_SCHEMA_HASH,
-	type StorageProtocolRequest,
-} from "@oh-my-pi/pi-coding-agent/session/storage-protocol";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -169,19 +163,16 @@ describe("runGcCommand blob sweep", () => {
 		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
 
-	test("keeps original attachments referenced inside external entries", async () => {
-		const attachment = await writeBlob(root, hashFor("attachment"), "attachment");
-		const entry = JSON.stringify({ originalAttachments: [{ contentHash: `sha256:${hashFor("attachment")}` }] });
-		const entryHash = new Bun.SHA256().update(entry).digest("hex");
-		const external = await writeBlob(root, entryHash, entry);
-		await agePath(attachment);
-		await agePath(external);
-		await writeSession(root, "project", "session-1", "complete", { blobRef: `blob:sha256:${entryHash}` });
+	test("--apply never enters the storage worker's managed tree", async () => {
+		const managed = path.join(getBlobsDir(root), ".managed", "live", hashFor("managed"));
+		await fs.mkdir(path.dirname(managed), { recursive: true });
+		await Bun.write(managed, "managed");
+		await agePath(managed);
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
 
-		expect(result.blobs?.deleted).toBe(0);
-		expect(await Bun.file(attachment).exists()).toBe(true);
+		expect(result.blobs?.candidates).toBe(0);
+		expect(await Bun.file(managed).exists()).toBe(true);
 	});
 
 	test("--apply keeps fresh unreferenced blobs out of sweep candidates", async () => {
@@ -192,131 +183,6 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.wouldDelete).toBe(0);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(blob).exists()).toBe(true);
-	});
-
-	test("--apply keeps blobs referenced only by native entry markers", async () => {
-		const hash = hashFor("native-entry");
-		const blob = await writeBlob(root, hash, "native-entry");
-		await agePath(blob);
-		const requests: StorageProtocolRequest[] = [];
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			async fetch(request) {
-				const body = (await request.json()) as StorageProtocolRequest;
-				requests.push(body);
-				const response = (requestId: string, fields: object) =>
-					Response.json({
-						schema: "artel.storage.protocol.response.v1",
-						version: "1.0",
-						requestId,
-						incarnation: 1,
-						...fields,
-					});
-				if (body.operation === "runtime_query") {
-					if (body.query.selector.type !== "index") throw new Error("Expected index query");
-					const records =
-						body.query.selector.key[0] === "attempt" && body.query.selector.cursor === undefined
-							? [
-									{
-										kind: "attempt",
-										id: "attempt-1",
-										revision: 1,
-										value: {
-											transcript_native: {
-												familyId: "family-1",
-												generationId: "generation-1",
-												throughSeq: 1,
-												incarnation: 1,
-											},
-										},
-									},
-								]
-							: [];
-					return response(body.query.requestId, {
-						records,
-						nextCursor: records.length ? "attempt-page-2" : null,
-						indexRevision: 7,
-					});
-				}
-				if (body.operation !== "read_range") throw new Error(`Unexpected operation ${body.operation}`);
-				const firstPage = body.read.cursor === undefined;
-				return response(body.read.requestId, {
-					familyId: body.read.familyId,
-					generationId: body.read.generationId,
-					throughSeq: body.read.cutSeq ?? 1,
-					durableThroughSeq: 1,
-					liveThroughSeq: 1,
-					events: firstPage
-						? [
-								{
-									seq: 1,
-									entryId: "entry-1",
-									parentId: null,
-									kind: "message",
-									payload: { schema: "omp.native.entry.blob.v1", ref: `blob:sha256:${hash}`, bytes: 123 },
-								},
-							]
-						: [],
-					nextCursor: firstPage ? "entry-page-2" : null,
-				});
-			},
-		});
-		const binding = {
-			url: `http://127.0.0.1:${server.port}`,
-			token: "0123456789012345",
-			incarnation: 1,
-			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
-		};
-		const readBinding = spyOn(storageClient, "readStorageBinding").mockReturnValue(binding);
-		try {
-			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
-
-			expect(result.blobs?.referenced).toBe(1);
-			expect(result.blobs?.wouldDelete).toBe(0);
-			expect(result.blobs?.deleted).toBe(0);
-			expect(result.blobs?.errors).toEqual(["native blob deletion is owned by the storage worker"]);
-			expect(await Bun.file(blob).exists()).toBe(true);
-			const rangeReads = requests.flatMap(request =>
-				request.operation === "read_range" && request.read ? [request.read] : [],
-			);
-			expect(
-				rangeReads.map(read => ({
-					cursor: read.cursor,
-					cutSeq: read.cutSeq,
-					maxRecords: read.maxRecords,
-					maxBytes: read.maxBytes,
-				})),
-			).toEqual([
-				{ cursor: undefined, cutSeq: undefined, maxRecords: 128, maxBytes: 1024 * 1024 },
-				{ cursor: "entry-page-2", cutSeq: 1, maxRecords: 128, maxBytes: 1024 * 1024 },
-			]);
-		} finally {
-			readBinding.mockRestore();
-			await server.stop(true);
-		}
-	});
-
-	test("--apply refuses native blob sweep without a ClientHost storage binding", async () => {
-		const blob = await writeBlob(root, hashFor("native-unscanned"), "native-unscanned");
-		await Bun.write(
-			path.join(getBlobsDir(root), NATIVE_ENTRY_BLOB_GC_GUARD_FILE),
-			'{"schema":"omp.native.entry.blob.gc-guard.v1"}\n',
-		);
-		await agePath(blob);
-		const readBinding = spyOn(storageClient, "readStorageBinding").mockReturnValue(undefined);
-		try {
-			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
-
-			expect(result.blobs?.wouldDelete).toBe(0);
-			expect(result.blobs?.deleted).toBe(0);
-			expect(result.blobs?.errors).toEqual([
-				"native storage scan: ClientHost storage binding is required to scan native entry blob references",
-			]);
-			expect(await Bun.file(blob).exists()).toBe(true);
-		} finally {
-			readBinding.mockRestore();
-		}
 	});
 
 	test("--apply scans recoverable session backups before deleting blobs", async () => {

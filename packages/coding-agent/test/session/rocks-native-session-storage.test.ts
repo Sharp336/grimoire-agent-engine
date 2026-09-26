@@ -9,11 +9,7 @@ import {
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
 import { withOriginalAttachment } from "../../src/session/original-attachments";
-import {
-	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
-	nativePayloadBlobHashes,
-	RocksNativeSessionStorage,
-} from "../../src/session/rocks-native-session-storage";
+import { nativePayloadBlobHashes, RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { StorageClient, StorageClientError } from "../../src/session/storage-client";
 import {
@@ -207,7 +203,8 @@ it("stores message images as blob references, publishes one body and restores ba
 		const client = new MemoryNativeClient();
 		const image = Buffer.from(Uint8Array.from({ length: 40_000 }, (_, index) => (index * 7) & 0xff));
 		// An uploaded attachment already owns this body; the message image must reuse it.
-		const upload = await blobs.put(image);
+		const upload = await blobs.publish(image);
+		await upload.release();
 		const data = image.toString("base64");
 		const manager = SessionManager.createNative("/images", new RocksNativeSessionStorage(client, "images", "root"));
 		for (const timestamp of [1, 2])
@@ -228,6 +225,8 @@ it("stores message images as blob references, publishes one body and restores ba
 				message: { content: [{ type: "text" }, { type: "image", data: `blob:sha256:${upload.hash}` }] },
 			});
 		expect(await fs.readdir(blobs.liveDir)).toEqual([upload.hash]);
+		// Applied writes released their pins; nothing keeps the body from its owner's accounting.
+		expect(await fs.readdir(path.join(blobs.intentsDir, upload.hash))).toEqual([]);
 
 		const cold = await SessionManager.openNative(new RocksNativeSessionStorage(client, "images", "root"));
 		expect(cold.getWorkingEntries()).toEqual(expected);
@@ -599,9 +598,6 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		await manager.flushAndCheckpoint();
 
 		expect(writes).toHaveLength(1);
-		expect(await Bun.file(path.join(blobs.dir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE)).json()).toEqual({
-			schema: "omp.native.entry.blob.gc-guard.v1",
-		});
 		expect(wireBytes.every(bytes => bytes < 1024 * 1024)).toBe(true);
 		expect(stored).toHaveLength(expected.length);
 		const byId = new Map(stored.map(entry => [entry.entryId, entry]));
@@ -634,7 +630,6 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
 			/blob.*missing/i,
 		);
-		await blobs.restore(hash, original);
 		await fs.writeFile(blobPath, Buffer.alloc(original.byteLength, 0x5a));
 		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
 			/blob.*hash/i,
