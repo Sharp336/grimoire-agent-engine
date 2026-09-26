@@ -8,9 +8,9 @@
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
-export const STORAGE_PROTOCOL_REVISION = 11 as const;
+export const STORAGE_PROTOCOL_REVISION = 12 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:f36386741fd92df4fc376112dabbdd972432a0b8099d82c611ce98abee5fe560" as const;
+	"sha256:3bb42913852ed0aae8bffd2734a70510360a1c403fd2af9a57effb438114e681" as const;
 
 export type StorageOperation =
 	| "write"
@@ -270,7 +270,10 @@ export type StorageErrorCode =
 	| "storage_error"
 	| "stale_incarnation"
 	| "sequence_gap"
-	| "outcome_unknown";
+	| "outcome_unknown"
+	| "invalid_cursor"
+	| "not_found"
+	| "retryable";
 
 export interface StorageError {
 	code: StorageErrorCode;

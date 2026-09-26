@@ -194,7 +194,7 @@ describe("EngineRuntime", () => {
 					},
 					{ ...profile, restrictToolNames: true, toolNames: ["glob"] },
 				),
-			).rejects.toMatchObject({ code: "invalid_request" });
+			).rejects.toMatchObject({ code: "attachment_requires_read", message: expect.stringContaining("notes.txt") });
 			expect(calls).toBe(0);
 			expect(await setup.runtime.store.getAttempt("file-denied-attempt")).toBeUndefined();
 			const started = await setup.runtime.start(
@@ -267,7 +267,10 @@ describe("EngineRuntime", () => {
 			).rejects.toThrow("read failed");
 			expect(fs.existsSync(copiedPath)).toBeFalse();
 			const original = user.attachments![0].resource!;
-			fs.writeFileSync(path.join(blobDir, original.contentHash.slice(7)), Buffer.alloc(original.bytes, 65));
+			fs.writeFileSync(
+				new BlobStore(blobDir).liveDir + path.sep + original.contentHash.slice(7),
+				Buffer.alloc(original.bytes, 65),
+			);
 			await expect(withOriginalAttachment(manager, uri, async () => "must not run")).rejects.toThrow("SHA-256");
 		} finally {
 			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();

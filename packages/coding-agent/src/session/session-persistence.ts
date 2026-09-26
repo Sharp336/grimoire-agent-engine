@@ -8,9 +8,9 @@ import {
 } from "./blob-store";
 import type { FileEntry } from "./session-entries";
 
-const MAX_PERSIST_CHARS = 500_000;
+export const MAX_PERSIST_CHARS = 500_000;
 const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
-/** Minimum base64 length to externalize to blob store (skip tiny inline images) */
+/** Minimum base64 length to externalize to the JSONL blob store (skip tiny inline images) */
 const BLOB_EXTERNALIZE_THRESHOLD = 1024;
 const TEXT_CONTENT_KEY = "content";
 
@@ -54,10 +54,26 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 function shouldExternalizeImagePayload(
 	value: unknown,
 	key: string | undefined,
+	minImageChars: number,
 ): value is { data: string; mimeType?: string } {
 	if (!isImageDataPayload(value)) return false;
-	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
+	if (isBlobRef(value.data) || value.data.length < minImageChars) return false;
 	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+}
+
+/**
+ * How one persistence target applies the edits the walk collects: where image bodies go and how
+ * long strings may be. The walk decides *what* changes; the policy decides *how* it is stored.
+ */
+interface PersistencePolicy {
+	/** Store decoded base64 image bytes and return their `blob:sha256:` reference. */
+	image(base64: string, mimeType?: string): string;
+	/** Store a provider image data URL byte-exact and return its `blob:sha256:` reference. */
+	dataUrl(url: string): string;
+	/** Longer strings are truncated, except inside signed or encrypted blocks. */
+	maxChars: number;
+	/** Shorter image payloads stay inline. */
+	minImageChars: number;
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -69,16 +85,16 @@ function isNonEmptyString(value: unknown): value is string {
  * Recursively truncate large strings in an object for session persistence.
  * - Truncates oversized string fields (key-agnostic), except signed/encrypted
  *   blocks and signature keys, which persist verbatim
- * - Externalizes oversized image payloads to blob refs
+ * - Externalizes oversized image payloads to blob refs through the policy
  * - Updates lineCount when content is truncated
  * - Returns original object if no changes needed (structural sharing)
  *
  * Runs in one synchronous tick so an OOM/SIGKILL landing right after a persist
- * call returns cannot lose the entry. Image externalization happens via the
+ * call returns cannot lose the entry. The JSONL policy externalizes via the
  * synchronous blob-store path (`fs.writeFileSync`), so blob bytes are in the
  * kernel page cache before the JSONL line referencing them is written.
  */
-function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string): unknown {
+function truncateForPersistence(obj: unknown, policy: PersistencePolicy, key?: string): unknown {
 	if (obj === null || obj === undefined) return obj;
 	if (
 		typeof obj === "object" &&
@@ -87,12 +103,12 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		"result" in obj &&
 		typeof obj.result === "string" &&
 		!isBlobRef(obj.result) &&
-		obj.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+		obj.result.length >= policy.minImageChars
 	) {
-		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
+		return { ...obj, result: policy.image(obj.result) };
 	}
-	if (shouldExternalizeImagePayload(obj, key)) {
-		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
+	if (shouldExternalizeImagePayload(obj, key, policy.minImageChars)) {
+		return { ...obj, data: policy.image(obj.data, obj.mimeType) };
 	}
 	if (
 		typeof obj === "object" &&
@@ -102,7 +118,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		typeof obj.image_url === "string" &&
 		isImageDataUrl(obj.image_url)
 	) {
-		return { ...obj, image_url: externalizeImageDataUrlSync(blobStore, obj.image_url) };
+		return { ...obj, image_url: policy.dataUrl(obj.image_url) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
 	// `arguments` no longer matches its signature and a truncated
@@ -139,7 +155,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	if (typeof obj === "string") {
-		if (obj.length > MAX_PERSIST_CHARS) {
+		if (obj.length > policy.maxChars) {
 			// Defensive: signature keys normally sit on blocks the guard above returns
 			// verbatim, but if one is reached here (unknown carrier shape), preserve it —
 			// truncation produces an invalid signature the API rejects, and clearing
@@ -147,7 +163,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
 				return obj;
 			}
-			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
+			const limit = Math.max(0, policy.maxChars - TRUNCATION_NOTICE.length);
 			return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}`;
 		}
 		return obj;
@@ -158,7 +174,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		const result: unknown[] = new Array(obj.length);
 		for (let i = 0; i < obj.length; i++) {
 			const item = obj[i];
-			const newItem = truncateForPersistence(item, blobStore, key);
+			const newItem = truncateForPersistence(item, policy, key);
 			if (newItem !== item) changed = true;
 			result[i] = newItem;
 		}
@@ -175,7 +191,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 				changed = true;
 				continue;
 			}
-			const newValue = truncateForPersistence(value, blobStore, childKey);
+			const newValue = truncateForPersistence(value, policy, childKey);
 			if (newValue !== value) changed = true;
 			entries.push([childKey, newValue]);
 		}
@@ -296,5 +312,35 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 }
 
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+	return truncateForPersistence(stripReplayedReasoningSignatures(entry), {
+		image: (data, mimeType) => externalizeImageDataSync(blobStore, data, mimeType),
+		dataUrl: url => externalizeImageDataUrlSync(blobStore, url),
+		maxChars: MAX_PERSIST_CHARS,
+		minImageChars: BLOB_EXTERNALIZE_THRESHOLD,
+	}) as FileEntry;
+}
+
+/**
+ * Native storage form of one entry payload: the same image shapes as JSONL become
+ * `blob:sha256:` references, but nothing is written here. Each referenced body lands in
+ * `bodies` (hash -> bytes) for the caller to publish before the record that names it.
+ * Every non-empty image leaves the record, so native history never keeps base64.
+ * Re-applying to a prepared payload with a lower `maxChars` only trims its longest strings.
+ */
+export function prepareNativeEntryPayload(
+	value: unknown,
+	bodies: Map<string, Buffer>,
+	maxChars = MAX_PERSIST_CHARS,
+): unknown {
+	const collect = (data: Buffer): string => {
+		const hash = new Bun.SHA256().update(data).digest("hex");
+		bodies.set(hash, data);
+		return `blob:sha256:${hash}`;
+	};
+	return truncateForPersistence(value, {
+		image: data => collect(Buffer.from(data, "base64")),
+		dataUrl: url => collect(Buffer.from(url, "utf8")),
+		maxChars,
+		minImageChars: 1,
+	});
 }

@@ -1,0 +1,387 @@
+{
+  "schema": "artel.blob_ref_shapes.v1",
+  "contract": "C2-A of gctx:qsnd5pf2783nph8y rev3. Each payload is one native entry payload (record native.payload). hashes is the sorted unique list of lowercase SHA-256 hex digests the payload references. Rust storage-core and Engine TypeScript must derive exactly this list from each payload.",
+  "cases": [
+    {
+      "name": "content_image_block",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "see"
+            },
+            {
+              "type": "image",
+              "data": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "mimeType": "image/png"
+            }
+          ]
+        }
+      },
+      "hashes": [
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    },
+    {
+      "name": "tool_result_content_image",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "toolResult",
+          "content": [
+            {
+              "type": "image",
+              "data": "blob:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "mimeType": "image/webp"
+            }
+          ],
+          "toolCallId": "t1",
+          "toolName": "read"
+        }
+      },
+      "hashes": [
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ]
+    },
+    {
+      "name": "images_item_with_image_mime",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "toolResult",
+          "content": [
+            {
+              "type": "text",
+              "text": "ok"
+            }
+          ],
+          "toolCallId": "t2",
+          "toolName": "browser",
+          "details": {
+            "images": [
+              {
+                "data": "blob:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                "mimeType": "image/jpeg"
+              }
+            ]
+          }
+        }
+      },
+      "hashes": [
+        "2222222222222222222222222222222222222222222222222222222222222222"
+      ]
+    },
+    {
+      "name": "image_generation_call_result",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            }
+          ],
+          "providerPayload": {
+            "items": [
+              {
+                "type": "image_generation_call",
+                "id": "ig1",
+                "result": "blob:sha256:3333333333333333333333333333333333333333333333333333333333333333"
+              }
+            ]
+          }
+        }
+      },
+      "hashes": [
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ]
+    },
+    {
+      "name": "input_image_and_computer_screenshot",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "x"
+            }
+          ],
+          "providerPayload": {
+            "items": [
+              {
+                "type": "input_image",
+                "image_url": "blob:sha256:4444444444444444444444444444444444444444444444444444444444444444"
+              },
+              {
+                "type": "computer_screenshot",
+                "image_url": "blob:sha256:5555555555555555555555555555555555555555555555555555555555555555"
+              }
+            ]
+          }
+        }
+      },
+      "hashes": [
+        "4444444444444444444444444444444444444444444444444444444444444444",
+        "5555555555555555555555555555555555555555555555555555555555555555"
+      ]
+    },
+    {
+      "name": "original_attachments_content_hash",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "file"
+            }
+          ]
+        },
+        "originalAttachments": [
+          {
+            "name": "a.txt",
+            "mediaType": "text/plain",
+            "bytes": 12,
+            "contentHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+          }
+        ]
+      },
+      "hashes": [
+        "6666666666666666666666666666666666666666666666666666666666666666"
+      ]
+    },
+    {
+      "name": "native_entry_blob_marker",
+      "payload": {
+        "schema": "omp.native.entry.blob.v1",
+        "ref": "blob:sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "bytes": 262144
+      },
+      "hashes": [
+        "7777777777777777777777777777777777777777777777777777777777777777"
+      ]
+    },
+    {
+      "name": "inline_base64_is_not_a_ref",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "image",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+              "mimeType": "image/png"
+            }
+          ]
+        }
+      },
+      "hashes": []
+    },
+    {
+      "name": "non_image_shapes_ignored",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "toolResult",
+          "content": [
+            {
+              "type": "text",
+              "text": "blob:sha256:8888888888888888888888888888888888888888888888888888888888888888"
+            }
+          ],
+          "toolCallId": "t3",
+          "toolName": "read",
+          "details": {
+            "images": [
+              {
+                "data": "blob:sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                "mimeType": "text/plain"
+              }
+            ]
+          }
+        }
+      },
+      "hashes": []
+    },
+    {
+      "name": "nested_40_levels",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "toolResult",
+          "content": [
+            {
+              "type": "text",
+              "text": "deep"
+            }
+          ],
+          "toolCallId": "t4",
+          "toolName": "x",
+          "details": {
+            "n": {
+              "n": {
+                "n": {
+                  "n": {
+                    "n": {
+                      "n": {
+                        "n": {
+                          "n": {
+                            "n": {
+                              "n": {
+                                "n": {
+                                  "n": {
+                                    "n": {
+                                      "n": {
+                                        "n": {
+                                          "n": {
+                                            "n": {
+                                              "n": {
+                                                "n": {
+                                                  "n": {
+                                                    "n": {
+                                                      "n": {
+                                                        "n": {
+                                                          "n": {
+                                                            "n": {
+                                                              "n": {
+                                                                "n": {
+                                                                  "n": {
+                                                                    "n": {
+                                                                      "n": {
+                                                                        "n": {
+                                                                          "n": {
+                                                                            "n": {
+                                                                              "n": {
+                                                                                "n": {
+                                                                                  "n": {
+                                                                                    "n": {
+                                                                                      "n": {
+                                                                                        "n": {
+                                                                                          "n": {
+                                                                                            "content": [
+                                                                                              {
+                                                                                                "type": "image",
+                                                                                                "data": "blob:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                                                                                "mimeType": "image/png"
+                                                                                              }
+                                                                                            ]
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  }
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "hashes": [
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    },
+    {
+      "name": "duplicates_collapse",
+      "payload": {
+        "type": "message",
+        "id": "e1",
+        "parentId": null,
+        "timestamp": "2026-09-26T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "image",
+              "data": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "mimeType": "image/png"
+            },
+            {
+              "type": "image",
+              "data": "blob:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "mimeType": "image/png"
+            }
+          ]
+        },
+        "originalAttachments": [
+          {
+            "name": "p.png",
+            "mediaType": "image/png",
+            "bytes": 70,
+            "contentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "hashes": [
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ]
+    }
+  ]
+}

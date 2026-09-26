@@ -4,11 +4,11 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, parseImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 import { BLOB_RANGE_BYTES, type BlobStore } from "../session/blob-store";
 import { copyOriginalAttachments, type SessionOriginalAttachment } from "../session/session-entries";
-import { readStorageBinding, StorageClient, storageCanonicalJson } from "../session/storage-client";
+import { storageCanonicalJson } from "../session/storage-client";
 import { MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
 import { type EngineAttachmentDescriptor, type EngineMessageAttachments, EngineTargetError } from "./contracts";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
-import { RuntimeRecords } from "./runtime-records";
+import type { RuntimeRecords } from "./runtime-records";
 
 export interface EngineAttachment extends EngineAttachmentDescriptor {}
 
@@ -51,17 +51,16 @@ export function messageAttachmentReferences(value: EngineMessageAttachments): En
 	attachmentOwner(value.principalId);
 	if (!Array.isArray(value.uploadIds) || !value.uploadIds.length)
 		invalid("Message attachment references must contain upload IDs");
+	if (value.uploadIds.length > runtimeLimits.maxAttachmentsPerMessage)
+		throw new EngineTargetError(
+			"payload_too_large",
+			`A message can carry at most ${runtimeLimits.maxAttachmentsPerMessage} attachments`,
+		);
+	// 128 schema-bounded IDs (<= 200 ASCII chars) stay far below the command byte budget.
 	const seen = new Set<string>();
-	let bytes = Buffer.byteLength(JSON.stringify({ principalId: value.principalId, uploadIds: [] }));
 	for (const uploadId of value.uploadIds) {
 		validateRuntimeValue("id", uploadId);
 		if (seen.has(uploadId)) invalid("Message attachment references contain a duplicate upload ID");
-		bytes += Buffer.byteLength(uploadId) + 2 + (seen.size ? 1 : 0);
-		if (bytes > runtimeLimits.wsMessageBytes)
-			throw new EngineTargetError(
-				"payload_too_large",
-				"Message attachment references exceed the command byte budget",
-			);
 		seen.add(uploadId);
 	}
 	return { principalId: value.principalId, uploadIds: [...value.uploadIds] };
@@ -112,12 +111,12 @@ export class EngineAttachmentUploads {
 		readonly blobs: BlobStore,
 		records?: RuntimeRecords,
 	) {
-		const binding = records ? undefined : readStorageBinding();
-		this.#records = records ?? (binding ? new RuntimeRecords(new StorageClient(binding)) : undefined);
+		this.#records = records;
 	}
 
 	async #publish(principalId: string, attachment: EngineAttachment, state: "publishing" | "ready"): Promise<void> {
 		const records = this.#records;
+		// SQLite mode keeps no upload ledger; this guard goes away with that mode (S5.6 B6).
 		if (!records) return;
 		const { key, ownerHash } = this.#key(principalId, attachment.uploadId);
 		await records.mutate(`blob-upload:${key}`, async tx => {
@@ -326,6 +325,28 @@ export class EngineAttachmentUploads {
 		}
 	}
 
+	/** Uploads staged per owner and message; kept beside `root`, whose entries are upload directories only. */
+	#messageIndex(ownerHash: string, clientMessageId: string): string {
+		const id = new Bun.SHA256().update(`${ownerHash}\0${clientMessageId}`).digest("hex");
+		return path.join(`${this.root}-messages`, id);
+	}
+
+	/** Count a new upload against its message before its first chunk is staged. */
+	async #admit(ownerHash: string, clientMessageId: string, key: string): Promise<void> {
+		const index = this.#messageIndex(ownerHash, clientMessageId);
+		await this.#lane(index, async () => {
+			await fs.promises.mkdir(index, { recursive: true });
+			const staged = await fs.promises.readdir(index);
+			if (staged.includes(key)) return;
+			if (staged.length >= runtimeLimits.maxAttachmentsPerMessage)
+				throw new EngineTargetError(
+					"payload_too_large",
+					`A message can carry at most ${runtimeLimits.maxAttachmentsPerMessage} attachments`,
+				);
+			await fs.promises.writeFile(path.join(index, key), "");
+		});
+	}
+
 	async stage(
 		principalId: string,
 		request: EngineAttachmentStageRequest,
@@ -337,6 +358,11 @@ export class EngineAttachmentUploads {
 	}> {
 		const attachment = attachmentIdentity(request);
 		const { key, ownerHash } = this.#key(principalId, attachment.uploadId);
+		if (attachment.bytes > runtimeLimits.maxAttachmentBytes)
+			throw new EngineTargetError(
+				"payload_too_large",
+				`Attachment exceeds the ${runtimeLimits.maxAttachmentBytes / 1024 / 1024} MiB file limit`,
+			);
 		if (!Number.isSafeInteger(request.offset) || request.offset < 0 || request.offset > attachment.bytes)
 			invalid("Attachment offset is outside the upload");
 		if (
@@ -357,11 +383,13 @@ export class EngineAttachmentUploads {
 			signal?.throwIfAborted();
 			let dir: string;
 			try {
-				dir = await this.#directory(key, offset === 0);
+				dir = await this.#directory(key, false);
 			} catch (error) {
-				if (isEnoent(error))
+				if (!isEnoent(error)) throw error;
+				if (offset !== 0)
 					throw new EngineTargetError("stale_target", "Attachment upload must start at offset zero");
-				throw error;
+				await this.#admit(ownerHash, attachment.clientMessageId, key);
+				dir = await this.#directory(key, true);
 			}
 			await this.#assertPresent(dir);
 			let manifest: UploadManifest;
@@ -410,7 +438,8 @@ export class EngineAttachmentUploads {
 						if (!bytesWritten) throw new Error("Attachment write made no progress");
 						written += bytesWritten;
 					}
-					await handle.sync();
+					// No per-chunk fsync: import copies, hashes and syncs the canonical blob, so an OS crash
+					// that tears staged bytes fails the final SHA-256 check instead of publishing them.
 					currentBytes = offset + chunk.length;
 				}
 			} finally {
@@ -485,7 +514,7 @@ export class EngineAttachmentUploads {
 		});
 	}
 
-	/** Image delivery only; unsupported file types stay explicit until file-tool delivery is wired. */
+	/** Images reach the model inline; every file also travels as an original attachment the read tool opens via attachment://. */
 	async prepareForMessage(
 		clientMessageId: string,
 		references: EngineMessageAttachments,
@@ -563,6 +592,16 @@ export class EngineAttachmentUploads {
 			await fs.promises.unlink(path.join(dir, "payload.bin")).catch(error => {
 				if (!isEnoent(error)) throw error;
 			});
+			const manifest = await this.#manifest(dir).catch(error => {
+				if (isEnoent(error)) return undefined;
+				throw error;
+			});
+			if (manifest)
+				await fs.promises
+					.unlink(path.join(this.#messageIndex(ownerHash, manifest.attachment.clientMessageId), key))
+					.catch(error => {
+						if (!isEnoent(error)) throw error;
+					});
 			if (this.#records)
 				await this.#records.mutate(`blob-upload:${key}`, async tx => {
 					await tx.delete("metadata", `blob-upload:${key}`);

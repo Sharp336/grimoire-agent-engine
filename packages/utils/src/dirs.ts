@@ -796,8 +796,13 @@ export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
 }
 
-/** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
+/**
+ * Get the content-addressed blob store directory (~/.omp/agent/blobs).
+ * Without an explicit agent dir, an absolute `PI_BLOBS_DIR` (a storage contour's own body root) wins.
+ */
 export function getBlobsDir(agentDir?: string): string {
+	const contourRoot = agentDir === undefined ? process.env.PI_BLOBS_DIR : undefined;
+	if (contourRoot && path.isAbsolute(contourRoot)) return contourRoot;
 	return dirs.agentSubdir(agentDir, "blobs", "data");
 }
 

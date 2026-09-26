@@ -1,4 +1,6 @@
+import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type { SessionHeader } from "../session/session-entries";
+import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
 import { type EngineTarget, EngineTargetError } from "./contracts";
 import { resolveRestoreWorkspace } from "./rocks-restore-workspace";
@@ -37,10 +39,10 @@ export async function nativeScope(
 	if (attemptId && (!attempt || attempt.agent_instance_id !== agentId))
 		throw new EngineTargetError("stale_target", "History Attempt belongs to another agent");
 	const path = attempt?.transcript_path ?? binding?.session_file;
-	const match = path?.match(/^native:([^/]+)\/([^/]+)$/);
-	if (!path || !match) throw new EngineTargetError("history_expired", "Native history locator is not retained");
+	if (!path?.startsWith("native:"))
+		throw new EngineTargetError("history_expired", "Native history locator is not retained");
 	return {
-		scope: { familyId: decodeURIComponent(match[1]), generationId: decodeURIComponent(match[2]) },
+		scope: parseNativeSessionLocator(path),
 		path,
 		attempt,
 		currentAttemptId: attemptId ?? binding?.attempt_id ?? null,
@@ -51,6 +53,14 @@ function header(state: Record<string, unknown> | null | undefined): SessionHeade
 	if (!value || typeof value.id !== "string")
 		throw new EngineTargetError("history_expired", "Native session header is not retained");
 	return value;
+}
+/** One bounded record: the native checkpoint state carries the header without reading the context. */
+export async function readNativeHeader(
+	client: StorageClient,
+	scope: NativeScope,
+): Promise<{ header: SessionHeader; throughSeq: number }> {
+	const page = await client.readContext({ ...scope, maxRecords: 1, maxBytes: runtimeLimits.httpPageBytes });
+	return { header: header(page.state), throughSeq: page.throughSeq };
 }
 export async function nativeSessionHeader(
 	store: RocksEngineStore,
@@ -66,15 +76,10 @@ export async function nativeSessionHeader(
 		attempt.authority_generation !== target.authorityGeneration
 	)
 		throw new EngineTargetError("stale_target", "Native session target changed");
-	const page = await store.storageClient.readContext({
-		...selected.scope,
-		maxRecords: 1,
-		maxBytes: runtimeLimits.httpPageBytes,
-	});
-	const value = header(page.state);
+	const { header: value, throughSeq } = await readNativeHeader(store.storageClient, selected.scope);
 	const mapped = await resolveRestoreWorkspace(store, target.agentInstanceId, selected.path, value, {
 		...selected.scope,
-		throughSeq: page.throughSeq,
+		throughSeq,
 		incarnation: store.storageClient.incarnation,
 	});
 	return { sessionId: value.id, cwd: mapped?.cwd ?? value.cwd ?? null };

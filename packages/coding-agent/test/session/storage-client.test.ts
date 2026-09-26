@@ -254,25 +254,30 @@ it("fences all later calls after the owner incarnation changes", async () => {
 	}
 });
 
-it("keeps a matching server schema rejection local while fencing a protocol mismatch", async () => {
+it("keeps every failed read local and fences only an unknown write or barrier outcome", async () => {
 	let requests = 0;
+	const hang = Promise.withResolvers<void>();
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
 		async fetch(request) {
 			requests++;
 			const body = (await request.json()) as TestRequest;
-			if (requests === 1)
+			if (body.operation === "write") return new Response(null, { status: 408 });
+			if (body.operation === "receipt")
+				return envelope(body.receipt.requestId, {
+					error: { code: "outcome_unknown", message: "no authoritative receipt", retryable: true },
+				});
+			// The client's own deadline is the behavior under test; the response never arrives.
+			if (body.operation === "barrier") await hang.promise;
+			if (body.read.familyId === "degraded")
 				return envelope(body.read.requestId, {
-					error: { code: "schema_error", message: "entry payload exceeds its schema budget", retryable: false },
+					error: { code: "storage_error", message: "RocksDB read failed", retryable: false },
 				});
-			if (requests === 3)
-				return Response.json({
-					schema: "wrong.storage.protocol",
-					version: "1.0",
-					requestId: body.read.requestId,
-					incarnation: 1,
-				});
+			if (body.read.familyId === "garbled")
+				return Response.json({ schema: "wrong.storage.protocol", version: "1.0", requestId: body.read.requestId });
+			if (body.read.familyId === "oversized") return envelope(body.read.requestId, { padding: "x".repeat(4096) });
+			if (body.read.familyId === "slow") await hang.promise;
 			return envelope(body.read.requestId, {
 				familyId: body.read.familyId,
 				generationId: body.read.generationId,
@@ -284,30 +289,36 @@ it("keeps a matching server schema rejection local while fencing a protocol mism
 			});
 		},
 	});
+	const read = (familyId: string) => client.readRange({ familyId, generationId: "g", maxRecords: 1, maxBytes: 1024 });
+	const client = new StorageClient(binding(server.port!), { deadlineMs: 200, responseBytes: 2048 });
 	try {
-		const client = new StorageClient(binding(server.port!));
+		await expect(read("degraded")).rejects.toThrow("RocksDB read failed");
+		await expect(read("garbled")).rejects.toMatchObject({ code: "retryable" });
+		await expect(read("oversized")).rejects.toThrow("exceeded its byte budget");
+		await expect(read("slow")).rejects.toMatchObject({ code: "retryable" });
+		const stopped = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(null) });
+		await stopped.stop(true);
+		const offline = new StorageClient(binding(stopped.port!));
 		await expect(
-			client.readRange({ familyId: "rejected", generationId: "one", maxRecords: 1, maxBytes: 1024 }),
-		).rejects.toThrow("entry payload exceeds its schema budget");
+			offline.readRange({ familyId: "refused", generationId: "g", maxRecords: 1, maxBytes: 1024 }),
+		).rejects.toMatchObject({ code: "retryable" });
+		expect(offline.failure).toBeUndefined();
+		// A barrier confirms durability of accepted writes, so its lost outcome is a write outcome.
+		const barrier = new StorageClient(binding(server.port!), { deadlineMs: 200 });
+		await expect(
+			barrier.barrier({ familyId: "f", generationId: "g", throughSeq: 1, dependencies: [] }),
+		).rejects.toMatchObject({ code: "outcome_unknown" });
+		expect(barrier.failure?.code).toBe("outcome_unknown");
 		expect(client.failure).toBeUndefined();
-		expect(
-			(
-				await client.readRange({
-					familyId: "unrelated",
-					generationId: "two",
-					maxRecords: 1,
-					maxBytes: 1024,
-				})
-			).events,
-		).toEqual([]);
-		await expect(
-			client.readRange({ familyId: "broken", generationId: "three", maxRecords: 1, maxBytes: 1024 }),
-		).rejects.toThrow("protocol mismatch");
-		expect(() =>
-			client.readRange({ familyId: "later", generationId: "four", maxRecords: 1, maxBytes: 1024 }),
-		).toThrow("protocol mismatch");
-		expect(requests).toBe(3);
+		expect((await read("healthy")).events).toEqual([]);
+
+		await expect(client.write(input)).rejects.toThrow("outcome is unknown");
+		expect(client.failure?.code).toBe("outcome_unknown");
+		const before = requests;
+		expect(() => read("healthy")).toThrow("outcome is unknown");
+		expect(requests).toBe(before);
 	} finally {
+		hang.resolve();
 		await server.stop(true);
 	}
 });

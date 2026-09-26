@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 12,
+    "contractRevision": 13,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -28,7 +28,9 @@
       "branchControlMaterializedBytes": 4194304,
       "httpPageRecords": 100,
       "httpPageBytes": 1048576,
-      "httpConcurrentPages": 2,
+      "httpConcurrentPages": 5,
+      "httpReadQueueRecords": 64,
+      "httpReadWaitMs": 10000,
       "uiApplyBudgetMs": 8,
       "dedupHorizonMs": 2592000000,
       "maxConnections": 144,
@@ -62,7 +64,7 @@
       "maxServerControlRpcPerSecond": 128,
       "maxAckPerSecond": 1024,
       "maxServerAckPerSecond": 4096,
-      "serverHttpConcurrentPages": 8,
+      "serverHttpConcurrentPages": 16,
       "detailInterests": 32,
       "detailKinds": 7,
       "summaryBytes": 4096,
@@ -96,7 +98,9 @@
       "maxInitializedConnections": 128,
       "inputMaxQuestions": 32,
       "inputMaxOptions": 32,
-      "inputPreviewBytes": 32768
+      "inputPreviewBytes": 32768,
+      "maxAttachmentsPerMessage": 128,
+      "maxAttachmentBytes": 268435456
     },
     "controlActions": [
       "pause",
@@ -204,7 +208,7 @@
       "ordering": "No app/branch arrival order. Terminal summary never stops detail; settled+history boundary completes it. Every detail identifies exact Attempt. PendingStart target supersedes older terminal Attempt only when authoritatively reported; result.target is command context, never a summary writer. Every actionTarget carries its own authorityGeneration; pendingStart requires exact paired attemptId/executionId. Summary owner generation does not substitute pending target generation. detailState.target identifies exactly detailState.attemptId (null means no Attempt); it is action context for that detail, never substituted with pendingStart of another Attempt. Input/usage/context/history invalidations always carry exact attemptId; queue/holds invalidations are AGI-scoped.",
       "recovery": "fresh rejects old cursors. snapshot continues after the supplied fresh owner cut; reconnect may replay only compatible epoch/projectionHash. projectionHash is SHA256 of canonicalRuntimeJson(scope), and all source copies use this contract hash. HTTP request/response is guarded by local observer interest/auth generation; stale restore is aborted. Total replay budgets span every hasMore, never reset per batch; excessive gap must be detected by bounded indexed work, then resnapshot. Owner eventBatch reports bounded work and headCursor from that consistent read. Recovery freezes its end at the first headCursor and must not chase a moving live head. Total work counters continue across hasMore. Query-side resync errors stop before materializing an unbounded backlog. Native runtime.events.wait receives fixed untilCursor after the first owner head plus remainingWork. Owner limits indexed scanning/decoding before materialization to that cut and remaining budgets; zero remaining fails with restore_budget. These counters are decremented for every response, not discarded only at BFF. Live queries also have finite per-call bounds. untilCursor implies no wait beyond that fixed cut. response.work.elapsedMs and remainingWork.timeMs count actual owner query/projection work, excluding idle wake wait. Recovery separately enforces total wall-clock replayTimeoutMs and does not wait beyond its fixed cut. Normal live eventWaitMs25s is not itself a restore-budget failure.",
       "bootstrap": "One bounded current snapshot and one HTTP history page by default; no all-page drain. bootstrapRecords is total emitted records (each page still max100); bootstrapScannedRows counts examined backend rows, materialized bytes counts all owner data decoded including omitted output. Snapshot and owner cut consistent; finite live buffer. Initial detail exposes bounded active metadata and versioned HTTP resources when full state does not fit, never an oversize reset loop. snapshot.work, historyPage.work and eventBatch.work are actual per-response counters, not cumulative; operation owner sums each once, including scanned/decoded data discarded by filtering. No counter reset on page/hasMore.",
-      "budgets": "All byte limits are encoded UTF-8 JSON including envelopes. Observer unacked8MiB/relay16MiB INCLUDE app reserve1MiB/2MiB; branches may use at most7MiB/14MiB. Server32MiB/64MiB includes four observer quotas; maxObservers4 prevents a fifth consuming their reserves. Per-channel1MiB/2MiB also applies. Control delivery is additional but capped per-channel256KiB, observer1MiB, server4MiB. RPC32+8 is total per observer, server128+32; branches leave app4+2. Count pending/inflight maps even on reconnect until work settles. HTTP2 per observer/8 server. ACK has a separate bounded rate so output cannot consume command reserve. Uninitialized sockets/pending upgrades bounded separately; app/replacement must be admitted without an extra permanent channel slot. maxConnections144 bounds physical accepted+pending-upgrade sockets; at most128 initialized and16 uninitialized, pending upgrades count toward these total bounds. Per observer32 includes one reserved app slot, at most31 branch channels; replacement uses temporary uninitialized capacity and atomically replaces only its prior logical channel. An observer remains counted while its old in-flight work is unsettled.",
+      "budgets": "All byte limits are encoded UTF-8 JSON including envelopes. Observer unacked8MiB/relay16MiB INCLUDE app reserve1MiB/2MiB; branches may use at most7MiB/14MiB. Server32MiB/64MiB includes four observer quotas; maxObservers4 prevents a fifth consuming their reserves. Per-channel1MiB/2MiB also applies. Control delivery is additional but capped per-channel256KiB, observer1MiB, server4MiB. RPC32+8 is total per observer, server128+32; branches leave app4+2. Count pending/inflight maps even on reconnect until work settles. HTTP reads: httpConcurrentPages5 active per observer; server active limit is max(serverHttpConcurrentPages16, 4 x logical CPUs) unless the BFF is configured otherwise. Excess reads wait in a bounded fair queue (FIFO within observer, round-robin across observers, control on a separate lane) of at most httpReadQueueRecords64 per observer for at most httpReadWaitMs10000; busy is returned only on queue overflow or wait deadline. ACK has a separate bounded rate so output cannot consume command reserve. Uninitialized sockets/pending upgrades bounded separately; app/replacement must be admitted without an extra permanent channel slot. maxConnections144 bounds physical accepted+pending-upgrade sockets; at most128 initialized and16 uninitialized, pending upgrades count toward these total bounds. Per observer32 includes one reserved app slot, at most31 branch channels; replacement uses temporary uninitialized capacity and atomically replaces only its prior logical channel. An observer remains counted while its old in-flight work is unsettled.",
       "restoreBudgets": "Replay: total2MiB/4096changes/8192scannedRows/4MiBmaterialized/2s, first exceeded limit stops replay; actual scanned/materialized work must be measured at owner, not inferred from response size. Bootstrap:2MiB/200records/500scannedRows/4MiBmaterialized/5s. Snapshot-live buffer1MiB/1024changes. Cache16MiB/8scopes plus detail window1MiB/200records; renderer100records/64KiB text window. Evict only reconstructable detail, never unresolved command journal. Up to3 automatic resets/30s then explicit stale/recovery state until user retry or backoff window; exponential jitter backoff250ms..30s.",
       "bulk": "Files/history/complete large results use existing owner HTTP resources, not arbitrary URLs or a new store. Known bulk is not split into WS fragments; true selected live text may continue as bounded deltas. Descriptor pins identity/version/bytes/mediaType; partial preview is explicit. HTTP ranges<=64KiB and pages<=1MiB; no eager full parsing/render. Input details preserve existing controls. Oversized raw input/args/diff stays in existing owner event and is exposed by inputResource + explicit partial preview; /resource is one bounded adapter for existing history/message/input owner reads, no store or router framework. inputMaxQuestions/options guard is checked before pending input creation, with explicit tool validation error so the agent can reformulate; never drop IDs/options. inputPreviewBytes bounds the whole preview, partial=true requires the exact full owner resource. No silent label/text truncation; full raw content remains lazily available.",
       "textRanges": "All offsets are UTF-8 bytes at codepoint boundaries; encoded text bytes=endOffset-offset. Identity is AGI+Attempt+messageId+blockId+stream+contentId. contentId identifies an append-only lineage; it changes on rewrite/truncate/history edit. snapshot is a bounded baseline (partial indicates missing ranges); append requires exact baseRevision, offset equal to previous totalBytes, increasing revision and same contentId. Revision does not reuse a different prefix. A matching older HTTP range may fill only proven immutable-prefix holes of the same contentId up to descriptor.bytes; never overwrite later ranges or append to an incomplete preview as full text. Other bases are discarded/refetched. Resource serves the exact frozen history revision or the guaranteed immutable prefix of message lineage; unprovable/missing version returns stale/resource-not-found, not mutable latest.",
@@ -304,7 +308,7 @@
         "bytes": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 9007199254740991
+          "maximum": 268435456
         },
         "contentHash": {
           "type": "string",
@@ -347,7 +351,7 @@
         "bytes": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 9007199254740991
+          "maximum": 268435456
         },
         "contentHash": {
           "type": "string",
@@ -402,7 +406,7 @@
         "bytes": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 9007199254740991
+          "maximum": 268435456
         },
         "contentHash": {
           "type": "string",

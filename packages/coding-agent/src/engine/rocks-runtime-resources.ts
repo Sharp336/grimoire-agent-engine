@@ -124,8 +124,7 @@ export async function runtimeResource(
 				throw new EngineTargetError("stale_target", "History descriptor differs from its native resource");
 			bytes = Buffer.from(JSON.stringify(entry));
 		} else {
-			let hash: string | null = null;
-			let inline: Buffer | undefined;
+			let hash: string | null;
 			if (resource.kind === "history_attachment") {
 				const message = entry.message as { role?: string } | undefined;
 				if (entry.type !== "message" || message?.role !== "user")
@@ -147,33 +146,26 @@ export async function runtimeResource(
 				const block = Array.isArray(content) ? content[Number(resource.blockIndex)] : undefined;
 				if (block?.type !== "image" || block.mimeType !== resource.mediaType || typeof block.data !== "string")
 					throw new EngineTargetError("stale_target", "Native image descriptor changed");
+				// Native history stores images only as blob references; the range reads the body, never the record.
 				hash = parseBlobRef(block.data);
-				if (!hash) {
-					inline = Buffer.from(block.data, "base64");
-					if (inline.toString("base64").replace(/=+$/, "") !== block.data.replace(/=+$/, ""))
-						throw new EngineTargetError("source_unavailable", "Native image is not valid base64");
-				}
-				if (resource.contentHash !== `sha256:${hash ?? new Bun.SHA256().update(inline!).digest("hex")}`)
+				if (!hash || resource.contentHash !== `sha256:${hash}`)
 					throw new EngineTargetError("stale_target", "Native image content hash changed");
 			}
-			if (inline) bytes = inline;
-			else {
-				if (offset > Number(resource.bytes))
-					throw new EngineTargetError("invalid_request", "Resource range starts after EOF");
-				const range = await new BlobStore(getBlobsDir()).getRange(hash!, offset, limit);
-				if (!range) throw new EngineTargetError("history_expired", "Original resource bytes are unavailable");
-				if (range.totalBytes !== resource.bytes || offset > range.totalBytes)
-					throw new EngineTargetError("stale_target", "Original resource size changed");
-				const result = {
-					resource,
-					offset,
-					nextOffset: range.nextOffset,
-					contentBase64: range.data.toString("base64"),
-				};
-				work.finish(result, 1);
-				validateRuntimeValue("httpRange", result);
-				return result;
-			}
+			if (offset > Number(resource.bytes))
+				throw new EngineTargetError("invalid_request", "Resource range starts after EOF");
+			const range = await new BlobStore(getBlobsDir()).getRange(hash, offset, limit);
+			if (!range) throw new EngineTargetError("history_expired", "Original resource bytes are unavailable");
+			if (range.totalBytes !== resource.bytes || offset > range.totalBytes)
+				throw new EngineTargetError("stale_target", "Original resource size changed");
+			const result = {
+				resource,
+				offset,
+				nextOffset: range.nextOffset,
+				contentBase64: range.data.toString("base64"),
+			};
+			work.finish(result, 1);
+			validateRuntimeValue("httpRange", result);
+			return result;
 		}
 	} else throw new EngineTargetError("invalid_request", "Unknown resource kind");
 	if (bytes.length !== resource.bytes || offset > bytes.length)

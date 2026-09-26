@@ -12,7 +12,14 @@ import {
 	StreamAdmissionError,
 	type StreamAdmissionLimits,
 } from "@oh-my-pi/pi-ai/utils/stream-admission";
-import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
+import {
+	getBlobsDir,
+	isEnoent,
+	logger,
+	SUPPORTED_IMAGE_MIME_TYPES,
+	stableStringifyJson,
+	withTimeout,
+} from "@oh-my-pi/pi-utils";
 import {
 	attachLatencyPersistence,
 	createLatencyAudit,
@@ -72,6 +79,7 @@ import { migrateToCurrentVersion } from "../session/session-migrations";
 import { readStorageBinding, StorageClient } from "../session/storage-client";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
+import { normalizeToolNames } from "../tools/builtin-names";
 import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
@@ -107,6 +115,7 @@ import {
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
+import { readNativeHeader } from "./rocks-runtime-history";
 import { RocksEngineStore } from "./rocks-runtime-store";
 import { RocksEngineMutations } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
@@ -414,6 +423,15 @@ interface PreparedRestoreStart {
 	stageDir: string;
 }
 
+export interface EngineResolvedSessionProfile {
+	options: Partial<CreateAgentSessionOptions>;
+	childProfiles?: EngineChildProfile[];
+	sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
+	orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
+	profileRoutes?: EngineProfileRoutes;
+	dispose(): void;
+}
+
 export interface EngineRuntimeOptions {
 	databasePath: string;
 	/** Reduced only by isolated acceptance fixtures; production uses the bounded defaults. */
@@ -456,14 +474,7 @@ export interface EngineRuntimeOptions {
 		profile: EngineLaunchProfile,
 		cwd: string,
 		signal?: AbortSignal,
-	) => Promise<{
-		options: Partial<CreateAgentSessionOptions>;
-		childProfiles?: EngineChildProfile[];
-		sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
-		orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
-		profileRoutes?: EngineProfileRoutes;
-		dispose(): void;
-	}>;
+	) => Promise<EngineResolvedSessionProfile>;
 	/** Exact non-secret digest of every external dependency resolved for this launch. */
 	resolveSessionContinuation?: (profile: EngineLaunchProfile, cwd: string) => Promise<string>;
 	launchChild?: (request: {
@@ -575,7 +586,6 @@ export class EngineRuntime {
 		const runtime = new EngineRuntime(store, engineGeneration, options);
 		if (store instanceof RocksEngineStore) {
 			await runtime.attachmentUploads.reconcileReady();
-			await store.reconcileAcceptedAttachments(runtime.attachmentUploads);
 			runtime.#nativeDeleteRun = store.reconcilePendingNativeDeletes().catch(error => {
 				logger.warn("Native generation deletion recovery failed", { error: String(error) });
 			});
@@ -605,7 +615,7 @@ export class EngineRuntime {
 
 	async #sessionHeader(locator: string): Promise<SessionHeader | undefined> {
 		if (this.store instanceof RocksEngineStore) {
-			return (await this.#nativeSessionStorage(locator).readContext()).checkpoint.header;
+			return (await readNativeHeader(this.store.storageClient, parseNativeSessionLocator(locator))).header;
 		}
 		const loaded = await loadSessionFile(locator, this.#legacyStore().sessionStorage);
 		return loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
@@ -1237,25 +1247,37 @@ export class EngineRuntime {
 				command.operation === "start" && command.code === "launch_failed" && !retainedBinding
 					? "absent"
 					: undefined;
+			const target = {
+				commandId: command.commandId,
+				agentInstanceId: command.agentInstanceId,
+				executionId: command.executionId,
+				attemptId: command.attemptId,
+				engineGeneration: this.engineGeneration,
+				bindingId: "",
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			};
+			const payload = { code: command.code, message: command.message, ...(sessionState ? { sessionState } : {}) };
+			const receipt = {
+				outcome: "rejected" as const,
+				detail: { code: command.code, message: command.message },
+			};
+			if (command.operation === "start" && settleCommand && this.store instanceof RocksEngineStore) {
+				const event = await this.store.commitUnboundStartRejection(
+					target,
+					{ kind: "rejected", payload, causationCommandId: command.commandId },
+					receipt,
+				);
+				this.#notifyEvents([event]);
+				return;
+			}
 			await this.#commitEvent(
-				{
-					commandId: command.commandId,
-					agentInstanceId: command.agentInstanceId,
-					executionId: command.executionId,
-					attemptId: command.attemptId,
-					engineGeneration: this.engineGeneration,
-					bindingId: "",
-					bindingGeneration: command.bindingGeneration ?? 0,
-					authorityGeneration: command.authorityGeneration,
-				},
+				target,
 				"rejected",
-				{ code: command.code, message: command.message, ...(sessionState ? { sessionState } : {}) },
+				payload,
 				command.commandId,
 				settleCommand ? command.commandId : undefined,
-				{
-					outcome: "rejected",
-					detail: { code: command.code, message: command.message },
-				},
+				receipt,
 			);
 		});
 	}
@@ -3127,73 +3149,95 @@ export class EngineRuntime {
 		const preparedSession = preparedHistory?.sessionManager ?? preparedRestore?.sessionManager;
 		audit?.mark("binding_prepare");
 
-		if (binding) {
-			if (binding.state === "running" || binding.session.isStreaming) {
-				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
-			}
-			if (
-				preparedSession ||
-				profile.continuationPolicy === "fresh" ||
-				binding.profileDigest !== continuationDigest
-			) {
+		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
+			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
+		}
+		const originals = preparedAttachments?.originalAttachments;
+		const reused =
+			binding &&
+			!preparedSession &&
+			profile.continuationPolicy !== "fresh" &&
+			binding.profileDigest === continuationDigest
+				? binding
+				: undefined;
+		// Attachment support is decided before any live binding is replaced, mutated or opened.
+		let resolved: EngineResolvedSessionProfile | undefined;
+		if (!reused) {
+			try {
+				pendingStartSignal?.throwIfAborted();
+				audit?.mark("binding_profile_start");
+				resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
+				audit?.mark("binding_profile_done");
+				// Same precedence as the session options: resolved options override the launch profile.
+				// A restricted session without names has no tools; an unrestricted one without names has all.
+				const { toolNames, restrictToolNames } = {
+					toolNames: profile.toolNames,
+					restrictToolNames: profile.restrictToolNames,
+					...resolved?.options,
+				};
+				assertFilesReadable(
+					toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
+					originals,
+				);
+				if (binding) await this.#terminateBinding(binding, "requested");
+			} catch (error) {
+				resolved?.dispose();
+				if (!preparedSession) throw error;
 				try {
-					await this.#terminateBinding(binding, "requested");
-				} catch (error) {
-					if (!preparedSession) throw error;
-					try {
-						await this.#discardPreparedSession(preparedSession);
-					} catch (cleanupError) {
-						throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
-					}
-					throw error;
+					await this.#discardPreparedSession(preparedSession);
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
 				}
-				binding = undefined;
-			} else {
-				if (
-					binding.launchModel &&
-					(binding.session.model?.provider !== binding.launchModel.provider ||
-						binding.session.model?.id !== binding.launchModel.id)
-				) {
-					pendingStartSignal?.throwIfAborted();
-					await binding.session.setModelTemporary(binding.launchModel, binding.launchThinkingLevel);
-					pendingStartSignal?.throwIfAborted();
-				}
-				binding.bindingGeneration++;
-				binding.bindingId = `${engineRouteToken(binding.agentInstanceId)}:${binding.bindingGeneration}`;
-				binding.pauseGate.resume();
-				binding.executionId = request.executionId;
-				binding.attemptId = request.attemptId;
-				binding.commandId = request.commandId;
-				binding.authorityGeneration = request.authorityGeneration;
-				binding.attemptState = "accepted";
-				binding.state = "idle";
-				binding.steerCommandIds = [];
-				binding.steerCommandSet.clear();
-				binding.activeToolCallIds.clear();
-				binding.childWaits.clear();
-				binding.parkedEffectTools.clear();
-				binding.traceTools.clear();
-				binding.traceWriteTail = Promise.resolve();
-				binding.messageWriteError = undefined;
-				binding.modelCallSequence = 0;
-				binding.childLaunches.clear();
-				binding.profileRouteState = undefined;
-				this.#resetAssistantStream(binding);
-				binding.assistantMessageSequence = 0;
-				binding.lastAssistantMessageId = undefined;
-				binding.activeModelCalls.clear();
-				binding.pauseCommandIds.clear();
-				binding.pauseRequests.clear();
-				binding.resumeCommandIds.clear();
-				binding.session.setAttemptId(request.attemptId);
-				audit?.mark("binding_reused");
+				throw error;
 			}
+			binding = undefined;
+		} else {
+			this.#assertAttachmentSupport(reused.session, images, originals, reused.launchModel ?? reused.session.model);
+			if (
+				reused.launchModel &&
+				(reused.session.model?.provider !== reused.launchModel.provider ||
+					reused.session.model?.id !== reused.launchModel.id)
+			) {
+				pendingStartSignal?.throwIfAborted();
+				await reused.session.setModelTemporary(reused.launchModel, reused.launchThinkingLevel);
+				pendingStartSignal?.throwIfAborted();
+			}
+			reused.bindingGeneration++;
+			reused.bindingId = `${engineRouteToken(reused.agentInstanceId)}:${reused.bindingGeneration}`;
+			reused.pauseGate.resume();
+			reused.executionId = request.executionId;
+			reused.attemptId = request.attemptId;
+			reused.commandId = request.commandId;
+			reused.authorityGeneration = request.authorityGeneration;
+			reused.attemptState = "accepted";
+			reused.state = "idle";
+			reused.steerCommandIds = [];
+			reused.steerCommandSet.clear();
+			reused.activeToolCallIds.clear();
+			reused.childWaits.clear();
+			reused.parkedEffectTools.clear();
+			reused.traceTools.clear();
+			reused.traceWriteTail = Promise.resolve();
+			reused.messageWriteError = undefined;
+			reused.modelCallSequence = 0;
+			reused.childLaunches.clear();
+			reused.profileRouteState = undefined;
+			this.#resetAssistantStream(reused);
+			reused.assistantMessageSequence = 0;
+			reused.lastAssistantMessageId = undefined;
+			reused.activeModelCalls.clear();
+			reused.pauseCommandIds.clear();
+			reused.pauseRequests.clear();
+			reused.resumeCommandIds.clear();
+			reused.session.setAttemptId(request.attemptId);
+			audit?.mark("binding_reused");
 		}
 		if (!binding) {
 			audit?.mark("binding_open_start");
 			binding = await this.#openBinding(
 				request,
 				profile,
+				resolved,
 				continuationDigest,
 				conversationIdentityDigest,
 				restoreReceipt,
@@ -3203,12 +3247,13 @@ export class EngineRuntime {
 				audit,
 			);
 			audit?.mark("binding_open_done");
-		}
-		try {
-			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
-		} catch (error) {
-			await this.#discardBinding(binding);
-			throw error;
+			// The opened session is authoritative for tools and model; nothing durable references it yet.
+			try {
+				this.#assertAttachmentSupport(binding.session, images, originals);
+			} catch (error) {
+				await this.#discardBinding(binding);
+				throw error;
+			}
 		}
 		if (preparedHistory?.pendingInboxSourceSessionId) {
 			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
@@ -3331,7 +3376,8 @@ export class EngineRuntime {
 		sessionManager.seal();
 		const errors: unknown[] = [];
 		await collectFailure(errors, () => sessionManager.close());
-		if (sessionFile) {
+		// Failed native generations are unbound immutable data; only a legacy fork file is deleted.
+		if (sessionFile && !(this.store instanceof RocksEngineStore)) {
 			await collectFailure(errors, () => this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(sessionFile));
 		}
 		throwCollectedFailures(errors, "Prepared session cleanup failed");
@@ -3401,9 +3447,11 @@ export class EngineRuntime {
 		current.resolve();
 	}
 
+	/** Takes ownership of `resolved`: it is disposed with the binding or on any startup failure. */
 	async #openBinding(
 		request: EngineStartRequest,
 		profile: EngineLaunchProfile,
+		resolved: EngineResolvedSessionProfile | undefined,
 		continuationDigest: string,
 		conversationIdentityDigest: string,
 		restoreReceipt?: RestoreWorkspaceReceipt,
@@ -3416,16 +3464,11 @@ export class EngineRuntime {
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager = preparedSessionManager;
 		let uncommittedForkSessionFile = preparedSessionManager?.getSessionFile();
-		let disposeResolved: (() => void) | undefined;
+		const disposeResolved = resolved?.dispose;
 		let mcpManager: MCPManager | undefined;
 		try {
 			if (preparedSessionManager && !uncommittedForkSessionFile)
 				throw new Error("Prepared session was not durably materialized");
-			pendingStartSignal?.throwIfAborted();
-			audit?.mark("binding_profile_start");
-			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
-			audit?.mark("binding_profile_done");
-			disposeResolved = resolved?.dispose;
 			pendingStartSignal?.throwIfAborted();
 			audit?.mark("binding_history_start");
 			const prior = await this.store.getBinding(request.agentInstanceId);
@@ -4594,18 +4637,16 @@ export class EngineRuntime {
 		});
 	}
 
+	/** Must run before a live binding is mutated or a new one is opened: a rejection here is terminal. */
 	#assertAttachmentSupport(
 		session: AgentSession,
 		images: ImageContent[] | undefined,
 		originals?: SessionMessageIdentity["originalAttachments"],
+		model = session.model,
 	): void {
-		if (originals && originals.length > (images?.length ?? 0) && !session.getEnabledToolNames().includes("read"))
-			throw new EngineTargetError(
-				"invalid_request",
-				"This profile does not provide the read tool required for file attachments",
-			);
+		assertFilesReadable(session.getEnabledToolNames().includes("read"), originals);
 		if (!images?.length) return;
-		if (!session.model?.input.includes("image") || session.settings.get("images.blockImages"))
+		if (!model?.input.includes("image") || session.settings.get("images.blockImages"))
 			throw new EngineTargetError(
 				"invalid_request",
 				"The selected model or profile does not accept images; choose an image-capable route",
@@ -6585,6 +6626,16 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 
 function isEexist(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+/** Non-image files reach the model only through the read tool (attachment:// URIs). */
+function assertFilesReadable(readEnabled: boolean, originals?: SessionMessageIdentity["originalAttachments"]): void {
+	const file = readEnabled ? undefined : originals?.find(item => !SUPPORTED_IMAGE_MIME_TYPES.has(item.mediaType));
+	if (file)
+		throw new EngineTargetError(
+			"attachment_requires_read",
+			`File "${file.name}" cannot be sent: this profile does not allow the read tool the agent needs to open it. Choose a profile with read or send the message without this file.`,
+		);
 }
 
 function sessionProfileDigest(continuation: Record<string, unknown>): string {

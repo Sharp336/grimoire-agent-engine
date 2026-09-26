@@ -864,6 +864,61 @@ export class RocksEngineMutations {
 	async settleCommand(id: string, hash: string, receipt: EngineCommandReceipt): Promise<void> {
 		await this.mutation(`command:${id}`, tx => this.settle(tx, id, receipt, hash, true));
 	}
+	/** Terminal receipt for a command whose admission keeps failing; the row and receipt commit together. */
+	async rejectUnadmittedCommand(
+		command: EngineCommandIdentity,
+		receipt: EngineCommandReceipt & { outcome: "rejected" },
+		processorGeneration: number,
+	): Promise<void> {
+		await this.mutation(command.agentInstanceId, async tx => {
+			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
+				throw new EngineTargetError("stale_target", "Command processor generation changed");
+			const old = await tx.get<RocksCommand>("command", command.commandId);
+			if (old?.state === "settled") return;
+			if (old && old.processor_generation !== null)
+				throw new Error(`Command ${command.commandId} is being processed`);
+			if (!old) {
+				// Never admitted: it holds no pending budget, so settling releases nothing.
+				await tx.put("command", command.commandId, {
+					command_id: command.commandId,
+					agent_instance_id: command.agentInstanceId,
+					processor_generation: null,
+					state: "received",
+					canonical_hash: command.canonicalHash,
+					payload_bytes: Buffer.byteLength(command.serializedCommand ?? ""),
+					control_admission: ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
+					engine_generation: command.engineGeneration,
+					operation: command.operation,
+					identity: command,
+					receipt: null,
+					received_at: Date.now(),
+					updated_at: Date.now(),
+					pending_accounted: false,
+				} satisfies RocksCommand);
+			}
+			if (
+				command.operation === "start" &&
+				command.executionId &&
+				command.attemptId &&
+				!(await tx.get<RocksAttempt>("attempt", command.attemptId))
+			)
+				await this.append(
+					tx,
+					{
+						commandId: command.commandId,
+						agentInstanceId: command.agentInstanceId,
+						executionId: command.executionId,
+						attemptId: command.attemptId,
+						bindingId: "",
+						engineGeneration: processorGeneration,
+						bindingGeneration: 0,
+						authorityGeneration: command.authorityGeneration,
+					},
+					{ kind: "rejected", payload: receipt.detail, causationCommandId: command.commandId },
+				);
+			await this.settle(tx, command.commandId, receipt, command.canonicalHash, true);
+		});
+	}
 	async settle(
 		tx: RuntimeTransaction,
 		id: string,
@@ -992,6 +1047,45 @@ export class RocksEngineMutations {
 			await this.assertFence(tx, target);
 			const result = await this.append(tx, target, event);
 			if (command) await this.settle(tx, command, typeof receipt === "string" ? { outcome: receipt } : receipt);
+			return result;
+		});
+	}
+	async commitUnboundStartRejection(
+		target: EventTarget,
+		event: EngineTransitionEvent,
+		receipt: EngineCommandReceipt,
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			// The retained binding belongs to an older Attempt, so validate the claimed Start instead.
+			const engine = await tx.get<{ generation: number }>("metadata", "engine");
+			const command = await tx.get<RocksCommand>("command", target.commandId);
+			const identity = command?.identity;
+			if (
+				engine?.generation !== target.engineGeneration ||
+				command?.command_id !== target.commandId ||
+				command.agent_instance_id !== target.agentInstanceId ||
+				command?.state !== "received" ||
+				command.processor_generation !== target.engineGeneration ||
+				command.operation !== "start" ||
+				identity?.commandId !== target.commandId ||
+				identity?.agentInstanceId !== target.agentInstanceId ||
+				identity.executionId !== target.executionId ||
+				identity.attemptId !== target.attemptId ||
+				identity.authorityGeneration !== target.authorityGeneration ||
+				identity.engineGeneration !== target.engineGeneration ||
+				(identity.bindingId ?? "") !== target.bindingId ||
+				(identity.bindingGeneration ?? 0) !== target.bindingGeneration ||
+				target.bindingId !== "" ||
+				target.bindingGeneration !== 0 ||
+				event.kind !== "rejected" ||
+				event.causationCommandId !== target.commandId ||
+				receipt.outcome !== "rejected" ||
+				(await tx.get<RocksAttempt>("attempt", target.attemptId))
+			) {
+				throw new EngineAttemptConflictError(target.attemptId);
+			}
+			const result = await this.append(tx, target, event);
+			await this.settle(tx, target.commandId, receipt, command.canonical_hash, true);
 			return result;
 		});
 	}

@@ -8,6 +8,7 @@ import {
 	getActiveProfile,
 	getAgentDbPath,
 	getAgentDir,
+	getBlobsDir,
 	getConfigAgentDirName,
 	getConfigRootDir,
 	getPythonGatewayDir,
@@ -249,6 +250,21 @@ describe("profile directories", () => {
 		expect(getActiveProfile()).toBeUndefined();
 		expect(process.env.PI_CODING_AGENT_DIR).toBeUndefined();
 		expect(getAgentDir()).toBe(path.join(os.homedir(), configDir, "agent"));
+	});
+
+	it("roots default blobs at an absolute PI_BLOBS_DIR while an explicit agent dir keeps its own", () => {
+		const previous = process.env.PI_BLOBS_DIR;
+		const contour = path.join(tempRoot, "storage", "blobs");
+		try {
+			process.env.PI_BLOBS_DIR = contour;
+			expect(getBlobsDir()).toBe(contour);
+			expect(getBlobsDir(tempRoot)).toBe(path.join(tempRoot, "blobs"));
+			process.env.PI_BLOBS_DIR = path.join("storage", "blobs");
+			expect(getBlobsDir()).toBe(path.join(getAgentDir(), "blobs"));
+		} finally {
+			if (previous === undefined) delete process.env.PI_BLOBS_DIR;
+			else process.env.PI_BLOBS_DIR = previous;
+		}
 	});
 });
 

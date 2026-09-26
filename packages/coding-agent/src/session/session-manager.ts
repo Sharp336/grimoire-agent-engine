@@ -666,6 +666,8 @@ export class SessionManager {
 	static async openNative(storage: NativeSessionStorage, sessionDir = getSessionsDir()): Promise<SessionManager> {
 		const loaded = await storage.readContext();
 		const manager = SessionManager.createNative(loaded.checkpoint.header.cwd, storage, sessionDir);
+		// Native records keep images as blob references; the working context carries their bytes.
+		await resolveBlobRefsInEntries(loaded.entries, manager.#blobs);
 		manager.#applyEntries(loaded.checkpoint.header, loaded.entries);
 		manager.#index.setLeaf(loaded.checkpoint.leafId);
 		manager.#nativePrefix = loaded.checkpoint.prefix;
@@ -699,6 +701,7 @@ export class SessionManager {
 		)
 			throw new Error("Native history selection is not a user or assistant message");
 		const manager = SessionManager.createNative(cwd, target, sessionDir);
+		await resolveBlobRefsInEntries(loaded.entries, manager.#blobs);
 		const sourceHeader = loaded.checkpoint.header;
 		manager.#header.parentSession = sourceHeader.id;
 		manager.#header.providerPromptCacheKey = sourceHeader.providerPromptCacheKey ?? sourceHeader.id;
@@ -890,6 +893,7 @@ export class SessionManager {
 		await this.flush();
 		const before = this.#nativeTicket;
 		const loaded = await this.#nativeStorage.readArchive();
+		await resolveBlobRefsInEntries(loaded.entries, this.#blobs);
 		if (before !== this.#nativeTicket)
 			throw new Error("Native history changed during explicit materialization; retry at an idle boundary");
 		this.#applyEntries(loaded.checkpoint.header, loaded.entries);
