@@ -848,6 +848,8 @@ export class SessionManager {
 			void ticket.completion.catch(error => this.#noteDiskFailure(error));
 			return ticket;
 		} catch (error) {
+			// Storage refused this write before admitting it and nothing changed: reject only these entries.
+			if (error instanceof NativeSessionWriteRejectedError) throw error;
 			throw this.#noteDiskFailure(error);
 		}
 	}
@@ -1691,7 +1693,21 @@ export class SessionManager {
 
 	/** Puts a binary blob into the blob store and returns the blob reference. */
 	async putBlob(data: Buffer, options?: BlobPutOptions, signal?: AbortSignal): Promise<BlobPutResult> {
-		return this.#blobs.put(data, options, signal);
+		signal?.throwIfAborted();
+		if (!this.#nativeStorage) return this.#blobs.put(data, options);
+		// A native contour root accepts only managed publication. These bytes are a context image whose
+		// native entry owns the same body, so the pin is not needed past this display link.
+		const publication = await this.#blobs.publish(data, { extension: options?.extension, signal });
+		await publication.release();
+		const { hash } = publication;
+		return {
+			hash,
+			path: publication.path,
+			displayPath: publication.displayPath,
+			get ref() {
+				return `blob:sha256:${hash}`;
+			},
+		};
 	}
 
 	/** Synchronous variant of {@link putBlob} for rebuild-only render paths. */
@@ -2900,6 +2916,7 @@ export class SessionManager {
 				this.#trimNativeContext();
 			} catch (error) {
 				if (!admitted || error instanceof NativeSessionWriteRejectedError) this.#restoreNativeBaseline();
+				if (!admitted && error instanceof NativeSessionWriteRejectedError) throw error;
 				throw this.#noteDiskFailure(error);
 			}
 			return;

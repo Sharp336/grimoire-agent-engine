@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
-import type { StorageClient } from "../session/storage-client";
-import type { StorageDependency } from "../session/storage-protocol";
+import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
+import type { StorageDependency, StorageRuntimeMutation } from "../session/storage-protocol";
 import type {
 	EngineAttemptState,
 	EngineBindingSnapshot,
@@ -13,6 +13,7 @@ import type {
 	EngineInboxMutation,
 	EngineInboxSource,
 	EngineInboxTarget,
+	EngineMessageAttachments,
 	EngineProfileRouteState,
 	EngineRetryState,
 } from "./contracts";
@@ -24,7 +25,15 @@ import {
 	restoreDescriptor,
 	validateRestorePlan,
 } from "./rocks-restore-workspace";
-import { projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
+import {
+	boundedReceipt,
+	eventReadKeys,
+	projectionId,
+	retainedInputPayload,
+	retainInputParts,
+	runtimeReceipt,
+	settleRuntimeMessages,
+} from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
 	bindingTarget,
@@ -135,6 +144,7 @@ export interface RocksTransitionOptions {
 export class RocksEngineMutations {
 	readonly records: RuntimeRecords;
 	#change = Promise.withResolvers<void>();
+	readonly #commitWatchers = new Set<(puts: StorageRuntimeMutation["puts"]) => void>();
 	constructor(
 		readonly storageClient: StorageClient,
 		readonly projectEvent: (tx: RuntimeTransaction, event: EngineEvent) => Promise<void>,
@@ -150,13 +160,32 @@ export class RocksEngineMutations {
 	changeSignal(): Promise<void> {
 		return this.#change.promise;
 	}
+	/** Calls `watch` with the rows of every mutation this store commits until the returned disposer runs. */
+	watchCommits(watch: (puts: StorageRuntimeMutation["puts"]) => void): () => void {
+		this.#commitWatchers.add(watch);
+		return () => this.#commitWatchers.delete(watch);
+	}
 	async mutation<T>(
 		scope: string,
 		work: (tx: RuntimeTransaction) => Promise<T>,
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
-		const result = await this.records.mutate(scope, work, dependencies, durability);
+		// Conflicts replay `work` on a fresh transaction; only the last one is committed.
+		let committed: RuntimeTransaction | undefined;
+		const result = await this.records.mutate(
+			scope,
+			tx => {
+				committed = tx;
+				return work(tx);
+			},
+			dependencies,
+			durability,
+		);
+		if (this.#commitWatchers.size && committed) {
+			const { puts } = committed.mutation();
+			for (const watch of this.#commitWatchers) watch(puts);
+		}
 		const change = this.#change;
 		this.#change = Promise.withResolvers<void>();
 		change.resolve();
@@ -265,7 +294,7 @@ export class RocksEngineMutations {
 		};
 	}
 	async archivedChats(principalId: string, cursor?: string) {
-		const page = await this.records.query("kind_primary", ["identity"], cursor, 100);
+		const page = await this.records.query("identity_principal", [principalId], cursor, 100);
 		return {
 			chats: page.records.flatMap(record => {
 				const identity = record.value as unknown as RocksIdentity | null;
@@ -428,6 +457,20 @@ export class RocksEngineMutations {
 			});
 		}
 	}
+	/** An unbound prepared generation goes to reclaim like a deleted one. Its tombstone names no agent, so reclaim
+	 * removes only this generation and never the agent's runtime rows. */
+	async abandonNativeGeneration(scope: string, locator: string): Promise<void> {
+		const { familyId, generationId } = parseNativeSessionLocator(locator);
+		const digest = createHash("sha256").update(`${familyId}\0${generationId}`).digest("hex");
+		await this.mutation(scope, tx =>
+			tx.put("metadata", `native-delete:${digest}`, {
+				subtype: "native_tombstone",
+				family_id: familyId,
+				generation_id: generationId,
+				deleted_at: Date.now(),
+			}),
+		);
+	}
 	async getAttempt(id: string): Promise<RocksAttempt | undefined> {
 		return ((await this.records.get("attempt", id)).value as unknown as RocksAttempt) ?? undefined;
 	}
@@ -531,6 +574,9 @@ export class RocksEngineMutations {
 			(!existing.parent_agent_instance_id && identity.parentAgentInstanceId);
 		if (completingIdentity) {
 			// A checked registry guard protects alias/ancestry empty predicates from concurrent registration.
+			// Every registration writes this one row, so it commits under the event chain like a counter:
+			// optimistic retries alone exhaust their budget when several agents register at once.
+			tx.sequence("engine");
 			const engine = await tx.get<{ subtype: string; generation: number; identity_revision?: number }>(
 				"metadata",
 				"engine",
@@ -679,13 +725,14 @@ export class RocksEngineMutations {
 				if (old.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
 				if (old.state === "settled") {
 					if (!old.receipt) throw new Error("Settled command has no receipt");
-					return { status: "replay", receipt: old.receipt };
+					return { status: "replay", receipt: boundedReceipt(old.receipt) };
 				}
 				if (old.processor_generation === processorGeneration) return { status: "in_progress" };
 				if (old.processor_generation !== null || command.engineGeneration < processorGeneration) {
-					const receipt = this.interruptedReceipt();
-					await this.settle(tx, command.commandId, receipt, command.canonicalHash);
-					return { status: "replay", receipt };
+					return {
+						status: "replay",
+						receipt: await this.settleInterrupted(tx, command.commandId, processorGeneration),
+					};
 				}
 				await tx.put("command", command.commandId, {
 					...old,
@@ -734,23 +781,43 @@ export class RocksEngineMutations {
 					return { status: "replay", receipt };
 				}
 			}
+			if (command.browserPayloadHash) await this.receiptEvent(tx, command.commandId);
 			if (command.engineGeneration < processorGeneration) {
-				const receipt = this.interruptedReceipt();
-				await this.settle(tx, command.commandId, receipt);
-				return { status: "replay", receipt };
+				return {
+					status: "replay",
+					receipt: await this.settleInterrupted(tx, command.commandId, processorGeneration),
+				};
 			}
 			return { status: "claimed" };
 		});
 	}
-	interruptedReceipt(): EngineCommandReceipt {
-		return {
-			outcome: "rejected",
+	/** An interrupted command never runs: settle it and publish its rejection like any other refused command. */
+	async settleInterrupted(tx: RuntimeTransaction, id: string, generation: number): Promise<EngineCommandReceipt> {
+		const receipt = {
+			outcome: "rejected" as const,
 			detail: {
 				code: "interrupted",
 				message: "Execution was interrupted; explicit Continue is required",
 				requiresExplicitContinue: true,
 			},
 		};
+		await this.settle(tx, id, receipt);
+		const { identity: command } = (await tx.get<RocksCommand>("command", id))!;
+		await this.append(
+			tx,
+			{
+				commandId: id,
+				agentInstanceId: command.agentInstanceId,
+				executionId: command.executionId ?? "",
+				attemptId: command.attemptId ?? "",
+				bindingId: command.bindingId ?? "",
+				engineGeneration: generation,
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			},
+			{ kind: "rejected", payload: receipt.detail, causationCommandId: id },
+		);
+		return receipt;
 	}
 	startExpected(command: EngineCommandIdentity): number | undefined {
 		if (!command.serializedCommand) return undefined;
@@ -808,7 +875,11 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const fenced = validateStartFence(target);
 			const start = await this.targetStart(tx, target);
-			if (!start && !fenced) return { status: "not_found" };
+			// A Start already applied has left the pending index: its Attempt exists, so the Stop is too late here.
+			if (!start && !fenced)
+				return (await tx.get<RocksAttempt>("attempt", target.attemptId))
+					? { status: "too_late" }
+					: { status: "not_found" };
 			if (start?.state === "settled")
 				return start.receipt?.outcome === "rejected" && start.receipt.detail?.code === "cancelled"
 					? {
@@ -934,7 +1005,9 @@ export class RocksEngineMutations {
 		}
 		if (hash && hash !== row.canonical_hash) throw new EngineCommandConflictError(id);
 		if (row.state === "settled") {
-			if (JSON.stringify(row.receipt) !== JSON.stringify(receipt)) throw new EngineCommandConflictError(id);
+			// The owner returns rows with canonically ordered keys; an identical receipt may differ only in order.
+			if (storageCanonicalJson(row.receipt) !== storageCanonicalJson(receipt))
+				throw new EngineCommandConflictError(id);
 			return;
 		}
 		if (row.pending_accounted)
@@ -948,32 +1021,72 @@ export class RocksEngineMutations {
 			updated_at: Date.now(),
 		};
 		await tx.put("command", id, settled);
+		await this.receiptEvent(tx, id);
+	}
+	/**
+	 * Publishes a browser command's current receipt stage on its own agent and, when the browser froze another
+	 * source target (a branch launched from its parent), on that source agent of the same principal too.
+	 */
+	async receiptEvent(tx: RuntimeTransaction, id: string): Promise<void> {
+		const row = await tx.get<RocksCommand>("command", id);
+		if (!row) return;
+		const command = row.identity;
 		const identity = await tx.get<RocksIdentity>("identity", row.agent_instance_id);
-		const attempt = row.identity.attemptId
-			? await tx.get<RocksAttempt>("attempt", row.identity.attemptId)
-			: undefined;
-		const value = runtimeReceipt(settled, identity, attempt);
-		if (value) {
-			const command = row.identity;
-			await this.append(
-				tx,
-				{
-					commandId: id,
-					agentInstanceId: row.agent_instance_id,
-					executionId: command.executionId ?? "",
-					attemptId: command.attemptId ?? "",
-					bindingId: command.bindingId ?? "",
-					engineGeneration: command.engineGeneration,
-					bindingGeneration: command.bindingGeneration ?? 0,
-					authorityGeneration: command.authorityGeneration,
-				},
-				{ kind: "command_receipt", payload: { value } },
-			);
-		}
+		const attempt = command.attemptId ? await tx.get<RocksAttempt>("attempt", command.attemptId) : undefined;
+		const value = runtimeReceipt(row, identity, attempt);
+		if (!value) return;
+		await this.append(
+			tx,
+			{
+				commandId: id,
+				agentInstanceId: row.agent_instance_id,
+				executionId: command.executionId ?? "",
+				attemptId: command.attemptId ?? "",
+				bindingId: command.bindingId ?? "",
+				engineGeneration: command.engineGeneration,
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			},
+			{ kind: "command_receipt", payload: { value } },
+		);
+		const source = (value.target as { agentInstanceRef: string }).agentInstanceRef;
+		if (source === command.agentInstanceRef) return;
+		const owner = (await tx.query<RocksIdentity>("identity_ref", [source])).find(
+			candidate => candidate.principal_id === (command.principalId ?? ""),
+		);
+		if (!owner)
+			throw new EngineTargetError("stale_target", "Receipt source identity is not owned by the command principal");
+		await this.identityEvent(tx, owner.agent_instance_id, id, "command_receipt", { value });
 	}
 
+	/** Starts an event: marks its counters and loads the rows its projection (and `fence`) read in one round trip. */
+	async eventReads(
+		tx: RuntimeTransaction,
+		target: EventTarget,
+		event: EngineTransitionEvent,
+		fence = false,
+	): Promise<void> {
+		const counters = [`agent-seq:${target.agentInstanceId}`, "events"];
+		tx.sequence(...counters);
+		await tx.prefetch([
+			...(fence
+				? [
+						{ kind: "metadata" as const, id: "engine" },
+						{ kind: "binding" as const, id: target.agentInstanceId },
+					]
+				: []),
+			...counters.map(id => ({ kind: "metadata" as const, id })),
+			...eventReadKeys({
+				agentInstanceId: target.agentInstanceId,
+				attemptId: target.attemptId,
+				kind: event.kind,
+				payload: event.payload,
+				causationCommandId: event.causationCommandId ?? target.commandId,
+			}),
+		]);
+	}
 	async append(tx: RuntimeTransaction, target: EventTarget, event: EngineTransitionEvent): Promise<EngineEvent> {
-		await tx.reserveEvents();
+		await this.eventReads(tx, target, event);
 		const seq = await this.counter(tx, `agent-seq:${target.agentInstanceId}`, "agent_seq", 1);
 		const eventId = await this.counter(tx, "events", "event_counter", 1);
 		const stored: RocksEvent = {
@@ -995,7 +1108,9 @@ export class RocksEngineMutations {
 			attempt_id: target.attemptId,
 			published_at: null,
 		};
-		await tx.put("event", String(eventId), stored);
+		const payload = await retainedInputPayload(tx, stored);
+		if (payload) stored.payload = payload;
+		await tx.create("event", String(eventId), stored);
 		await this.projectEvent(tx, stored);
 		return stored;
 	}
@@ -1029,6 +1144,7 @@ export class RocksEngineMutations {
 			event.agentInstanceId,
 			async tx => {
 				const target = { ...event, commandId: event.causationCommandId };
+				await this.eventReads(tx, target, event, true);
 				await this.assertFence(tx, target);
 				return this.append(tx, target, { kind: event.kind, payload: event.payload });
 			},
@@ -1045,10 +1161,11 @@ export class RocksEngineMutations {
 		receipt: EngineCommandReceipt | "applied" | "rejected" = "applied",
 	): Promise<EngineEvent> {
 		return this.mutation(target.agentInstanceId, async tx => {
+			await this.eventReads(tx, target, event, true);
 			await this.assertFence(tx, target);
-			const result = await this.append(tx, target, event);
+			// Settle before the event: its summary must no longer project the command as pending.
 			if (command) await this.settle(tx, command, typeof receipt === "string" ? { outcome: receipt } : receipt);
-			return result;
+			return this.append(tx, target, event);
 		});
 	}
 	async commitUnboundStartRejection(
@@ -1128,7 +1245,12 @@ export class RocksEngineMutations {
 		} satisfies RocksBinding);
 	}
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
-		await this.mutation(binding.agentInstanceId, tx => this.bind(tx, binding));
+		await this.mutation(binding.agentInstanceId, async tx => {
+			// Releasing an idle binding after a newer authority registered: that authority's own bind replaces the row.
+			const identity = await tx.get<RocksIdentity>("identity", binding.agentInstanceId);
+			if (identity && binding.authorityGeneration < identity.authority_generation) return;
+			await this.bind(tx, binding);
+		});
 	}
 	async commitBindingEvent(
 		binding: EngineBindingSnapshot,
@@ -1156,6 +1278,9 @@ export class RocksEngineMutations {
 	): Promise<EngineEvent[]> {
 		const native = options.transcriptCheckpoint?.native;
 		if (state === "completed" && !native) throw new EngineAttemptConflictError(binding.attemptId);
+		for (const event of events)
+			if (event.kind === "input_requested" && event.payload)
+				await retainInputParts(this.records, binding, event.payload);
 		return this.mutation(
 			binding.agentInstanceId,
 			async tx => {
@@ -1321,6 +1446,9 @@ export class RocksEngineMutations {
 					);
 				if (options.settleCommandId)
 					await this.settle(tx, options.settleCommandId, options.settleCommandReceipt ?? { outcome: "applied" });
+				// A terminal Attempt moves its browser Start receipt to execution_terminal (settling it already did).
+				if (terminal.has(state) && options.settleCommandId !== binding.commandId)
+					await this.receiptEvent(tx, binding.commandId);
 				return committed;
 			},
 			this.checkpointDependencies(options.transcriptCheckpoint),
@@ -1658,6 +1786,8 @@ export class RocksEngineMutations {
 				kind: "profile_route_changed",
 				payload: { profileRoute: state },
 			});
+			// The public projection stamps the same sequence on its detail; an agent without a canonical ref has
+			// no projection, so the retained route is stamped here as well.
 			await tx.put("attempt", target.attemptId, {
 				...(await tx.get<RocksAttempt>("attempt", target.attemptId)),
 				profile_route_state: JSON.stringify({ ...state, eventSeq: event.seq }),
@@ -1666,6 +1796,15 @@ export class RocksEngineMutations {
 		});
 	}
 
+	/** A durable native entry owns a directly delivered message's bodies; its ready upload rows are done (C5). */
+	async consumeUploads(references: EngineMessageAttachments): Promise<void> {
+		for (const uploadId of references.uploadIds) {
+			const id = `blob-upload:${attachmentUploadKey(references.principalId, uploadId).key}`;
+			await this.mutation(id, async tx => {
+				if (await tx.get("metadata", id)) await tx.delete("metadata", id);
+			});
+		}
+	}
 	async enqueueInboxItem(
 		target: EngineInboxTarget,
 		source: EngineInboxSource,
@@ -1717,12 +1856,19 @@ export class RocksEngineMutations {
 						state: string;
 						attachment: EngineAttachment;
 					}>("metadata", `blob-upload:${key}`);
-					if (upload?.subtype !== "blob_upload" || upload.owner_hash !== ownerHash || upload.state !== "ready")
+					if (!upload)
+						throw new EngineTargetError(
+							"attachment_expired",
+							"Attachment upload is not ready or has expired; attach the file again",
+						);
+					if (upload.subtype !== "blob_upload" || upload.owner_hash !== ownerHash || upload.state !== "ready")
 						throw new EngineInboxConflictError("Attachment is not ready for this owner");
 					const descriptor = attachmentIdentity(upload.attachment);
 					if (descriptor.uploadId !== uploadId || descriptor.clientMessageId !== source.sourceEventId)
 						throw new EngineInboxConflictError("Attachment belongs to another message");
 					attachmentDescriptors.push(descriptor);
+					// The inbox source now owns the body; its upload row goes in the same batch (C5 consumed).
+					await tx.delete("metadata", `blob-upload:${key}`);
 				}
 			}
 			if (!original)
@@ -1983,10 +2129,9 @@ export class RocksEngineMutations {
 	async nextInboxWakeAt(generation: number): Promise<number | undefined> {
 		let after: Array<string | number | null> | undefined;
 		do {
-			const page = await this.records.query("inbox_wake", [], undefined, 50, after);
+			const page = await this.records.query("inbox_wake", [generation], undefined, 50, after);
 			for (const record of page.records) {
 				const item = record.value as unknown as RocksInbox;
-				if (item.engine_generation !== generation) continue;
 				const binding = await this.getBinding(item.agent_instance_id);
 				if (!binding || binding.manualHold || binding.state === "running") continue;
 				const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
@@ -2002,10 +2147,9 @@ export class RocksEngineMutations {
 		const events: EngineEvent[] = [];
 		let after: Array<string | number | null> | undefined;
 		do {
-			const page = await this.records.query("inbox_wake", [], undefined, 50, after);
+			const page = await this.records.query("inbox_wake", [generation], undefined, 50, after);
 			for (const record of page.records) {
 				const observed = record.value as unknown as RocksInbox;
-				if (observed.engine_generation !== generation) continue;
 				if ((observed.deliver_at ?? observed.createdAt) > now) continue;
 				const event = await this.mutation(observed.agent_instance_id, async tx => {
 					const item = await tx.get<RocksInbox>("inbox", record.id);
@@ -2071,173 +2215,165 @@ export class RocksEngineMutations {
 				events.push(...changed);
 			}
 		};
-		let after: string | undefined;
-		do {
-			const page = await this.records.query(
-				"kind_primary",
-				["identity"],
-				undefined,
-				25,
-				after ? [after] : undefined,
-			);
-			for (const record of page.records) {
-				const id = record.id;
-				let held = false;
-				const ensureHold = async () => {
-					if (held) return;
-					deliver(
-						await this.mutation(id, async tx => {
-							const identity = await tx.get<RocksIdentity>("identity", id);
-							if (!identity) return [];
-							const hold = await tx.get<RocksHold>("hold", `${id}:recovery`);
-							if (hold?.command_id === `recovery:${generation}`) return [];
-							identity.intent_revision++;
-							await tx.put("identity", id, identity);
-							await tx.put("hold", `${id}:recovery`, {
-								source_agent_instance_id: id,
-								agent_instance_id: id,
-								kind: "recovery",
-								command_id: `recovery:${generation}`,
-								generation: identity.intent_revision,
-							});
-							const binding = await tx.get<RocksBinding>("binding", id);
-							if (binding)
-								await tx.put("binding", id, {
-									...binding,
-									manual_hold: 1,
-									intent_revision: identity.intent_revision,
-								});
-							return [
-								await this.identityEvent(tx, id, `recovery:${generation}`, "holds_changed", {
-									action: "recovery",
-									requiresExplicitContinue: true,
-								}),
-							];
-						}),
-					);
-					held = true;
-				};
-				const pendingInbox = await this.records.query("inbox_agent_pending", [id], undefined, 1);
-				if (pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation)) await ensureHold();
-				// Requery the shrinking pending index; never carry its mutable cursor across a write.
-				for (;;) {
-					const pending = await this.records.query("command_agent_pending", [id], undefined, 1);
-					const command = pending.records[0]?.value as unknown as RocksCommand | undefined;
-					if (!command || command.engine_generation >= generation) break;
-					await ensureHold();
-					await this.mutation(id, async tx => {
-						const current = await tx.get<RocksCommand>("command", command.command_id);
-						if (current?.state === "received" && current.engine_generation < generation)
-							await this.settle(tx, current.command_id, this.interruptedReceipt());
-					});
+		// Only in-flight work is indexed (open attempts, received commands, pending inbox items), so recovery
+		// never walks history. Collect first: every recovery write below shrinks these partitions.
+		const work = new Map<string, RocksAttempt[]>();
+		for (const index of ["attempt_open", "command_received", "inbox_pending"] as const) {
+			let after: string | undefined;
+			do {
+				const page = await this.records.query(index, [], undefined, 100, after ? [after] : undefined);
+				for (const row of page.records) {
+					const value = row.value as { agent_instance_id: string; engine_generation: number } | null;
+					if (!value || value.engine_generation >= generation) continue;
+					const attempts = work.get(value.agent_instance_id) ?? [];
+					if (index === "attempt_open") attempts.push(value as unknown as RocksAttempt);
+					work.set(value.agent_instance_id, attempts);
 				}
-				let attemptAfter: Array<string | number | null> | undefined;
-				do {
-					const attempts = await this.records.query("attempt_agent", [id], undefined, 25, attemptAfter);
-					for (const entry of attempts.records) {
-						const observed = entry.value as unknown as RocksAttempt;
-						if (observed.engine_generation >= generation || terminal.has(observed.state)) continue;
-						await ensureHold();
-						const target: EventTarget = {
-							commandId: observed.command_id,
-							agentInstanceId: id,
-							executionId: observed.execution_id,
-							attemptId: observed.attempt_id,
-							bindingId: observed.binding_id,
-							engineGeneration: generation,
-							bindingGeneration: observed.binding_generation,
-							authorityGeneration: observed.authority_generation,
-						};
-						for (const state of ["planned", "started"])
-							for (;;) {
-								const effects = await this.records.query(
-									"effect_attempt",
-									[observed.attempt_id, state],
-									undefined,
-									1,
-								);
-								const effectId = effects.records[0]?.id;
-								if (!effectId) break;
-								deliver(
-									await this.mutation(id, async tx => {
-										const effect = await tx.get<RocksEffect>("effect", effectId);
-										if (!effect || effect.state !== state || effect.engine_generation >= generation)
-											return [];
-										await tx.put("effect", effectId, {
-											...effect,
-											state: state === "started" ? "unknown" : "settled",
-											outcome: state === "started" ? "unknown" : "cancelled",
-											error: "engine_lost",
-										});
-										const approval = await tx.get<EngineApprovalRow>("approval", effectId);
-										if (approval?.state === "pending")
-											await tx.put("approval", effectId, {
-												...approval,
-												state: "resolved",
-												decision: "cancelled",
-												reason: "engine_lost",
-											});
-										await this.counter(
-											tx,
-											`effects:${effect.attempt_id}:${effect.binding_id}`,
-											"open_effects",
-											-1,
-										);
-										return [
-											await this.append(tx, target, {
-												kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
-												payload: {
-													...(effect.effect_kind === "model"
-														? modelEffectPayload(effect)
-														: toolEffectPayload(effect)),
-													status: state === "started" ? "unknown" : "cancelled",
-													error: "engine_lost",
-												},
-											}),
-										];
-									}),
-								);
-							}
+				after = page.nextCursor ? page.records.at(-1)?.id : undefined;
+			} while (after);
+		}
+		for (const [id, attempts] of work) {
+			attempts.sort((a, b) => a.created_at - b.created_at || a.attempt_id.localeCompare(b.attempt_id));
+			let held = false;
+			const ensureHold = async () => {
+				if (held) return;
+				deliver(
+					await this.mutation(id, async tx => {
+						const identity = await tx.get<RocksIdentity>("identity", id);
+						if (!identity) return [];
+						// A recovery hold from an earlier restart still waits for the user; placing it again
+						// would only bump the intent revision and stale every pending UI command.
+						if (await tx.get<RocksHold>("hold", `${id}:recovery`)) return [];
+						identity.intent_revision++;
+						await tx.put("identity", id, identity);
+						await tx.put("hold", `${id}:recovery`, {
+							source_agent_instance_id: id,
+							agent_instance_id: id,
+							kind: "recovery",
+							command_id: `recovery:${generation}`,
+							generation: identity.intent_revision,
+						});
+						const binding = await tx.get<RocksBinding>("binding", id);
+						if (binding)
+							await tx.put("binding", id, {
+								...binding,
+								manual_hold: 1,
+								intent_revision: identity.intent_revision,
+							});
+						return [
+							await this.identityEvent(tx, id, `recovery:${generation}`, "holds_changed", {
+								action: "recovery",
+								requiresExplicitContinue: true,
+							}),
+						];
+					}),
+				);
+				held = true;
+			};
+			const pendingInbox = await this.records.query("inbox_agent_pending", [id], undefined, 1);
+			if (pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation)) await ensureHold();
+			// Requery the shrinking pending index; never carry its mutable cursor across a write.
+			for (;;) {
+				const pending = await this.records.query("command_agent_pending", [id], undefined, 1);
+				const command = pending.records[0]?.value as unknown as RocksCommand | undefined;
+				if (!command || command.engine_generation >= generation) break;
+				await ensureHold();
+				await this.mutation(id, async tx => {
+					const current = await tx.get<RocksCommand>("command", command.command_id);
+					if (current?.state === "received" && current.engine_generation < generation)
+						await this.settleInterrupted(tx, current.command_id, generation);
+				});
+			}
+			for (const observed of attempts) {
+				await ensureHold();
+				const target: EventTarget = {
+					commandId: observed.command_id,
+					agentInstanceId: id,
+					executionId: observed.execution_id,
+					attemptId: observed.attempt_id,
+					bindingId: observed.binding_id,
+					engineGeneration: generation,
+					bindingGeneration: observed.binding_generation,
+					authorityGeneration: observed.authority_generation,
+				};
+				for (const state of ["planned", "started"])
+					for (;;) {
+						const effects = await this.records.query(
+							"effect_attempt",
+							[observed.attempt_id, state],
+							undefined,
+							1,
+						);
+						const effectId = effects.records[0]?.id;
+						if (!effectId) break;
 						deliver(
 							await this.mutation(id, async tx => {
-								const attempt = await tx.get<RocksAttempt>("attempt", observed.attempt_id);
-								if (!attempt || terminal.has(attempt.state) || attempt.engine_generation >= generation)
-									return [];
-								const open = await tx.get<{ count: number }>(
-									"metadata",
-									`effects:${attempt.attempt_id}:${attempt.binding_id}`,
-								);
-								if (open?.count) throw new EngineEffectConflictError(attempt.attempt_id);
-								await tx.put("attempt", attempt.attempt_id, {
-									...attempt,
-									state: "interrupted",
-									cause: "engine_lost",
-									retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
+								const effect = await tx.get<RocksEffect>("effect", effectId);
+								if (!effect || effect.state !== state || effect.engine_generation >= generation) return [];
+								await tx.put("effect", effectId, {
+									...effect,
+									state: state === "started" ? "unknown" : "settled",
+									outcome: state === "started" ? "unknown" : "cancelled",
+									error: "engine_lost",
 								});
+								const approval = await tx.get<EngineApprovalRow>("approval", effectId);
+								if (approval?.state === "pending")
+									await tx.put("approval", effectId, {
+										...approval,
+										state: "resolved",
+										decision: "cancelled",
+										reason: "engine_lost",
+									});
+								await this.counter(tx, `effects:${effect.attempt_id}:${effect.binding_id}`, "open_effects", -1);
 								return [
-									...(await settleRuntimeMessages(tx, target, "interrupted", (tx, target, event) =>
-										this.append(tx, target, event),
-									)),
 									await this.append(tx, target, {
-										kind: "interrupted",
-										payload: { reason: "engine_lost", requiresExplicitContinue: true },
+										kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
+										payload: {
+											...(effect.effect_kind === "model"
+												? modelEffectPayload(effect)
+												: toolEffectPayload(effect)),
+											status: state === "started" ? "unknown" : "cancelled",
+											error: "engine_lost",
+										},
 									}),
 								];
 							}),
 						);
 					}
-					const last = attempts.records.at(-1);
-					attemptAfter = attempts.nextCursor && last ? [Number(last.value?.created_at), last.id] : undefined;
-				} while (attemptAfter);
-				if (held)
+				deliver(
 					await this.mutation(id, async tx => {
-						const binding = await tx.get<RocksBinding>("binding", id);
-						if (binding && binding.engine_generation < generation)
-							await tx.put("binding", id, { ...binding, state: "released", manual_hold: 1 });
-					});
+						const attempt = await tx.get<RocksAttempt>("attempt", observed.attempt_id);
+						if (!attempt || terminal.has(attempt.state) || attempt.engine_generation >= generation) return [];
+						const open = await tx.get<{ count: number }>(
+							"metadata",
+							`effects:${attempt.attempt_id}:${attempt.binding_id}`,
+						);
+						if (open?.count) throw new EngineEffectConflictError(attempt.attempt_id);
+						await tx.put("attempt", attempt.attempt_id, {
+							...attempt,
+							state: "interrupted",
+							cause: "engine_lost",
+							retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
+						});
+						return [
+							...(await settleRuntimeMessages(tx, target, "interrupted", (tx, target, event) =>
+								this.append(tx, target, event),
+							)),
+							await this.append(tx, target, {
+								kind: "interrupted",
+								payload: { reason: "engine_lost", requiresExplicitContinue: true },
+							}),
+						];
+					}),
+				);
 			}
-			after = page.nextCursor ? page.records.at(-1)?.id : undefined;
-		} while (after);
+			if (held)
+				await this.mutation(id, async tx => {
+					const binding = await tx.get<RocksBinding>("binding", id);
+					if (binding && binding.engine_generation < generation)
+						await tx.put("binding", id, { ...binding, state: "released", manual_hold: 1 });
+				});
+		}
 		return events;
 	}
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {

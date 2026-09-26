@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
-import { nativeEntry } from "../src/engine/rocks-runtime-history";
+import { nativeEntry, nativeScope } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
 import type { RocksCommand } from "../src/engine/rocks-runtime-rows";
 import { queryWork, RocksEngineStore } from "../src/engine/rocks-runtime-store";
@@ -36,8 +36,10 @@ class Rows extends RuntimeRecords {
 	seed(kind: StorageRuntimeKind, id: string, value: object): void {
 		this.values.set(`${kind}:${id}`, { kind, id, revision: 1, value: value as Record<string, unknown> });
 	}
-	override async get(kind: StorageRuntimeKind, id: string): Promise<StorageRuntimeRecord> {
-		return structuredClone(this.values.get(`${kind}:${id}`) ?? { kind, id, revision: null, value: null });
+	override async getMany(keys: Array<{ kind: StorageRuntimeKind; id: string }>): Promise<StorageRuntimeRecord[]> {
+		return keys.map(({ kind, id }) =>
+			structuredClone(this.values.get(`${kind}:${id}`) ?? { kind, id, revision: null, value: null }),
+		);
 	}
 	override async query(
 		index: StorageRuntimeIndex,
@@ -63,6 +65,14 @@ class Rows extends RuntimeRecords {
 					return row.kind === "event" && v?.message_content_id === key[0] && v?.message_revision === key[1];
 				case "event_message":
 					return row.kind === "event" && v?.message_content_id === key[0];
+				case "attempt_open":
+					return (
+						row.kind === "attempt" && !["completed", "failed", "cancelled", "interrupted"].includes(`${v?.state}`)
+					);
+				case "command_received":
+					return row.kind === "command" && v?.state === "received";
+				case "inbox_pending":
+					return row.kind === "inbox" && v?.subtype === "item" && v?.disposition === "pending";
 				default:
 					return false;
 			}
@@ -330,6 +340,77 @@ describe("Rocks runtime atomic public projections", () => {
 			pendingStart: null,
 		});
 	});
+	test("an event committed with its command settlement projects the command as settled", async () => {
+		const rows = fixture();
+		rows.seed("binding", "a", {
+			agent_instance_id: "a",
+			execution_id: "execution",
+			attempt_id: "attempt",
+			binding_id: "binding",
+			engine_generation: 1,
+			binding_generation: 1,
+			authority_generation: 1,
+		});
+		const store = storeWith(rows);
+		spyOn(store.records, "mutate").mockImplementation(async (_scope, work) => {
+			const tx = new RuntimeTransaction(rows);
+			const result = await work(tx);
+			for (const put of tx.mutation().puts) rows.seed(put.kind, put.id, put.value);
+			return result;
+		});
+		const start: EngineCommandIdentity = {
+			commandId: "start-refused",
+			operation: "start",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			agentInstanceId: "a",
+			agentInstanceRef: ref,
+			executionId: "execution-refused",
+			attemptId: "attempt-refused",
+			authorityGeneration: 1,
+			principalId: "p",
+			payloadHash: "refused",
+			canonicalHash: "refused",
+		};
+		expect(await store.admitCommand(start, 1)).toEqual({ status: "claimed" });
+		const detail = { code: "invalid_request", message: "refused" };
+		// A non-browser Start emits no receipt event, so the transition event carries the last summary.
+		await store.commitEvent(
+			target,
+			{ kind: "rejected", payload: detail, causationCommandId: start.commandId },
+			start.commandId,
+			{ outcome: "rejected", detail },
+		);
+		const summary = await store.runtimeSummary({ principalId: "p", agentInstanceRef: ref });
+		expect((summary.summary as Record<string, unknown>).pendingStart).toBeNull();
+	});
+
+	test("a restart keeps an existing recovery hold instead of placing it again", async () => {
+		const rows = fixture();
+		rows.seed("attempt", "attempt", { ...(await rows.get("attempt", "attempt")).value, state: "completed" });
+		// A message queued before the Engine was lost stays pending across restarts until the user acts.
+		rows.seed("inbox", "queued", {
+			subtype: "item",
+			agent_instance_id: "a",
+			disposition: "pending",
+			engine_generation: 1,
+		});
+		const store = storeWith(rows);
+		spyOn(store.records, "mutate").mockImplementation(async (_scope, work) => {
+			const tx = new RuntimeTransaction(rows);
+			const result = await work(tx);
+			const { puts, deletes } = tx.mutation();
+			for (const put of puts) rows.seed(put.kind, put.id, put.value);
+			for (const row of deletes) rows.values.delete(`${row.kind}:${row.id}`);
+			return result;
+		});
+		expect((await store.interruptGeneration(2)).map(event => event.kind)).toEqual(["holds_changed"]);
+		const held = await store.intent("a");
+		expect(held.holds).toMatchObject([{ kind: "recovery" }]);
+		expect(await store.interruptGeneration(3)).toEqual([]);
+		expect(await store.intent("a")).toEqual(held);
+	});
 	test("new input and its attention/detail appear in the same mutation; resolution removes pending input", async () => {
 		const tx = new RuntimeTransaction(fixture());
 		await append(tx, "input_requested", {
@@ -413,7 +494,7 @@ describe("Rocks runtime atomic public projections", () => {
 });
 function storeWith(rows: Rows): RocksEngineStore {
 	const store = new RocksEngineStore(rows.client);
-	spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+	spyOn(store.records, "getMany").mockImplementation(keys => rows.getMany(keys));
 	spyOn(store.records, "query").mockImplementation((index, key, cursor, max, after) =>
 		rows.query(index, key, cursor, max, after),
 	);
@@ -476,7 +557,7 @@ describe("Rocks bounded reader contracts", () => {
 			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
 		});
 		const store = new RocksEngineStore(client);
-		const read = spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+		const read = spyOn(store.records, "getMany").mockImplementation(keys => rows.getMany(keys));
 		try {
 			const request: RuntimeEventsRequest = {
 				scope: { kind: "catalog" },
@@ -709,6 +790,14 @@ describe("Rocks bounded reader contracts", () => {
 		);
 		rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file: "native:family/other" });
 		await expect(nativeEntry(store, "a", "e2", first.lifecycleContext.lineage)).rejects.toThrow("changed scope");
+	});
+	test("a corrupt native locator reads as expired history, not an internal failure", async () => {
+		const rows = fixture();
+		const store = storeWith(rows);
+		for (const session_file of ["native:%E0%A4%A/gen", "native:family-only", "legacy.jsonl"]) {
+			rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file });
+			await expect(nativeScope(store, "a")).rejects.toMatchObject({ code: "history_expired" });
+		}
 	});
 	test("history image ranges read the referenced blob body and never decode an inline record", async () => {
 		using tempDir = TempDir.createSync("@omp-history-image-");

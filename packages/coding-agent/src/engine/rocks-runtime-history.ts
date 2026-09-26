@@ -1,7 +1,13 @@
-import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
+import { getBlobsDir } from "@oh-my-pi/pi-utils";
+import { BlobStore } from "../session/blob-store";
+import {
+	decodeNativeEntry,
+	nativeEntryBlobMarker,
+	parseNativeSessionLocator,
+} from "../session/rocks-native-session-storage";
 import type { SessionHeader } from "../session/session-entries";
-import type { StorageClient } from "../session/storage-client";
-import type { StorageRuntimeIndex } from "../session/storage-protocol";
+import { type StorageClient, StorageClientError } from "../session/storage-client";
+import type { StorageEntry, StorageRuntimeIndex } from "../session/storage-protocol";
 import { type EngineTarget, EngineTargetError } from "./contracts";
 import { resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
@@ -24,6 +30,21 @@ interface LifecycleContext extends HistoryLifecycleContext {
 	anchors: Array<{ attemptId: string; entryId: string; eventId: number }>;
 }
 const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+/**
+ * An entry above the inline owner budget lives in an entry blob; history reads its verified body, and refuses
+ * one beyond the materialization budget from its marker size alone.
+ */
+async function nativePayload(entry: StorageEntry): Promise<Record<string, unknown>> {
+	const marker = nativeEntryBlobMarker(entry.payload);
+	if (!marker) return entry.payload;
+	if (marker.bytes > runtimeLimits.bootstrapMaterializedBytes)
+		throw new EngineTargetError("restore_budget", "Native history entry exceeds its read budget");
+	try {
+		return { ...(await decodeNativeEntry(entry, new BlobStore(getBlobsDir()))) };
+	} catch {
+		throw new EngineTargetError("history_expired", "Native history entry body is unavailable");
+	}
+}
 export async function nativeScope(
 	store: RocksEngineStore,
 	agentId: string,
@@ -38,11 +59,16 @@ export async function nativeScope(
 			: undefined;
 	if (attemptId && (!attempt || attempt.agent_instance_id !== agentId))
 		throw new EngineTargetError("stale_target", "History Attempt belongs to another agent");
-	const path = attempt?.transcript_path ?? binding?.session_file;
-	if (!path?.startsWith("native:"))
+	const path = attempt?.transcript_path ?? binding?.session_file ?? "";
+	let scope: NativeScope;
+	try {
+		scope = parseNativeSessionLocator(path);
+	} catch {
+		// A missing, legacy or corrupt locator retains no readable native history.
 		throw new EngineTargetError("history_expired", "Native history locator is not retained");
+	}
 	return {
-		scope: parseNativeSessionLocator(path),
+		scope,
 		path,
 		attempt,
 		currentAttemptId: attemptId ?? binding?.attempt_id ?? null,
@@ -143,7 +169,8 @@ export async function nativeHistoryPage(
 		readBytes += jsonBytes(page);
 		if (!entry || entry.entryId !== next)
 			throw new EngineTargetError("history_expired", "Frozen native entry is unavailable");
-		const bytes = jsonBytes(entry.payload);
+		const marker = nativeEntryBlobMarker(entry.payload);
+		const bytes = marker?.bytes ?? jsonBytes(entry.payload);
 		if (entries.length && jsonBytes(entries) + bytes > runtimeLimits.httpPageBytes - 8192) break;
 		first ??= entry.entryId;
 		if (!fallback)
@@ -156,7 +183,8 @@ export async function nativeHistoryPage(
 			entryRef = fallback.entryRef;
 			break;
 		}
-		entries.unshift(entry.payload);
+		if (marker) readBytes += bytes;
+		entries.unshift(await nativePayload(entry));
 		if (
 			readBytes > runtimeLimits.bootstrapMaterializedBytes ||
 			performance.now() - started > runtimeLimits.bootstrapTimeoutMs
@@ -222,19 +250,26 @@ export async function nativeEntry(
 	const cutSeq = decodeCursor<number | undefined>(revision, nativeCutScope(agentId, selected.path), undefined);
 	if (cutSeq === undefined || !Number.isSafeInteger(cutSeq) || cutSeq < 0)
 		throw new EngineTargetError("stale_target", "Native history resource changed scope");
-	const page = await store.storageClient.readContext({
-		...selected.scope,
-		cutSeq,
-		leafId: entryId,
-		maxRecords: 1,
-		maxBytes: runtimeLimits.httpPageBytes,
-	});
+	const page = await store.storageClient
+		.readContext({
+			...selected.scope,
+			cutSeq,
+			leafId: entryId,
+			maxRecords: 1,
+			maxBytes: runtimeLimits.httpPageBytes,
+		})
+		.catch((error: unknown) => {
+			// A descriptor may name any entry id; the owner refuses a leaf this cut does not retain.
+			if (error instanceof StorageClientError && (error.code === "not_found" || error.code === "schema_error"))
+				throw new EngineTargetError("history_expired", "Native history entry is unavailable");
+			throw error;
+		});
 	const sessionId = header(page.state).id;
 	if (expectedSessionId && sessionId !== expectedSessionId)
 		throw new EngineTargetError("stale_target", "Native history resource changed session");
 	if (page.events[0]?.entryId !== entryId)
 		throw new EngineTargetError("history_expired", "Native history entry is unavailable");
-	return { sessionId, entry: page.events[0].payload };
+	return { sessionId, entry: await nativePayload(page.events[0]) };
 }
 export async function nativeHistoryEntry(
 	store: RocksEngineStore,

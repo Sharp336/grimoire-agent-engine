@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
 	BLOB_RANGE_BYTES,
+	BlobSourceMismatchError,
 	BlobStore,
 	blobExtensionForImageMimeType,
 	externalizeImageData,
@@ -12,22 +13,6 @@ import {
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("BlobStore image display paths", () => {
-	it("publishes synchronously without replacing an existing canonical body", async () => {
-		using tempDir = TempDir.createSync("@omp-blob-store-sync-");
-		const store = new BlobStore(tempDir.path());
-		const data = Buffer.from("accepted image bytes");
-		const first = store.putSync(data, { extension: "png" });
-		const before = await fs.stat(first.path);
-		const repeated = store.putSync(data, { extension: "png" });
-		expect(repeated.path).toBe(first.path);
-		expect((await fs.stat(first.path)).ino).toBe(before.ino);
-		expect(await fs.readFile(first.displayPath)).toEqual(data);
-		const conflict = Buffer.alloc(data.length, 7);
-		await fs.writeFile(first.path, conflict);
-		expect(() => store.putSync(data)).toThrow("conflicts");
-		expect(await fs.readFile(first.path)).toEqual(conflict);
-	});
-
 	it("creates an extension-bearing sidecar for image blobs while keeping canonical refs extensionless", async () => {
 		using tempDir = TempDir.createSync("@omp-blob-store-image-link-");
 		const store = new BlobStore(tempDir.path());
@@ -50,7 +35,7 @@ describe("BlobStore image display paths", () => {
 		const hash = parseBlobRef(ref);
 
 		expect(hash).toBeTruthy();
-		expect(await Bun.file(path.join(store.liveDir, `${hash}.webp`)).bytes()).toEqual(new Uint8Array(data));
+		expect(await Bun.file(path.join(store.dir, `${hash}.webp`)).bytes()).toEqual(new Uint8Array(data));
 		expect(await resolveImageData(store, ref)).toBe(data.toString("base64"));
 	});
 
@@ -120,53 +105,72 @@ describe("BlobStore bounded media reads", () => {
 	});
 });
 
-describe("BlobStore completed upload import", () => {
-	it("publishes exact multi-chunk bytes, deduplicates retries, and preserves the staged source", async () => {
-		using tempDir = TempDir.createSync("@omp-blob-upload-");
-		const source = path.join(tempDir.path(), "upload.bin");
+describe("BlobStore managed publication", () => {
+	const sha256 = (data: Buffer) => new Bun.SHA256().update(data).digest("hex");
+	const intents = (store: BlobStore, hash: string) =>
+		fs.readdir(path.join(store.intentsDir, hash)).catch(() => [] as string[]);
+
+	it("pins the live body with one intent per publication until it is released or abandoned", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-publish-");
 		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
-		const data = Buffer.from(Array.from({ length: BLOB_RANGE_BYTES * 3 + 17 }, (_, index) => index % 251));
-		const expected = { hash: new Bun.SHA256().update(data).digest("hex"), bytes: data.length };
-		await Bun.write(source, data);
-		const [first, retry] = await Promise.all([
-			store.importFile(source, expected),
-			store.importFile(source, expected),
+		const data = Buffer.from("managed image bytes");
+		const first = await store.publish(data, { extension: "png" });
+		expect(first.path).toBe(path.join(store.liveDir, first.hash));
+		expect(first.displayPath).toBe(`${first.path}.png`);
+		expect((await fs.stat(first.displayPath)).ino).toBe((await fs.stat(first.path)).ino);
+		expect(await intents(store, first.hash)).toEqual([
+			expect.stringMatching(new RegExp(`^${process.pid}\\.\\d+\\.[0-9a-f-]{36}$`)),
 		]);
-		expect(retry.path).toBe(first.path);
-		expect(first.ref).toBe(`blob:sha256:${expected.hash}`);
-		expect(await fs.readFile(first.path)).toEqual(data);
-		expect(await fs.readFile(source)).toEqual(data);
-		expect(await fs.readdir(store.liveDir)).toEqual([expected.hash]);
-		await Bun.write(source, Buffer.alloc(0));
-		const empty = await store.importFile(source, { hash: new Bun.SHA256().digest("hex"), bytes: 0 });
-		expect((await fs.stat(empty.path)).size).toBe(0);
+		// Reuse of the live body; a type outside the fixed image set gets no sidecar the owner would miss.
+		const second = await store.publish(data, { extension: "bmp" });
+		expect(second.displayPath).toBe(second.path);
+		expect(await intents(store, first.hash)).toHaveLength(2);
+		await first.release();
+		await first.abandon();
+		await second.abandon();
+		expect(await intents(store, first.hash)).toEqual([expect.stringMatching(/\.abandoned$/)]);
+		expect(await fs.readdir(store.stagingDir)).toEqual([]);
+		expect(await fs.readdir(store.locksDir)).toEqual([]);
+		expect((await fs.readdir(store.liveDir)).sort()).toEqual([first.hash, `${first.hash}.png`]);
+		expect(await fs.readdir(store.dir)).toEqual([".managed"]);
 	});
 
-	it("rejects changed size/hash and canonical conflicts without overwriting data or leaving partial blobs", async () => {
-		using tempDir = TempDir.createSync("@omp-blob-upload-");
-		const source = path.join(tempDir.path(), "upload.bin");
+	it("links a verified upload file instead of copying it and abandons a torn one", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-publish-file-");
 		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
-		const data = Buffer.from("intended bytes");
-		const expected = { hash: new Bun.SHA256().update(data).digest("hex"), bytes: data.length };
+		const source = path.join(tempDir.path(), "payload.bin");
+		const data = Buffer.from(Array.from({ length: BLOB_RANGE_BYTES * 3 + 17 }, (_, index) => index % 251));
 		await Bun.write(source, data);
-		await expect(store.importFile(source, { ...expected, bytes: data.length + 1 })).rejects.toThrow("size");
-		await expect(store.importFile(source, { ...expected, hash: "../outside" })).rejects.toThrow("identity");
-		await expect(store.importFile(source, { ...expected, hash: "0".repeat(64) })).rejects.toThrow("hash");
-		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
-		const corrupted = Buffer.alloc(data.length, 42);
-		await fs.mkdir(store.liveDir, { recursive: true });
-		await Bun.write(path.join(store.liveDir, expected.hash), corrupted);
-		await expect(store.importFile(source, expected)).rejects.toThrow("conflicts");
-		expect(await fs.readFile(path.join(store.liveDir, expected.hash))).toEqual(corrupted);
-		expect(await fs.readdir(store.liveDir)).toEqual([expected.hash]);
+		const published = await store.publish({ file: source, hash: sha256(data), bytes: data.length });
+		expect((await fs.stat(published.path)).ino).toBe((await fs.stat(source)).ino);
+		await published.release();
+
+		const declared = Buffer.alloc(100, 3);
+		const torn = path.join(tempDir.path(), "torn.bin");
+		await Bun.write(torn, Buffer.concat([declared.subarray(0, 60), Buffer.alloc(40)]));
+		for (const bytes of [declared.length, declared.length + 1])
+			await expect(store.publish({ file: torn, hash: sha256(declared), bytes })).rejects.toBeInstanceOf(
+				BlobSourceMismatchError,
+			);
+		await expect(store.publish({ file: torn, hash: "../outside", bytes: 100 })).rejects.toThrow("identity");
+		expect(await fs.readdir(store.liveDir)).toEqual([published.hash]);
+		expect(await fs.readdir(store.stagingDir)).toEqual([]);
+		expect(await intents(store, sha256(declared))).toEqual([
+			expect.stringMatching(/\.abandoned$/),
+			expect.stringMatching(/\.abandoned$/),
+		]);
+
+		const corrupted = Buffer.alloc(99, 42);
+		await Bun.write(path.join(store.liveDir, sha256(declared)), corrupted);
+		await expect(store.publish(declared)).rejects.toThrow("conflicts");
+		expect(await fs.readFile(path.join(store.liveDir, sha256(declared)))).toEqual(corrupted);
 	});
 
-	it("cancels between chunks without publishing and rejects linked destinations or non-file sources", async () => {
-		using tempDir = TempDir.createSync("@omp-blob-upload-");
-		const source = path.join(tempDir.path(), "upload.bin");
+	it("cancels while hashing without publishing and refuses a linked root", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-publish-cancel-");
+		const source = path.join(tempDir.path(), "payload.bin");
 		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
 		const data = Buffer.alloc(BLOB_RANGE_BYTES * 3, 19);
-		const expected = { hash: new Bun.SHA256().update(data).digest("hex"), bytes: data.length };
 		await Bun.write(source, data);
 		const controller = new AbortController();
 		let checks = 0;
@@ -176,21 +180,37 @@ describe("BlobStore completed upload import", () => {
 			check();
 		});
 		try {
-			await expect(store.importFile(source, expected, controller.signal)).rejects.toThrow("upload cancelled");
+			await expect(
+				store.publish({ file: source, hash: sha256(data), bytes: data.length }, { signal: controller.signal }),
+			).rejects.toThrow("upload cancelled");
 		} finally {
 			abort.mockRestore();
 		}
-		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
+		expect(await fs.readdir(store.liveDir)).toEqual([]);
+		expect(await fs.readdir(store.stagingDir)).toEqual([]);
 		expect(await fs.readFile(source)).toEqual(data);
-		await expect(store.importFile(tempDir.path(), expected)).rejects.toThrow("unsafe");
 		const linked = path.join(tempDir.path(), "linked");
 		await fs.symlink(store.dir, linked, process.platform === "win32" ? "junction" : "dir");
 		try {
-			await expect(new BlobStore(linked).importFile(source, expected)).rejects.toThrow("unsafe");
+			await expect(new BlobStore(linked).publish(data)).rejects.toThrow("unsafe");
 		} finally {
 			await fs.unlink(linked);
 		}
-		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
+	});
+
+	it("takes over a dead producer's lock through its break gate", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-publish-stale-");
+		const store = new BlobStore(path.join(tempDir.path(), "blobs"));
+		const data = Buffer.from("published after a crashed producer");
+		const dead = Bun.spawn([process.execPath, "-e", ""]);
+		await dead.exited;
+		const lock = path.join(store.locksDir, `${sha256(data)}.lock`);
+		await fs.mkdir(store.locksDir, { recursive: true });
+		await fs.writeFile(lock, `${dead.pid}\n0\n`);
+		const published = await store.publish(data);
+		expect(await fs.readFile(published.path)).toEqual(data);
+		expect(await fs.readdir(store.locksDir)).toEqual([]);
+		await published.release();
 	});
 });
 
@@ -238,7 +258,7 @@ describe("BlobStore async publication responsiveness", () => {
 				),
 			).toBe(true);
 			let settled = false;
-			const publishing = store.put(data).finally(() => {
+			const publishing = store.publish(data).finally(() => {
 				settled = true;
 			});
 			void publishing.catch(() => {});
@@ -253,7 +273,7 @@ describe("BlobStore async publication responsiveness", () => {
 			await controlTick.promise;
 			expect(settled).toBe(false);
 			const abort = new AbortController();
-			const cancelled = cancelStore.put(data, undefined, abort.signal);
+			const cancelled = cancelStore.publish(data, { signal: abort.signal });
 			await Promise.race([
 				secondWait.promise,
 				Bun.sleep(5_000).then(() => {
@@ -277,44 +297,6 @@ describe("BlobStore async publication responsiveness", () => {
 			await fs.writeFile(release, "");
 			await holder.exited;
 		}
-	}, 15_000);
-
-	it("yields during an existing body comparison and retains exact bytes", async () => {
-		using tempDir = TempDir.createSync("artel-s5-r4-compare-");
-		const data = Buffer.alloc(BLOB_RANGE_BYTES * 2 + 17, 41);
-		const hash = new Bun.SHA256().update(data).digest("hex");
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		let pause = false;
-		const store = new BlobStore(path.join(tempDir.path(), "blobs"), stage => {
-			if (stage === "compare" && pause) {
-				entered.resolve();
-				return release.promise;
-			}
-		});
-		await store.put(data);
-		pause = true;
-		let settled = false;
-		const duplicate = store.restore(hash, data).finally(() => {
-			settled = true;
-		});
-		void duplicate.catch(() => {});
-		try {
-			await Promise.race([
-				entered.promise,
-				Bun.sleep(5_000).then(() => {
-					throw new Error("existing body comparison was not reached");
-				}),
-			]);
-			const controlTick = Promise.withResolvers<void>();
-			setTimeout(controlTick.resolve, 0);
-			await controlTick.promise;
-			expect(settled).toBe(false);
-		} finally {
-			release.resolve();
-		}
-		await duplicate;
-		expect(await fs.readFile(path.join(store.liveDir, hash))).toEqual(data);
 	}, 15_000);
 
 	it("fails a bounded lock wait without publishing a missing body", async () => {
@@ -352,16 +334,32 @@ describe("BlobStore async publication responsiveness", () => {
 					() => false,
 				),
 			).toBe(true);
-			await expect(store.put(data)).rejects.toThrow("Blob publication lock is busy");
+			await expect(store.publish(data)).rejects.toThrow("Blob publication lock is busy");
 			expect(
 				await fs.stat(path.join(store.liveDir, hash)).then(
 					() => true,
 					() => false,
 				),
 			).toBe(false);
+			// The failed producer hands the hash back to the storage owner instead of pinning it.
+			expect(await fs.readdir(path.join(store.intentsDir, hash))).toEqual([expect.stringMatching(/\.abandoned$/)]);
+			expect(await fs.readdir(store.stagingDir)).toEqual([]);
 		} finally {
 			await fs.writeFile(release, "");
 			await holder.exited;
 		}
 	}, 15_000);
+
+	it("settles an abandoned pin under a relative root whose absolute paths exceed MAX_PATH", async () => {
+		using tempDir = TempDir.createSync("@artel-s56-long-root-");
+		// Windows extends only absolute paths past 260 characters; the intent's `.abandoned` name is the longest.
+		const root = path.relative(process.cwd(), path.join(tempDir.path(), "r".repeat(200), "blobs"));
+		const store = new BlobStore(root);
+		const data = Buffer.from("long root publication");
+		const publication = await store.publish(data);
+		await publication.abandon();
+		expect(await fs.readdir(path.join(store.intentsDir, publication.hash))).toEqual([
+			expect.stringMatching(/\.abandoned$/),
+		]);
+	});
 });

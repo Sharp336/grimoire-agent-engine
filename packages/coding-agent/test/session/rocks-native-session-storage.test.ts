@@ -9,11 +9,7 @@ import {
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
 import { withOriginalAttachment } from "../../src/session/original-attachments";
-import {
-	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
-	nativePayloadBlobHashes,
-	RocksNativeSessionStorage,
-} from "../../src/session/rocks-native-session-storage";
+import { nativePayloadBlobHashes, RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { StorageClient, StorageClientError } from "../../src/session/storage-client";
 import {
@@ -207,7 +203,8 @@ it("stores message images as blob references, publishes one body and restores ba
 		const client = new MemoryNativeClient();
 		const image = Buffer.from(Uint8Array.from({ length: 40_000 }, (_, index) => (index * 7) & 0xff));
 		// An uploaded attachment already owns this body; the message image must reuse it.
-		const upload = await blobs.put(image);
+		const upload = await blobs.publish(image);
+		await upload.release();
 		const data = image.toString("base64");
 		const manager = SessionManager.createNative("/images", new RocksNativeSessionStorage(client, "images", "root"));
 		for (const timestamp of [1, 2])
@@ -228,6 +225,8 @@ it("stores message images as blob references, publishes one body and restores ba
 				message: { content: [{ type: "text" }, { type: "image", data: `blob:sha256:${upload.hash}` }] },
 			});
 		expect(await fs.readdir(blobs.liveDir)).toEqual([upload.hash]);
+		// Applied writes released their pins; nothing keeps the body from its owner's accounting.
+		expect(await fs.readdir(path.join(blobs.intentsDir, upload.hash))).toEqual([]);
 
 		const cold = await SessionManager.openNative(new RocksNativeSessionStorage(client, "images", "root"));
 		expect(cold.getWorkingEntries()).toEqual(expected);
@@ -266,6 +265,28 @@ it("admits an entry whose image and text exceed the 8 MiB entry budget by trimmi
 		expect(entry.message.content.slice(0, -1).map(block => block.type === "text" && block.text.length)).toEqual(
 			Array(20).fill(250_000),
 		);
+	});
+}, 30_000);
+
+it("rejects one entry that cannot fit the 8 MiB entry budget without poisoning the session", async () => {
+	await withContourBlobs(async () => {
+		const client = new MemoryNativeClient();
+		const manager = SessionManager.createNative(
+			"/unsplittable",
+			new RocksNativeSessionStorage(client, "big", "root"),
+		);
+		const kept = manager.appendMessage({ role: "user", content: "before", timestamp: 1 });
+		// Strings shorter than the trim floor cannot shrink, so this entry stays above 8 MiB.
+		const parts = Array.from({ length: 9_000 }, () => ({ type: "text" as const, text: "s".repeat(1_000) }));
+		expect(() => manager.appendMessage({ role: "user", content: parts, timestamp: 2 })).toThrow(
+			NativeSessionWriteRejectedError,
+		);
+		expect(manager.getLeafId()).toBe(kept);
+		const next = manager.appendMessage({ role: "user", content: "after", timestamp: 3 });
+		await manager.flushAndCheckpoint();
+		const reopened = await SessionManager.openNative(new RocksNativeSessionStorage(client, "big", "root"));
+		expect(reopened.getLeafId()).toBe(next);
+		expect(reopened.getEntry(next)?.parentId).toBe(kept);
 	});
 }, 30_000);
 
@@ -343,6 +364,49 @@ it("resumes after a crash from applied writes left past the durable cut instead 
 	expect(client.barriers).toEqual([11, 12, 13]);
 });
 
+it("keeps a reader's failed applied-prefix barrier retryable without fencing, while a writer's barrier still fences", async () => {
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as StorageProtocolRequest;
+			if (body.operation === "barrier") return new Response("owner failed", { status: 500 });
+			if (body.operation !== "read_context") throw new Error(`Unexpected request ${body.operation}`);
+			// A crashed writer left seq 1 applied past the durable cut.
+			return Response.json({
+				schema: "artel.storage.protocol.response.v1",
+				version: "1.0",
+				requestId: body.read.requestId,
+				incarnation: 1,
+				familyId: body.read.familyId,
+				generationId: body.read.generationId,
+				throughSeq: 0,
+				durableThroughSeq: 0,
+				liveThroughSeq: 1,
+				events: [],
+				nextCursor: null,
+			});
+		},
+	});
+	try {
+		const client = new StorageClient({
+			url: `http://127.0.0.1:${server.port}`,
+			token: "0123456789012345",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+		const storage = new RocksNativeSessionStorage(client, "f", "g");
+		await expect(storage.readContext()).rejects.toMatchObject({ code: "retryable" });
+		expect(client.failure).toBeUndefined();
+		await expect(
+			storage.barrier({ familyId: "f", generationId: "g", throughSeq: 1, incarnation: 1 }),
+		).rejects.toMatchObject({ code: "outcome_unknown" });
+		expect(client.failure?.code).toBe("outcome_unknown");
+	} finally {
+		await server.stop(true);
+	}
+});
+
 it("reads a retained original attachment from a resumed native session without its full archive", async () => {
 	await withContourBlobs(async blobs => {
 		const client = new MemoryNativeClient();
@@ -401,7 +465,6 @@ it("rejects bounded append admission without leaving the rejected entry in the m
 		manager.appendMessage({ role: "user", content: String(index), timestamp: index });
 	expect(() => manager.appendMessage({ role: "user", content: "rejected", timestamp: 2 })).toThrow("admission budget");
 	expect(manager.getContextBranch()).toHaveLength(2);
-	await expect(manager.flush()).rejects.toThrow("admission budget");
 	await client.apply(0);
 	await client.apply(1);
 	expect(client.writes.map(write => write.input.firstSeq)).toEqual([1, 2]);
@@ -599,9 +662,6 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		await manager.flushAndCheckpoint();
 
 		expect(writes).toHaveLength(1);
-		expect(await Bun.file(path.join(blobs.dir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE)).json()).toEqual({
-			schema: "omp.native.entry.blob.gc-guard.v1",
-		});
 		expect(wireBytes.every(bytes => bytes < 1024 * 1024)).toBe(true);
 		expect(stored).toHaveLength(expected.length);
 		const byId = new Map(stored.map(entry => [entry.entryId, entry]));
@@ -634,7 +694,6 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
 			/blob.*missing/i,
 		);
-		await blobs.restore(hash, original);
 		await fs.writeFile(blobPath, Buffer.alloc(original.byteLength, 0x5a));
 		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
 			/blob.*hash/i,

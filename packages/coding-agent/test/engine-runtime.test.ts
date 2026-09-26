@@ -1,13 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
@@ -30,7 +29,7 @@ import {
 	type EngineCommandEnvelope,
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentId, engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import {
 	type RuntimeScope,
@@ -46,19 +45,25 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { withOriginalAttachment } from "@oh-my-pi/pi-coding-agent/session/original-attachments";
-import { loadSessionFile, loadSessionMessagesReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	parseNativeSessionLocator,
+	RocksNativeSessionStorage,
+} from "@oh-my-pi/pi-coding-agent/session/rocks-native-session-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { StorageClientError } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import * as utils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
-import { legacyEngineStore } from "./helpers/legacy-engine-store";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
-describe("EngineRuntime", () => {
+const storageExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
+const storageRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
+
+describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	const tempDirs: string[] = [];
 	const testRuntimes: EngineRuntime[] = [];
+	const savedStorageEnv = { binding: process.env.GRIMOIRE_STORAGE_BINDING, blobs: process.env.PI_BLOBS_DIR };
+	let storage: { stop(): Promise<void>; blobsDir: string } | undefined;
 	async function openRuntime(options: EngineRuntimeOptions) {
 		const runtime = await EngineRuntime.create(options);
 		testRuntimes.push(runtime);
@@ -83,14 +88,42 @@ describe("EngineRuntime", () => {
 
 	afterEach(async () => {
 		for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
+		await storage?.stop();
+		storage = undefined;
+		for (const [name, value] of [
+			["GRIMOIRE_STORAGE_BINDING", savedStorageEnv.binding],
+			["PI_BLOBS_DIR", savedStorageEnv.blobs],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
 	});
+
+	/** One real Rust owner per test; every runtime and restart in that test binds to it. */
+	async function testStorage() {
+		if (!storage) {
+			const root = fs.mkdtempSync(path.join(storageRunRoot!, "engine-runtime-storage-"));
+			tempDirs.push(root);
+			const worker = await startStorageWorker(
+				storageExecutable!,
+				root,
+				`${crypto.randomUUID()}${crypto.randomUUID()}`,
+				1,
+			);
+			storage = { stop: () => worker.stop(), blobsDir: storageBlobsDir(root) };
+			process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
+			process.env.PI_BLOBS_DIR = storage.blobsDir;
+		}
+		return storage;
+	}
 
 	async function createRuntime(
 		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true,
 		overrides: Partial<EngineRuntimeOptions> = {},
 		sessionDefaultOverrides: EngineRuntimeOptions["sessionDefaults"] = {},
 	) {
+		const { blobsDir } = await testStorage();
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-runtime-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, "workspace");
@@ -103,7 +136,7 @@ describe("EngineRuntime", () => {
 		});
 		const options: EngineRuntimeOptions = {
 			databasePath: path.join(tempDir, "engine.sqlite"),
-			attachmentBlobStore: new BlobStore(path.join(tempDir, "upload-blobs")),
+			attachmentBlobStore: new BlobStore(blobsDir),
 			dispatchPrompt,
 			sessionDefaults: {
 				cwd,
@@ -125,7 +158,36 @@ describe("EngineRuntime", () => {
 			options.resolveSessionContinuation = async launch => `test:${launch.profileDigest}`;
 		}
 		const runtime = await openRuntime(options);
-		return { runtime, cwd, options };
+		return { runtime, cwd, options, blobsDir };
+	}
+
+	/** Open the retained native session of a runtime binding exactly as the Engine stores it. */
+	async function nativeSession(runtime: EngineRuntime, locator: string) {
+		const { familyId, generationId } = parseNativeSessionLocator(locator);
+		const manager = await SessionManager.openNative(
+			new RocksNativeSessionStorage(runtime.store.storageClient, familyId, generationId),
+		);
+		await manager.materializeHistory();
+		return manager;
+	}
+
+	/** The retained native history of an AgentInstance as the public history page projects it. */
+	async function nativeHistory(runtime: EngineRuntime, agentInstanceId: string) {
+		const page = await runtime.sessionHistoryPage(
+			agentInstanceId,
+			`grimoire://tasks/grimoire/runtime-test/agents/${agentInstanceId}`,
+			undefined,
+			runtimeLimits.httpPageRecords,
+		);
+		// elapsedMs measures the read itself, not the history.
+		const { elapsedMs: _elapsedMs, ...stable } = page;
+		return { ...stable, leafEntryId: page.anchor, sessionLeafEntryId: page.anchor };
+	}
+
+	/** Header and entries of a retained native session, in the shape of a loaded session file. */
+	async function retainedEntries(runtime: EngineRuntime, locator: string) {
+		const manager = await nativeSession(runtime, locator);
+		return { entries: [manager.getHeader()!, ...manager.getEntries()] };
 	}
 
 	const profile: EngineLaunchProfile = {
@@ -135,9 +197,30 @@ describe("EngineRuntime", () => {
 		enableLsp: false,
 	};
 
+	/**
+	 * A model that calls one tool, then answers. Native storage settles a tool effect only once its toolResult is
+	 * durable, so tool scenarios run through the agent loop instead of calling `execute` directly.
+	 */
+	function toolTurnModel(toolCallId: string, name: string, args: Record<string, unknown>) {
+		return createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall" as const, id: toolCallId, name, arguments: args }] },
+				{ content: ["done"] },
+			],
+		});
+	}
+
+	/** The toolResult the model received for one call, if the loop got that far. */
+	function toolResultOf(mock: MockModel, toolCallId: string) {
+		return mock.calls
+			.flatMap(call => call.context.messages)
+			.find(
+				(message): message is ToolResultMessage =>
+					message.role === "toolResult" && message.toolCallId === toolCallId,
+			);
+	}
+
 	it("lets a native text model read an uploaded file without UI and retains the original handle after restart", async () => {
-		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-native-file-read-"));
-		tempDirs.push(blobDir);
 		const payload = "first line\nORIGINAL_FILE_CONTENT_42\nlast line\n";
 		let calls = 0;
 		let uri = "";
@@ -165,10 +248,8 @@ describe("EngineRuntime", () => {
 		});
 		const setup = await createRuntime(undefined, {
 			dispatchPrompt: undefined,
-			attachmentBlobStore: new BlobStore(blobDir),
 			resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
 		});
-		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
 		try {
 			await setup.runtime.attachmentUploads.stage("alice", {
 				uploadId: "file-upload",
@@ -239,11 +320,7 @@ describe("EngineRuntime", () => {
 			await restarted.drain();
 			expect(calls).toBe(4);
 			expect(uri).toBe(originalUri);
-			const manager = await SessionManager.open(
-				started.sessionFile!,
-				undefined,
-				legacyEngineStore(restarted).sessionStorage,
-			);
+			const manager = await nativeSession(restarted, started.sessionFile!);
 			let copiedPath = "";
 			expect(
 				await withOriginalAttachment(manager, uri, async filePath => {
@@ -269,19 +346,16 @@ describe("EngineRuntime", () => {
 			expect(fs.existsSync(copiedPath)).toBeFalse();
 			const original = user.attachments![0].resource!;
 			fs.writeFileSync(
-				new BlobStore(blobDir).liveDir + path.sep + original.contentHash.slice(7),
+				path.join(new BlobStore(setup.blobsDir).liveDir, original.contentHash.slice(7)),
 				Buffer.alloc(original.bytes, 65),
 			);
 			await expect(withOriginalAttachment(manager, uri, async () => "must not run")).rejects.toThrow("SHA-256");
 		} finally {
 			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
-			blobScope.mockRestore();
 		}
 	});
 
 	it("delivers staged images through native start, queue and steer into provider input and retained user history", async () => {
-		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-upload-originals-"));
-		tempDirs.push(blobDir);
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		let calls = 0;
@@ -296,7 +370,6 @@ describe("EngineRuntime", () => {
 		});
 		mock.input.push("image");
 		const setup = await createRuntime(undefined, {
-			attachmentBlobStore: new BlobStore(blobDir),
 			dispatchPrompt: undefined,
 			resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
 		});
@@ -347,7 +420,6 @@ describe("EngineRuntime", () => {
 				contentBase64: png.toString("base64"),
 			});
 		};
-		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
 		try {
 			await stage("first-image", "image-message");
 			await dispatch(base);
@@ -468,64 +540,12 @@ describe("EngineRuntime", () => {
 				"queued caption\n[Image]",
 			]);
 			const source = (await reopened.store.getBinding(base.agentInstanceId))!;
-			const loaded = await loadSessionFile(source.sessionFile!, legacyEngineStore(reopened).sessionStorage);
-			const nativeUsers = loaded.entries.filter(entry => entry.type === "message" && entry.message.role === "user");
+			const retained = await nativeSession(reopened, source.sessionFile!);
+			const nativeUsers = retained
+				.getEntries()
+				.filter(entry => entry.type === "message" && entry.message.role === "user");
 			expect(nativeUsers).toHaveLength(3);
 			for (const entry of nativeUsers) expect(entry).toHaveProperty("originalAttachments", [originalAttachment]);
-			const archive = await reopened.sessionArchive(base.agentInstanceId);
-			expect(archive.nextOffset).toBeNull();
-			const checkpoint = JSON.parse(Buffer.from(archive.contentBase64, "base64").toString("utf8"));
-			expect(checkpoint.blobs).toContainEqual({
-				name: originalAttachment.contentHash.slice(7),
-				contentHash: originalAttachment.contentHash,
-				byteLength: png.length,
-				contentBase64: png.toString("base64"),
-			});
-			for (const replacement of [{ bytes: png.length + 1 }, { name: "../escape" }]) {
-				const jsonl = Buffer.from(checkpoint.sessionJsonlBase64, "base64")
-					.toString("utf8")
-					.split("\n")
-					.filter(Boolean)
-					.map(line => {
-						const entry = JSON.parse(line) as { originalAttachments?: object[] };
-						if (entry.originalAttachments)
-							entry.originalAttachments = entry.originalAttachments.map(item => ({ ...item, ...replacement }));
-						return JSON.stringify(entry);
-					})
-					.join("\n");
-				const corrupt = Buffer.from(
-					JSON.stringify({
-						...checkpoint,
-						sessionJsonlBase64: Buffer.from(jsonl).toString("base64"),
-						sessionJsonlHash: `sha256:${new Bun.SHA256().update(jsonl).digest("hex")}`,
-					}),
-				);
-				const destinationRef = "grimoire://tasks/grimoire/attachment-test/agents/corrupt-restore";
-				await expect(
-					reopened.sessionRestoreStage({
-						agentInstanceId: engineAgentInstanceId(destinationRef),
-						agentInstanceRef: destinationRef,
-						authorityGeneration: 1,
-						totalBytes: corrupt.length,
-						offset: 0,
-						contentHash: `sha256:${new Bun.SHA256().update(corrupt).digest("hex")}`,
-						contentBase64: corrupt.toString("base64"),
-					}),
-				).rejects.toMatchObject({ code: "invalid_request" });
-			}
-			const archivePath = path.join(blobDir, `${archive.contentHash.slice(7)}.gz`);
-			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(archive.contentBase64, "base64")));
-			await reopened.sessionArchiveRetire(source, archive.contentHash, archivePath, "original-retire");
-			const originalPath = path.join(blobDir, originalAttachment.contentHash.slice(7));
-			fs.unlinkSync(originalPath);
-			await reopened.sessionArchiveRestore(source, archive.contentHash, "original-retire");
-			expect(fs.readFileSync(originalPath)).toEqual(png);
-			const restored = await loadSessionFile(source.sessionFile!, legacyEngineStore(reopened).sessionStorage);
-			expect(restored.entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toEqual(
-				nativeUsers,
-			);
-			const sourceHistory = await reopened.sessionHistory(base.agentInstanceId);
-			if (!sourceHistory.sessionLeafEntryId) throw new Error("Expected retained image history leaf");
 			for (const mode of ["branch", "edit"] as const) {
 				const fork = await reopened.start(
 					{
@@ -538,8 +558,8 @@ describe("EngineRuntime", () => {
 						historyEdit: {
 							mode,
 							source,
-							sourceSessionId: sourceHistory.sessionId,
-							expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+							sourceSessionId: retained.getSessionId(),
+							expectedLeafEntryId: retained.getLeafId()!,
 							entryId: users[0]!.entryId,
 							...(mode === "edit" ? { replacementText: "new image caption" } : {}),
 						},
@@ -547,19 +567,19 @@ describe("EngineRuntime", () => {
 					profile,
 				);
 				await reopened.drain();
-				const forked = await loadSessionFile(fork.sessionFile!, legacyEngineStore(reopened).sessionStorage);
-				const forkUser = forked.entries.find(entry => entry.type === "message" && entry.message.role === "user");
-				expect(forkUser).toHaveProperty("originalAttachments", [originalAttachment]);
-				const forkArchive = await reopened.sessionArchive(fork.agentInstanceId);
-				expect(forkArchive.nextOffset).toBeNull();
-				expect(JSON.parse(Buffer.from(forkArchive.contentBase64, "base64").toString("utf8")).blobs).toEqual(
-					checkpoint.blobs,
+				// The fork's working context inherits the selected prefix; its own records hold only new entries.
+				const { familyId, generationId } = parseNativeSessionLocator(fork.sessionFile!);
+				const forked = await SessionManager.openNative(
+					new RocksNativeSessionStorage(reopened.store.storageClient, familyId, generationId),
 				);
+				const forkUser = forked
+					.getContextBranch()
+					.find(entry => entry.type === "message" && entry.message.role === "user");
+				expect(forkUser).toHaveProperty("originalAttachments", [originalAttachment]);
 			}
 		} finally {
 			release.resolve();
 			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
-			blobScope.mockRestore();
 		}
 	}, 30_000);
 
@@ -584,7 +604,7 @@ describe("EngineRuntime", () => {
 			authorityGeneration: 1,
 			cwd,
 		};
-		await expect(runtime.start(request, profile)).rejects.toThrow("owner");
+		await expect(runtime.start(request, profile)).rejects.toMatchObject({ code: "attachment_expired" });
 		await runtime.attachmentUploads.stage("alice", {
 			uploadId: "image",
 			clientMessageId: "image-message",
@@ -595,7 +615,10 @@ describe("EngineRuntime", () => {
 			offset: 0,
 			contentBase64: png.toString("base64"),
 		});
-		await expect(runtime.start(request, profile)).rejects.toThrow("does not accept images");
+		await expect(runtime.start(request, profile)).rejects.toMatchObject({
+			code: "attachment_requires_images",
+			message: expect.stringContaining('Image "pixel.png" cannot be sent'),
+		});
 		expect(mock.calls).toHaveLength(0);
 		expect(await runtime.store.getAttempt(request.attemptId)).toBeUndefined();
 		const queued = await runtime.enqueueAgentInbox(request.agentInstanceId, {
@@ -604,17 +627,17 @@ describe("EngineRuntime", () => {
 			body: "",
 			attachments: { principalId: "alice", uploadIds: ["image"] },
 		});
-		await runtime.attachmentUploads.remove("alice", "image");
 		const queuedRequest = {
 			...request,
 			attachmentUploadIds: undefined,
 			queueId: queued.item.queueId,
 			expectedRevision: queued.item.revision,
-			mutationId: "consume-removed",
+			mutationId: "consume-refused",
 			expectedIntentRevision: (await runtime.store.intent(request.agentInstanceId)).intentRevision,
 			explicitContinue: true,
 		};
-		await expect(runtime.start(queuedRequest, profile)).rejects.toThrow("removed");
+		// The queued message owns its accepted image, so delivery fails on the route, not on the upload.
+		await expect(runtime.start(queuedRequest, profile)).rejects.toMatchObject({ code: "attachment_requires_images" });
 		expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
 		expect(mock.calls).toHaveLength(0);
 	});
@@ -654,7 +677,7 @@ describe("EngineRuntime", () => {
 		await setup.runtime.drain();
 		await setup.runtime.dispose();
 		const reopened = await openRuntime(setup.options);
-		const users = (await reopened.sessionHistory("snapshot-agent")).entries.filter(entry => entry.role === "user");
+		const users = (await nativeHistory(reopened, "snapshot-agent")).entries.filter(entry => entry.role === "user");
 		expect(
 			users.map(entry => [
 				entry.sourceCommandId,
@@ -702,98 +725,14 @@ describe("EngineRuntime", () => {
 		});
 		await malformed.runtime.start({ ...request("malformed"), cwd: malformed.cwd }, selected);
 		await malformed.runtime.drain();
-		expect((await malformed.runtime.sessionHistory("snapshot-agent")).entries[0]).not.toHaveProperty(
+		expect((await nativeHistory(malformed.runtime, "snapshot-agent")).entries[0]).not.toHaveProperty(
 			"launchSnapshot",
 		);
 		expect(
-			(await reopened.sessionHistory("snapshot-agent")).entries
+			(await nativeHistory(reopened, "snapshot-agent")).entries
 				.filter(entry => entry.role === "assistant")
 				.every(entry => !entry.launchSnapshot),
 		).toBe(true);
-	});
-
-	it("defers storage reclaim during execution and gates later starts and queries until maintenance settles", async () => {
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		let dispatches = 0;
-		const { runtime, cwd } = await createRuntime(async () => {
-			dispatches++;
-			entered.resolve();
-			await release.promise;
-			return true;
-		});
-		const request = (suffix: string): EngineStartRequest => ({
-			commandId: `reclaim-command-${suffix}`,
-			agentInstanceId: `reclaim-agent-${suffix}`,
-			agentInstanceRef: `grimoire://tasks/project-a/task-a/agents/reclaim-agent-${suffix}`,
-			executionId: `reclaim-execution-${suffix}`,
-			attemptId: `reclaim-attempt-${suffix}`,
-			authorityGeneration: 1,
-			cwd,
-			input: "reclaim test",
-		});
-		const realReclaim = legacyEngineStore(runtime).reclaimStorage.bind(runtime.store);
-		const reclaim = spyOn(legacyEngineStore(runtime), "reclaimStorage");
-		const maintenanceEntered = Promise.withResolvers<void>();
-		const maintenanceRelease = Promise.withResolvers<void>();
-		try {
-			const first = await runtime.start(request("first"), profile);
-			await entered.promise;
-			expect(await runtime.reclaimStorage()).toMatchObject({
-				status: "deferred",
-				reason: "engine_busy",
-				freedBytes: 0,
-			});
-			expect(reclaim).not.toHaveBeenCalled();
-			expect((await runtime.store.getAttempt(first.attemptId))?.state).toBe("running");
-			release.resolve();
-			await runtime.drain();
-			const queryEntered = Promise.withResolvers<void>();
-			const queryRelease = Promise.withResolvers<void>();
-			const activeQuery = runtime.runControlQuery(async () => {
-				queryEntered.resolve();
-				await queryRelease.promise;
-			});
-			await queryEntered.promise;
-			try {
-				expect(await runtime.reclaimStorage()).toMatchObject({ reason: "engine_busy" });
-			} finally {
-				queryRelease.resolve();
-				await activeQuery;
-			}
-			reclaim.mockImplementationOnce(async () => {
-				maintenanceEntered.resolve();
-				await maintenanceRelease.promise;
-				throw new Error("simulated maintenance failure");
-			});
-			const maintenance = runtime.reclaimStorage();
-			const rejected = maintenance.catch(error => error);
-			await maintenanceEntered.promise;
-			expect(runtime.reclaimStorage()).toBe(maintenance);
-			const started = runtime.start(request("second"), profile);
-			let queryRan = false;
-			const laterQuery = runtime.runControlQuery(async () => {
-				queryRan = true;
-			});
-			await scheduler.yield();
-			expect(dispatches).toBe(1);
-			expect(queryRan).toBe(false);
-			expect(await runtime.store.getAttempt("reclaim-attempt-second")).toBeUndefined();
-			maintenanceRelease.resolve();
-			expect(await rejected).toMatchObject({ message: "simulated maintenance failure" });
-			await started;
-			await laterQuery;
-			await runtime.drain();
-			expect(dispatches).toBe(2);
-			expect(queryRan).toBe(true);
-			reclaim.mockImplementation(realReclaim);
-			expect(await runtime.reclaimStorage()).toMatchObject({ status: "completed" });
-		} finally {
-			release.resolve();
-			maintenanceRelease.resolve();
-			reclaim.mockRestore();
-			await runtime.dispose();
-		}
 	});
 
 	it("binds hosted MCP tools to their own origin across legacy history, children and restart, without fallback", async () => {
@@ -913,7 +852,7 @@ describe("EngineRuntime", () => {
 			await runtime.start(request("route-root", 3), launch);
 			await runtime.drain();
 			expect(lastMcpTools()).toEqual(["mcp__foreign_probe"]);
-			const oldHistory = await loadSessionFile(first.sessionFile!, legacyEngineStore(runtime).sessionStorage);
+			const oldHistory = await retainedEntries(runtime, first.sessionFile!);
 			const oldMessages = oldHistory.entries.filter(entry => entry.type === "message");
 			expect(oldMessages).toHaveLength(6);
 			await runtime.dispose();
@@ -974,7 +913,7 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 			expect(restarted.sessionFile).toBe(first.sessionFile);
 			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
-			const retained = await loadSessionFile(restarted.sessionFile!, legacyEngineStore(runtime).sessionStorage);
+			const retained = await retainedEntries(runtime, restarted.sessionFile!);
 			expect(retained.entries[0]).toEqual(oldHistory.entries[0]);
 			expect(retained.entries.filter(entry => entry.type === "message").slice(0, 6)).toEqual(oldMessages);
 			expect(retained.entries.filter(entry => entry.type === "message")).toHaveLength(10);
@@ -1081,7 +1020,7 @@ describe("EngineRuntime", () => {
 			]);
 			const binding = await resumed.store.getBinding(started.agentInstanceId);
 			expect(binding?.sessionFile).toBe(started.sessionFile);
-			const history = await loadSessionFile(binding!.sessionFile!, legacyEngineStore(resumed).sessionStorage);
+			const history = await retainedEntries(resumed, binding!.sessionFile!);
 			const contexts = history.entries.filter(
 				entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
 			);
@@ -1106,7 +1045,7 @@ describe("EngineRuntime", () => {
 			await dispatch({ ...command, engineGeneration: resumed.engineGeneration });
 			await resumed.drain();
 			expect(mock.calls).toHaveLength(2);
-			const replayHistory = await loadSessionFile(binding!.sessionFile!, legacyEngineStore(resumed).sessionStorage);
+			const replayHistory = await retainedEntries(resumed, binding!.sessionFile!);
 			expect(
 				replayHistory.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"),
 			).toEqual(history.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"));
@@ -1245,7 +1184,7 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 			expect(mock.calls).toHaveLength(3);
 			expect(JSON.stringify(mock.calls[2].context.messages)).toContain("STEER_R3");
-			const history = await loadSessionFile(second.sessionFile!, legacyEngineStore(runtime).sessionStorage);
+			const history = await retainedEntries(runtime, second.sessionFile!);
 			expect(JSON.stringify(history.entries)).not.toContain("stale-resume-context");
 			expect(JSON.stringify(history.entries)).not.toContain("stale-steer-context");
 			expect(
@@ -1282,7 +1221,7 @@ describe("EngineRuntime", () => {
 	it("rejects an over-budget Resume before adding its context to the live or retained session", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
-		const { runtime, cwd, options } = await createRuntime(async () => {
+		const { runtime, cwd } = await createRuntime(async () => {
 			entered.resolve();
 			await release.promise;
 			return true;
@@ -1291,6 +1230,7 @@ describe("EngineRuntime", () => {
 			{
 				commandId: "budget-context-start",
 				agentInstanceId: "budget-context-root",
+				agentInstanceRef: "grimoire://tasks/grimoire/context-budget/agents/root",
 				executionId: "budget-context-execution",
 				attemptId: "budget-context-attempt",
 				authorityGeneration: 1,
@@ -1314,14 +1254,15 @@ describe("EngineRuntime", () => {
 		await runtime.store.assertIntent(started.agentInstanceId, hold.intentRevision);
 		const messages = JSON.stringify(session.messages);
 		const retained = JSON.stringify(session.sessionManager.buildSessionContext().messages);
-		const sql = new SQL(`sqlite:${options.databasePath!.replaceAll("\\", "/")}`);
 		try {
-			await sql.unsafe(
-				`WITH RECURSIVE children(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM children WHERE n<?)
-				INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at)
-				SELECT 'budget-context-child-'||n,'grimoire://tasks/grimoire/context-budget/agents/child-'||n,?,'',1,1,1 FROM children`,
-				[runtimeLimits.branchControlRecords, started.agentInstanceId],
-			);
+			for (let n = 1; n <= runtimeLimits.branchControlRecords; n++)
+				await runtime.store.registerAgent({
+					agentInstanceId: `budget-context-child-${n}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/context-budget/agents/child-${n}`,
+					parentAgentInstanceId: started.agentInstanceId,
+					principalId: "",
+					authorityGeneration: 1,
+				});
 			const error = await runtime
 				.resume({
 					...started,
@@ -1343,10 +1284,9 @@ describe("EngineRuntime", () => {
 			});
 			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
 		} finally {
-			await sql.end();
 			await runtime.dispose();
 		}
-	});
+	}, 120_000);
 	it("keeps failed resume held and failed running steer pending, with rejected durable replay", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -1503,7 +1443,7 @@ describe("EngineRuntime", () => {
 			} finally {
 				bodyFailure.mockRestore();
 			}
-			const failedHistory = await loadSessionFile(started.sessionFile!, legacyEngineStore(runtime).sessionStorage);
+			const failedHistory = await retainedEntries(runtime, started.sessionFile!);
 			expect(
 				failedHistory.entries.filter(
 					entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
@@ -1526,10 +1466,7 @@ describe("EngineRuntime", () => {
 					expect.objectContaining({ role: "developer", content: [{ type: "text", text: retry.payload.context }] }),
 				]),
 			);
-			const recoveredHistory = await loadSessionFile(
-				started.sessionFile!,
-				legacyEngineStore(runtime).sessionStorage,
-			);
+			const recoveredHistory = await retainedEntries(runtime, started.sessionFile!);
 			expect(
 				recoveredHistory.entries.filter(
 					entry => entry.type === "message" && entry.clientMessageId === "context-failure-body-b",
@@ -1596,739 +1533,9 @@ describe("EngineRuntime", () => {
 		}
 	});
 
-	it("restores a staged native checkpoint into a new identity after restart and continues only on explicit send", async () => {
-		const restoredContexts: string[] = [];
-		const sideEffects: string[] = [];
-		const attachmentBytes = Buffer.from("0123456789abcdef".repeat(196_608));
-		const restoredModel = createMockModel({ handler: () => ({ content: ["restored answer"] }) });
-		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
-			if (input === "source turn") {
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-				session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "toolCall", id: "settled-tool", name: "fixture", arguments: { value: 7 } }],
-					api: "engine-runtime-test",
-					provider: "mock",
-					model: "test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: Date.now(),
-				});
-				session.sessionManager.appendMessage({
-					role: "toolResult",
-					toolCallId: "settled-tool",
-					toolName: "fixture",
-					content: [{ type: "text", text: "settled-result" }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-				session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "text", text: "source complete" }],
-					api: "engine-runtime-test",
-					provider: "mock",
-					model: "test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: Date.now(),
-				});
-				sideEffects.push("source-tool-settled");
-				return true;
-			}
-			restoredContexts.push(JSON.stringify(session.sessionManager.buildSessionContext().messages));
-			await session.prompt(input, identity);
-			return true;
-		};
-		const created = await createRuntime(dispatch, {}, { model: restoredModel.model });
-		let runtime = created.runtime;
-		const { cwd, options } = created;
-		const source = await runtime.start(
-			{
-				commandId: "command-restore-source",
-				agentInstanceId: "agent-restore-source",
-				agentInstanceRef: "grimoire://tasks/project/source/agents/agent-restore-source",
-				executionId: "execution-restore-source",
-				attemptId: "attempt-restore-source",
-				authorityGeneration: 3,
-				cwd,
-				input: "source turn",
-			},
-			profile,
-		);
-		await runtime.drain();
-		if (!source.sessionFile) throw new Error("Expected source native session");
-		const sourceArtifacts = source.sessionFile.slice(0, -".jsonl".length);
-		fs.mkdirSync(sourceArtifacts, { recursive: true });
-		fs.writeFileSync(path.join(sourceArtifacts, "attachment.bin"), attachmentBytes);
-		const pages: Buffer[] = [];
-		let offset = 0;
-		let contentHash: string | undefined;
-		let byteLength = 0;
-		do {
-			const page = await runtime.sessionArchive("agent-restore-source", contentHash, offset, 24_000);
-			contentHash = page.contentHash;
-			byteLength = page.byteLength;
-			pages.push(Buffer.from(page.contentBase64, "base64"));
-			offset = page.nextOffset ?? page.byteLength;
-		} while (offset < byteLength);
-		const checkpoint = Buffer.concat(pages);
-		expect(checkpoint.byteLength).toBe(byteLength);
-		expect(pages.length).toBeGreaterThan(100);
-		await runtime.dispose();
-
-		runtime = await openRuntime(options);
-		const targetRef = "grimoire://tasks/project/restored/agents/agent-restore-target";
-		const target = {
-			agentInstanceId: engineAgentInstanceId(targetRef),
-			agentInstanceRef: targetRef,
-			authorityGeneration: 9,
-		};
-		const firstChunk = checkpoint.subarray(0, Math.min(24_000, checkpoint.byteLength));
-		const staged = await runtime.sessionRestoreStage({
-			...target,
-			contentHash: contentHash!,
-			totalBytes: checkpoint.byteLength,
-			offset: 0,
-			contentBase64: firstChunk.toString("base64"),
-		});
-		expect(staged).toMatchObject({ nextOffset: firstChunk.byteLength, complete: false });
-		await expect(
-			runtime.sessionRestoreStage({
-				...target,
-				contentHash: contentHash!,
-				totalBytes: checkpoint.byteLength,
-				offset: 0,
-				contentBase64: firstChunk.toString("base64"),
-			}),
-		).resolves.toMatchObject({ nextOffset: firstChunk.byteLength, complete: false });
-		const corruptReplay = Buffer.from(firstChunk);
-		corruptReplay[corruptReplay.byteLength - 1] ^= 0xff;
-		await expect(
-			runtime.sessionRestoreStage({
-				...target,
-				contentHash: contentHash!,
-				totalBytes: checkpoint.byteLength,
-				offset: 0,
-				contentBase64: corruptReplay.toString("base64"),
-			}),
-		).rejects.toMatchObject({ code: "stale_target" });
-		await runtime.dispose();
-
-		runtime = await openRuntime(options);
-		let nextOffset = firstChunk.byteLength;
-		while (nextOffset < checkpoint.byteLength) {
-			const chunk = checkpoint.subarray(nextOffset, Math.min(checkpoint.byteLength, nextOffset + 24_000));
-			const next = await runtime.sessionRestoreStage({
-				...target,
-				contentHash: contentHash!,
-				totalBytes: checkpoint.byteLength,
-				offset: nextOffset,
-				contentBase64: chunk.toString("base64"),
-			});
-			nextOffset = next.nextOffset;
-		}
-		const historyRestore = {
-			agentInstanceRef: targetRef,
-			authorityGeneration: target.authorityGeneration,
-			restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
-		};
-		const beforeSend = await runtime.sessionHistory(target.agentInstanceId, historyRestore);
-		expect(beforeSend.entries.filter(entry => entry.text).map(entry => entry.text)).toEqual([
-			"source turn",
-			"source complete",
-		]);
-		expect(beforeSend.entries.flatMap(entry => entry.blocks ?? [])).toContainEqual(
-			expect.objectContaining({
-				toolCallId: "settled-tool",
-				toolStatus: "succeeded",
-				resultText: "settled-result",
-			}),
-		);
-		expect(await runtime.store.getBinding(target.agentInstanceId)).toBeUndefined();
-		expect(restoredContexts).toHaveLength(0);
-		expect(sideEffects).toEqual(["source-tool-settled"]);
-		await expect(
-			runtime.sessionHistory(target.agentInstanceId, {
-				...historyRestore,
-				authorityGeneration: target.authorityGeneration + 1,
-			}),
-		).rejects.toMatchObject({ code: "stale_target" });
-		await runtime.dispose();
-		runtime = await openRuntime({
-			...options,
-			resolveSessionContinuation: async () => "restore-profile-failure",
-			resolveSessionProfile: async () => {
-				throw new Error("deterministic restored profile failure");
-			},
-		});
-		expect(await runtime.sessionHistory(target.agentInstanceId, historyRestore)).toEqual(beforeSend);
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-restore-profile-failure",
-					...target,
-					executionId: "execution-restore-profile-failure",
-					attemptId: "attempt-restore-profile-failure",
-					cwd,
-					input: "must remain retryable",
-					restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
-				},
-				profile,
-			),
-		).rejects.toThrow("deterministic restored profile failure");
-		expect(restoredContexts).toHaveLength(0);
-		expect(await runtime.store.getBinding(target.agentInstanceId)).toBeUndefined();
-		await runtime.dispose();
-		runtime = await openRuntime(options);
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-restore-wrong-authority",
-					...target,
-					authorityGeneration: 10,
-					executionId: "execution-restore-wrong-authority",
-					attemptId: "attempt-restore-wrong-authority",
-					cwd,
-					input: "must not dispatch",
-					restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
-				},
-				profile,
-			),
-		).rejects.toMatchObject({ code: "stale_target" });
-		expect(restoredContexts).toHaveLength(0);
-		const restored = await runtime.start(
-			{
-				commandId: "command-restore-send",
-				...target,
-				executionId: "execution-restore-send",
-				attemptId: "attempt-restore-send",
-				cwd,
-				input: "continue after restore",
-				restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
-			},
-			profile,
-		);
-		await runtime.drain();
-		expect(restoredContexts).toHaveLength(1);
-		expect(restoredContexts[0]).toContain("source turn");
-		expect(restoredContexts[0]).toContain("settled-tool");
-		expect(restoredContexts[0]).toContain("settled-result");
-		expect(restoredContexts[0]).toContain("source complete");
-		expect(restoredContexts[0]).not.toContain("continue after restore");
-		expect(restoredModel.calls).toHaveLength(1);
-		const modelContext = JSON.stringify(restoredModel.calls[0]!.context.messages);
-		expect(modelContext).toContain("source turn");
-		expect(modelContext).toContain("settled-tool");
-		expect(modelContext).toContain("settled-result");
-		expect(modelContext).toContain("continue after restore");
-		expect(sideEffects).toEqual(["source-tool-settled"]);
-		if (!restored.sessionFile) throw new Error("Expected restored native session");
-		expect(fs.readFileSync(path.join(restored.sessionFile.slice(0, -".jsonl".length), "attachment.bin"))).toEqual(
-			attachmentBytes,
-		);
-		const restoredEvents = (await runtime.store.pendingEvents()).filter(
-			event => event.attemptId === restored.attemptId,
-		);
-		expect(restoredEvents.some(event => event.kind === "tool_started" || event.kind === "tool_settled")).toBe(false);
-		await runtime.dispose();
-	}, 60_000);
-
-	it("exports exact hash-pinned native session bytes across restart", async () => {
-		const continueTurn = Promise.withResolvers<void>();
-		let holdNextTurn = false;
-		const archiveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-engine-archive-"));
-		tempDirs.push(archiveRoot);
-		const databaseDir = path.join(archiveRoot, "long-session-root-".repeat(6));
-		fs.mkdirSync(databaseDir);
-		const { runtime, cwd, options } = await createRuntime(
-			async (session, input) => {
-				if (holdNextTurn) await continueTurn.promise;
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-				session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "text", text: "archive answer with unicode ☃" }],
-					api: "engine-runtime-test",
-					provider: "mock",
-					model: "test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: Date.now(),
-				});
-				await session.sessionManager.saveArtifact("complete spilled attachment", "read");
-				return true;
-			},
-			{ databasePath: path.join(databaseDir, "engine.sqlite") },
-		);
-		let secondRestart: EngineRuntime | undefined;
-		try {
-			const started = await runtime.start(
-				{
-					commandId: "archive-native-command",
-					agentInstanceId: "archive-native-agent",
-					executionId: "archive-native-execution",
-					attemptId: "archive-native-attempt",
-					authorityGeneration: 1,
-					cwd,
-					input: "preserve exact native history",
-				},
-				profile,
-			);
-			await runtime.drain();
-			if (!started.sessionFile) throw new Error("Expected archived native session");
-			const attachmentsDir = started.sessionFile.slice(0, -".jsonl".length);
-			const binaryAttachment = crypto.randomBytes(96 * 1024 + 1);
-			fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), binaryAttachment);
-			fs.writeFileSync(path.join(attachmentsDir, "empty.bin"), "");
-			const snapshotDir = path.join(
-				databaseDir,
-				"engine-sessions",
-				".archive",
-				engineRouteToken("archive-native-agent"),
-			);
-			const publishFailure = spyOn(fsAsync, "link").mockRejectedValueOnce(
-				Object.assign(new Error("disk full"), { code: "ENOSPC" }),
-			);
-			try {
-				await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({ code: "ENOSPC" });
-			} finally {
-				publishFailure.mockRestore();
-			}
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)).toContain(
-				"preserve exact native history",
-			);
-			expect(fs.readFileSync(path.join(attachmentsDir, "binary.bin"))).toEqual(binaryAttachment);
-			const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
-			const repeated = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
-			expect(repeated).toEqual(first);
-			const sourceBytes =
-				legacyEngineStore(runtime).sessionStorage.statSync(started.sessionFile).size +
-				fs
-					.readdirSync(attachmentsDir)
-					.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0);
-			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).resolves.toMatchObject({
-				sourceBytes,
-				sourceRetired: false,
-				freedBytes: 0,
-				contentHash: first.contentHash,
-			});
-			await expect(
-				runtime.sessionArchiveVerify({ ...started, authorityGeneration: 2 }, first.contentHash),
-			).rejects.toMatchObject({ code: "stale_target" });
-			const modifiedAttachment = Buffer.from(binaryAttachment);
-			modifiedAttachment[0] ^= 1;
-			fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), modifiedAttachment);
-			try {
-				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-					code: "stale_target",
-				});
-			} finally {
-				fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), binaryAttachment);
-			}
-			fs.writeFileSync(path.join(attachmentsDir, "late.bin"), "not archived");
-			try {
-				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-					code: "stale_target",
-				});
-			} finally {
-				fs.unlinkSync(path.join(attachmentsDir, "late.bin"));
-			}
-			const queued = await runtime.enqueueInbox(started, {
-				sourceEventId: "archive-pending-input",
-				sourceType: "user",
-				body: "must not disappear",
-			});
-			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-				code: "agent_busy",
-			});
-			await runtime.mutateInbox(started, {
-				mutationId: "drop-archive-test-input",
-				queueId: queued.item.queueId,
-				expectedRevision: queued.item.revision,
-				op: "drop",
-			});
-			const payloadPath = path.join(snapshotDir, `${first.contentHash.slice("sha256:".length)}.bin`);
-			const originalPayload = fs.readFileSync(payloadPath);
-			const corruptedPayload = Buffer.from(originalPayload);
-			corruptedPayload[corruptedPayload.length - 1] ^= 1;
-			fs.writeFileSync(payloadPath, corruptedPayload);
-			try {
-				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-					code: "history_expired",
-				});
-				await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({
-					code: "history_expired",
-				});
-				expect(await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)).toContain(
-					"preserve exact native history",
-				);
-				expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
-			} finally {
-				fs.writeFileSync(payloadPath, originalPayload);
-			}
-			await legacyEngineStore(runtime).sessionStorage.writeText(
-				started.sessionFile,
-				`${await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)}\n`,
-			);
-			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-				code: "stale_target",
-			});
-			const chunks = [Buffer.from(first.contentBase64, "base64")];
-			let offset = first.nextOffset;
-			while (offset !== null) {
-				const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 24_000);
-				chunks.push(Buffer.from(page.contentBase64, "base64"));
-				offset = page.nextOffset;
-			}
-			const body = Buffer.concat(chunks);
-			expect(body.byteLength).toBe(first.byteLength);
-			expect(`sha256:${crypto.createHash("sha256").update(body).digest("hex")}`).toBe(first.contentHash);
-			const checkpoint = JSON.parse(body.toString("utf8"));
-			expect(checkpoint.schema).toBe("grimoire.engine.native_session_checkpoint.v1");
-			const nativeSession = Buffer.from(checkpoint.sessionJsonlBase64, "base64").toString("utf8");
-			expect(nativeSession).toContain("preserve exact native history");
-			expect(nativeSession).toContain("archive answer with unicode ☃");
-			expect(checkpoint.artifacts).toEqual([
-				expect.objectContaining({
-					name: "0.read.log",
-					contentBase64: Buffer.from("complete spilled attachment").toString("base64"),
-				}),
-				expect.objectContaining({
-					name: "binary.bin",
-					byteLength: binaryAttachment.byteLength,
-					contentBase64: binaryAttachment.toString("base64"),
-				}),
-				expect.objectContaining({ name: "empty.bin", byteLength: 0, contentBase64: "" }),
-			]);
-			await expect(
-				runtime.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
-			).rejects.toMatchObject({ code: "stale_target" });
-			await runtime.dispose();
-
-			secondRestart = await openRuntime(options);
-			await expect(secondRestart.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
-				code: "stale_target",
-			});
-			const fresh = await secondRestart.sessionArchive("archive-native-agent");
-			await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).resolves.toMatchObject({
-				sourceBytes:
-					legacyEngineStore(secondRestart).sessionStorage.statSync(started.sessionFile).size +
-					fs
-						.readdirSync(attachmentsDir)
-						.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0),
-				sourceRetired: false,
-				freedBytes: 0,
-			});
-			const released = await secondRestart.store.getBinding(started.agentInstanceId);
-			if (!released) throw new Error("Expected retained archive binding");
-			await secondRestart.store.putBinding({ ...released, state: "running" });
-			try {
-				await expect(secondRestart.sessionArchive(started.agentInstanceId)).rejects.toMatchObject({
-					code: "agent_busy",
-				});
-				await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).rejects.toMatchObject({
-					code: "agent_busy",
-				});
-			} finally {
-				await secondRestart.store.putBinding(released);
-			}
-			const afterRestart = await secondRestart.sessionArchive(
-				"archive-native-agent",
-				first.contentHash,
-				body.byteLength - 24_000,
-				24_000,
-			);
-			expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body.subarray(body.byteLength - 24_000));
-			expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
-			holdNextTurn = true;
-			const next = await secondRestart.start(
-				{
-					commandId: "archive-new-turn",
-					agentInstanceId: started.agentInstanceId,
-					executionId: "archive-new-execution",
-					attemptId: "archive-new-attempt",
-					authorityGeneration: started.authorityGeneration,
-					cwd,
-					input: "new history after snapshot",
-				},
-				profile,
-			);
-			await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).rejects.toMatchObject({
-				code: "stale_target",
-			});
-			await expect(secondRestart.sessionArchiveVerify(next, fresh.contentHash)).rejects.toMatchObject({
-				code: "agent_busy",
-			});
-			continueTurn.resolve();
-			await secondRestart.drain();
-			await expect(secondRestart.sessionArchiveVerify(next, fresh.contentHash)).rejects.toMatchObject({
-				code: "stale_target",
-			});
-			const latest = await secondRestart.sessionArchive(next.agentInstanceId);
-			const server = await startEngineControlQueryServer({
-				runtime: secondRestart,
-				runtimeDir: databaseDir,
-				deviceId: "archive-test",
-				engineId: "archive-test",
-				resolveLaunchProfile: () => profile,
-			});
-			try {
-				const client = new EngineControlQueryClient(databaseDir);
-				await expect(
-					client.request("session.archive.verify", { ...next, contentHash: latest.contentHash }),
-				).resolves.toMatchObject({ contentHash: latest.contentHash, sourceRetired: false, freedBytes: 0 });
-			} finally {
-				await server.close();
-			}
-			await secondRestart.dispose();
-		} finally {
-			continueTurn.resolve();
-			await runtime.dispose();
-			await secondRestart?.dispose();
-		}
-	}, 60_000);
-
-	it("retires and restores exact SQL history and attachments after partial failures without dispatching a model", async () => {
-		let dispatches = 0;
-		const fixture = await createRuntime(async (session, input) => {
-			dispatches++;
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-			await session.sessionManager.saveArtifact("first attachment", "read");
-			await session.sessionManager.saveArtifact("second attachment", "read");
-			return true;
-		});
-		let runtime = fixture.runtime;
-		const archiveQuery = async (
-			method: "session.archive.retire" | "session.archive.restore",
-			params: Record<string, unknown>,
-		) => {
-			const runtimeDir = path.dirname(fixture.options.databasePath!);
-			const server = await startEngineControlQueryServer({
-				runtime,
-				runtimeDir,
-				deviceId: "retire-test",
-				engineId: "retire-test",
-				resolveLaunchProfile: () => profile,
-			});
-			try {
-				return await new EngineControlQueryClient(runtimeDir).request(method, params);
-			} finally {
-				await server.close();
-			}
-		};
-		try {
-			const target = await runtime.start(
-				{
-					commandId: "retire-start",
-					agentInstanceId: "retire-agent",
-					executionId: "retire-execution",
-					attemptId: "retire-attempt",
-					authorityGeneration: 1,
-					cwd: fixture.cwd,
-					input: "retain my exact history",
-				},
-				profile,
-			);
-			await runtime.drain();
-			if (!target.sessionFile) throw new Error("Expected a native session");
-			const sourceText = await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile);
-			const history = await runtime.sessionHistory(target.agentInstanceId);
-			const attachmentsDir = target.sessionFile.slice(0, -6);
-			const attachments = fs
-				.readdirSync(attachmentsDir)
-				.map(name => ({ name, content: fs.readFileSync(path.join(attachmentsDir, name)) }));
-			const page = await runtime.sessionArchive(target.agentInstanceId);
-			expect(page.nextOffset).toBeNull();
-			const checkpoint = Buffer.from(page.contentBase64, "base64");
-			const archivePath = path.join(path.dirname(fixture.options.databasePath!), `${page.contentHash.slice(7)}.gz`);
-			fs.writeFileSync(archivePath, Bun.gzipSync(checkpoint));
-			const validCompressed = fs.readFileSync(archivePath);
-			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from("wrong checkpoint")));
-			await expect(
-				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-			).rejects.toMatchObject({ code: "stale_target" });
-			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
-			fs.writeFileSync(archivePath, validCompressed);
-			await runtime.store.putBinding({
-				...target,
-				bindingId: "borrowed-binding",
-				commandId: "borrowed-command",
-				agentInstanceId: "borrowed-agent",
-				executionId: "borrowed-execution",
-				attemptId: "borrowed-attempt",
-			});
-			await expect(
-				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-			).rejects.toMatchObject({ code: "agent_busy" });
-			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
-			await legacyEngineStore(runtime).clearBindingSession("borrowed-agent", "borrowed-attempt", target.sessionFile);
-			const unlink = fsAsync.unlink;
-			let removed = 0;
-			const deletionFailure = spyOn(fsAsync, "unlink").mockImplementation(async filename => {
-				if (String(filename).startsWith(attachmentsDir) && ++removed === 2)
-					throw Object.assign(new Error("file locked"), { code: "EACCES" });
-				return unlink(filename);
-			});
-			try {
-				await expect(
-					runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-				).rejects.toMatchObject({ code: "EACCES" });
-			} finally {
-				deletionFailure.mockRestore();
-			}
-			expect(fs.readdirSync(attachmentsDir)).toHaveLength(1);
-			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("retiring");
-			await expect(runtime.sessionHistory(target.agentInstanceId)).rejects.toMatchObject({
-				code: "history_expired",
-			});
-			const nextStart = {
-				commandId: "retire-next",
-				agentInstanceId: target.agentInstanceId,
-				executionId: "retire-next-execution",
-				attemptId: "retire-next-attempt",
-				authorityGeneration: 1,
-				cwd: fixture.cwd,
-				input: "must wait for restore",
-			};
-			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
-			await runtime.dispose();
-			runtime = await openRuntime(fixture.options);
-			const bindingCleanupFailure = spyOn(legacyEngineStore(runtime), "clearBindingSession").mockRejectedValueOnce(
-				new Error("interrupted metadata cleanup"),
-			);
-			try {
-				await expect(
-					runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-				).rejects.toThrow("interrupted metadata cleanup");
-			} finally {
-				bindingCleanupFailure.mockRestore();
-			}
-			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
-			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("retiring");
-			await runtime.dispose();
-			runtime = await openRuntime(fixture.options);
-			const retired = await archiveQuery("session.archive.retire", {
-				...target,
-				contentHash: page.contentHash,
-				archivePath,
-				operationId: "archive-operation-1",
-			});
-			expect(retired).toMatchObject({ state: "retired", sourceRetired: true, freedBytes: 0 });
-			expect(await runtime.reclaimStorage()).toMatchObject({ status: "completed", scope: "engine_database" });
-			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
-			expect(fs.existsSync(attachmentsDir)).toBe(false);
-			const snapshotDir = path.join(
-				path.dirname(fixture.options.databasePath!),
-				"engine-sessions",
-				".archive",
-				engineRouteToken(target.agentInstanceId),
-			);
-			expect(fs.existsSync(path.join(snapshotDir, `${page.contentHash.slice(7)}.bin`))).toBe(false);
-			expect(retired).toEqual(
-				await runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-			);
-			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
-			await expect(
-				runtime.enqueueInbox(target, {
-					sourceType: "user",
-					sourceEventId: "late-input",
-					body: "no hidden restart",
-				}),
-			).rejects.toMatchObject({ code: "history_expired" });
-			const archivedBinding = await runtime.store.getBinding(target.agentInstanceId);
-			if (!archivedBinding) throw new Error("Expected archived binding metadata");
-			const heldRevision = (archivedBinding.intentRevision ?? 0) + 1;
-			await runtime.store.putBinding({
-				...archivedBinding,
-				manualHold: true,
-				intentRevision: heldRevision,
-				intentCommandId: "hold-while-archived",
-			});
-			const link = fsAsync.link;
-			let restoredFiles = 0;
-			const restoreFailure = spyOn(fsAsync, "link").mockImplementation(async (source, destination) => {
-				if (++restoredFiles === 2) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
-				return link(source, destination);
-			});
-			try {
-				await expect(
-					runtime.sessionArchiveRestore(target, page.contentHash, "archive-operation-1"),
-				).rejects.toMatchObject({ code: "ENOSPC" });
-			} finally {
-				restoreFailure.mockRestore();
-			}
-			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("restoring");
-			expect(fs.readdirSync(attachmentsDir)).toHaveLength(1);
-			const interruptedStage = path.join(snapshotDir, "archive-operation-1-crash.restore-tmp");
-			const otherStage = path.join(snapshotDir, "another-operation-crash.restore-tmp");
-			fs.writeFileSync(interruptedStage, "interrupted staged bytes");
-			fs.writeFileSync(otherStage, "not this operation");
-			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
-			await runtime.dispose();
-			runtime = await openRuntime(fixture.options);
-			expect(
-				await archiveQuery("session.archive.restore", {
-					...target,
-					contentHash: page.contentHash,
-					operationId: "archive-operation-1",
-				}),
-			).toMatchObject({
-				state: "restored",
-				sourceRetired: false,
-			});
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
-			expect(fs.existsSync(interruptedStage)).toBe(false);
-			expect(fs.readFileSync(otherStage, "utf8")).toBe("not this operation");
-			expect(fs.readFileSync(archivePath)).toEqual(validCompressed);
-			expect(await runtime.sessionHistory(target.agentInstanceId)).toEqual(history);
-			for (const attachment of attachments)
-				expect(fs.readFileSync(path.join(attachmentsDir, attachment.name))).toEqual(attachment.content);
-			expect(dispatches).toBe(1);
-			expect((await runtime.store.getAttempt(target.attemptId))?.state).toBe("completed");
-			expect(await runtime.store.getBinding(target.agentInstanceId)).toMatchObject({
-				manualHold: true,
-				intentRevision: heldRevision,
-				intentCommandId: "hold-while-archived",
-			});
-			await expect(
-				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
-			).rejects.toMatchObject({ code: "stale_target" });
-			await runtime.start({ ...nextStart, expectedIntentRevision: heldRevision }, profile);
-			await runtime.drain();
-			expect(dispatches).toBe(2);
-		} finally {
-			await runtime.dispose();
-		}
-	}, 60_000);
-
 	it.each(["inline", "blob"])(
 		"projects %s user and tool-result images from their own retained entries across restart",
 		async storage => {
-			const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-history-image-blobs-"));
-			tempDirs.push(blobDir);
-			const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
 			const png = Buffer.from(
 				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
 				"base64",
@@ -2336,7 +1543,7 @@ describe("EngineRuntime", () => {
 			const image = storage === "inline" ? png : Buffer.concat([png, Buffer.alloc(2048)]);
 			const agentInstanceId = "history-image-agent";
 			const agentInstanceRef = "grimoire://tasks/grimoire/image-history/agents/owner";
-			try {
+			{
 				const fixture = await createRuntime(async session => {
 					session.sessionManager.appendMessage({
 						role: "user",
@@ -2442,369 +1649,10 @@ describe("EngineRuntime", () => {
 					(await reopened.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, started.attemptId))
 						.entries,
 				).toEqual(page.entries);
-			} finally {
-				blobScope.mockRestore();
 			}
 		},
 		30_000,
 	);
-
-	it("restores archived images without their original blob store and never overwrites conflicting shared blobs", async () => {
-		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-archive-image-blobs-"));
-		tempDirs.push(blobDir);
-		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
-		let runtime: EngineRuntime | undefined;
-		try {
-			expect(utils.getBlobsDir()).toBe(blobDir);
-			const image = Buffer.alloc(2048, 37);
-			const blob = await new BlobStore(blobDir).put(image);
-			let dispatches = 0;
-			const fixture = await createRuntime(async session => {
-				dispatches++;
-				session.sessionManager.appendMessage({
-					role: "user",
-					content: [{ type: "image", mimeType: "image/png", data: image.toString("base64") }],
-					timestamp: Date.now(),
-				});
-				return true;
-			});
-			runtime = fixture.runtime;
-			const target = await runtime.start(
-				{
-					commandId: "image-start",
-					agentInstanceId: "image-agent",
-					executionId: "image-execution",
-					attemptId: "image-attempt",
-					authorityGeneration: 1,
-					cwd: fixture.cwd,
-					input: "image",
-				},
-				profile,
-			);
-			await runtime.drain();
-			if (!target.sessionFile) throw new Error("Expected native image history");
-			const original = await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile);
-			expect(original).toContain(blob.ref);
-			const history = await loadSessionMessagesReadOnly(
-				target.sessionFile,
-				legacyEngineStore(runtime).sessionStorage,
-			);
-			fs.unlinkSync(blob.path);
-			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({ code: "ENOENT" });
-			fs.writeFileSync(blob.path, "corrupt source image");
-			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({
-				code: "history_expired",
-			});
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(original);
-			fs.writeFileSync(blob.path, image);
-			const page = await runtime.sessionArchive(target.agentInstanceId);
-			expect(page.nextOffset).toBeNull();
-			const checkpoint = JSON.parse(Buffer.from(page.contentBase64, "base64").toString("utf8"));
-			const destinationRef = "grimoire://tasks/test/image/agents/restored";
-			for (const blobs of [
-				undefined,
-				[{ ...checkpoint.blobs[0], contentBase64: Buffer.alloc(image.length).toString("base64") }],
-			]) {
-				const corrupt = Buffer.from(JSON.stringify({ ...checkpoint, blobs }));
-				await expect(
-					runtime.sessionRestoreStage({
-						agentInstanceId: engineAgentInstanceId(destinationRef),
-						agentInstanceRef: destinationRef,
-						authorityGeneration: 1,
-						contentHash: `sha256:${new Bun.SHA256().update(corrupt).digest("hex")}`,
-						totalBytes: corrupt.length,
-						offset: 0,
-						contentBase64: corrupt.toString("base64"),
-					}),
-				).rejects.toMatchObject({ code: "invalid_request" });
-			}
-			const archivePath = path.join(blobDir, `${page.contentHash.slice(7)}.gz`);
-			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(page.contentBase64, "base64")));
-			await runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "image-archive");
-			expect(fs.readFileSync(blob.path)).toEqual(image);
-			fs.unlinkSync(blob.path);
-			fs.writeFileSync(blob.path, "existing conflicting shared blob");
-			await expect(runtime.sessionArchiveRestore(target, page.contentHash, "image-archive")).rejects.toThrow(
-				"Existing blob conflicts",
-			);
-			expect(fs.readFileSync(blob.path, "utf8")).toBe("existing conflicting shared blob");
-			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
-			fs.unlinkSync(blob.path);
-			await runtime.dispose();
-			runtime = await openRuntime(fixture.options);
-			await runtime.sessionArchiveRestore(target, page.contentHash, "image-archive");
-			expect(await new BlobStore(blobDir).get(blob.hash)).toEqual(image);
-			expect(
-				await loadSessionMessagesReadOnly(target.sessionFile, legacyEngineStore(runtime).sessionStorage),
-			).toEqual(history);
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(original);
-			expect(dispatches).toBe(1);
-		} finally {
-			await runtime?.dispose();
-			blobScope.mockRestore();
-		}
-	}, 60_000);
-
-	it("replaces an exact retained binding on explicit send and fences binding drift", async () => {
-		const observedContexts: string[] = [];
-		const settledEffects: string[] = [];
-		const model = createMockModel({ handler: () => ({ content: ["continued"] }) });
-		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
-			if (input === "original turn") {
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-				session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "toolCall", id: "same-restore-tool", name: "fixture", arguments: { value: 11 } }],
-					api: "engine-runtime-test",
-					provider: "mock",
-					model: "test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "toolUse",
-					timestamp: Date.now(),
-				});
-				session.sessionManager.appendMessage({
-					role: "toolResult",
-					toolCallId: "same-restore-tool",
-					toolName: "fixture",
-					content: [{ type: "text", text: "same-restore-result" }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-				session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "text", text: "original complete" }],
-					api: "engine-runtime-test",
-					provider: "mock",
-					model: "test",
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: Date.now(),
-				});
-				settledEffects.push("same-restore-tool");
-				return true;
-			}
-			observedContexts.push(JSON.stringify(session.sessionManager.buildSessionContext().messages));
-			await session.prompt(input, identity);
-			return true;
-		};
-		const created = await createRuntime(dispatch, {}, { model: model.model });
-		let runtime = created.runtime;
-		const { cwd, options } = created;
-		const agentInstanceRef = "grimoire://tasks/project/same-restore/agents/retained-agent";
-		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
-		await runtime.start(
-			{
-				commandId: "command-same-restore-original",
-				agentInstanceId,
-				agentInstanceRef,
-				executionId: "execution-same-restore-original",
-				attemptId: "attempt-same-restore-original",
-				authorityGeneration: 1,
-				cwd,
-				input: "original turn",
-			},
-			profile,
-		);
-		await runtime.drain();
-
-		const archive = async (): Promise<{ bytes: Buffer; contentHash: string }> => {
-			const chunks: Buffer[] = [];
-			let offset = 0;
-			let contentHash: string | undefined;
-			let byteLength = 0;
-			do {
-				const page = await runtime.sessionArchive(agentInstanceId, contentHash, offset, 24_000);
-				contentHash = page.contentHash;
-				byteLength = page.byteLength;
-				chunks.push(Buffer.from(page.contentBase64, "base64"));
-				offset = page.nextOffset ?? page.byteLength;
-			} while (offset < byteLength);
-			return { bytes: Buffer.concat(chunks), contentHash: contentHash! };
-		};
-		const stage = async (checkpoint: { bytes: Buffer; contentHash: string }, authorityGeneration: number) => {
-			let offset = 0;
-			let result: Awaited<ReturnType<EngineRuntime["sessionRestoreStage"]>> | undefined;
-			while (offset < checkpoint.bytes.byteLength) {
-				const chunk = checkpoint.bytes.subarray(offset, Math.min(checkpoint.bytes.byteLength, offset + 24_000));
-				result = await runtime.sessionRestoreStage({
-					agentInstanceId,
-					agentInstanceRef,
-					authorityGeneration,
-					contentHash: checkpoint.contentHash,
-					totalBytes: checkpoint.bytes.byteLength,
-					offset,
-					contentBase64: chunk.toString("base64"),
-					replaceRetainedBinding: true,
-				});
-				offset = result.nextOffset;
-			}
-			if (!result?.complete) throw new Error("Expected complete retained restore stage");
-			return result;
-		};
-
-		const originalCheckpoint = await archive();
-		const staged = await stage(originalCheckpoint, 2);
-		const retainedBeforeRead = await runtime.store.getBinding(agentInstanceId);
-		const restoredHistory = await runtime.sessionHistory(agentInstanceId, {
-			agentInstanceRef,
-			authorityGeneration: 2,
-			restoreCheckpoint: { restoreId: staged.restoreId, contentHash: originalCheckpoint.contentHash },
-		});
-		expect(restoredHistory.entries.map(entry => entry.text)).toContain("original complete");
-		expect(await runtime.store.getBinding(agentInstanceId)).toEqual(retainedBeforeRead);
-		expect(observedContexts).toHaveLength(0);
-		expect(settledEffects).toEqual(["same-restore-tool"]);
-		const restored = await runtime.start(
-			{
-				commandId: "command-same-restore-send",
-				agentInstanceId,
-				agentInstanceRef,
-				executionId: "execution-same-restore-send",
-				attemptId: "attempt-same-restore-send",
-				authorityGeneration: 2,
-				cwd,
-				input: "explicit send after same restore",
-				restoreCheckpoint: { restoreId: staged.restoreId, contentHash: originalCheckpoint.contentHash },
-			},
-			profile,
-		);
-		await runtime.drain();
-		expect(restored.agentInstanceId).toBe(agentInstanceId);
-		expect(observedContexts.at(-1)).toContain("same-restore-tool");
-		expect(observedContexts.at(-1)).toContain("same-restore-result");
-		expect(settledEffects).toEqual(["same-restore-tool"]);
-		expect(
-			(await runtime.store.pendingEvents()).some(
-				event =>
-					event.attemptId === restored.attemptId &&
-					(event.kind === "tool_started" || event.kind === "tool_settled"),
-			),
-		).toBe(false);
-
-		const staleStage = await stage(originalCheckpoint, 4);
-		await runtime.start(
-			{
-				commandId: "command-same-restore-intervening",
-				agentInstanceId,
-				agentInstanceRef,
-				executionId: "execution-same-restore-intervening",
-				attemptId: "attempt-same-restore-intervening",
-				authorityGeneration: 3,
-				cwd,
-				input: "intervening turn",
-			},
-			{ ...profile, continuationPolicy: "fresh" },
-		);
-		await runtime.drain();
-		await expect(
-			runtime.sessionHistory(agentInstanceId, {
-				agentInstanceRef,
-				authorityGeneration: 4,
-				restoreCheckpoint: { restoreId: staleStage.restoreId, contentHash: originalCheckpoint.contentHash },
-			}),
-		).rejects.toMatchObject({ code: "stale_target" });
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-same-restore-stale",
-					agentInstanceId,
-					agentInstanceRef,
-					executionId: "execution-same-restore-stale",
-					attemptId: "attempt-same-restore-stale",
-					authorityGeneration: 4,
-					cwd,
-					input: "must not run",
-					restoreCheckpoint: { restoreId: staleStage.restoreId, contentHash: originalCheckpoint.contentHash },
-				},
-				profile,
-			),
-		).rejects.toMatchObject({ code: "stale_target" });
-
-		const currentCheckpoint = await archive();
-		const retained = await runtime.store.getBinding(agentInstanceId);
-		if (!retained?.sessionFile) throw new Error("Expected retained native session");
-		await runtime.dispose();
-		if (fs.existsSync(retained.sessionFile)) fs.unlinkSync(retained.sessionFile);
-		expect(fs.existsSync(retained.sessionFile)).toBe(false);
-		runtime = await openRuntime(options);
-		const restartedStage = await stage(currentCheckpoint, 4);
-		await runtime.start(
-			{
-				commandId: "command-same-restore-missing-file",
-				agentInstanceId,
-				agentInstanceRef,
-				executionId: "execution-same-restore-missing-file",
-				attemptId: "attempt-same-restore-missing-file",
-				authorityGeneration: 4,
-				cwd,
-				input: "explicit send after missing retained file",
-				restoreCheckpoint: { restoreId: restartedStage.restoreId, contentHash: currentCheckpoint.contentHash },
-			},
-			profile,
-		);
-		await runtime.drain();
-		expect(observedContexts.at(-1)).toContain("intervening turn");
-		expect(model.calls.length).toBeGreaterThanOrEqual(3);
-		expect(settledEffects).toEqual(["same-restore-tool"]);
-		await runtime.dispose();
-	}, 60_000);
-
-	it("rejects native checkpoint artifact names that collide or escape portable filesystems", async () => {
-		const { runtime } = await createRuntime(async () => true);
-		const sessionBytes = Buffer.from(
-			`${JSON.stringify({
-				type: "session",
-				version: 3,
-				id: "portable-artifact-session",
-				timestamp: "2026-09-06T00:00:00Z",
-				cwd: "C:/workspace",
-			})}\n`,
-		);
-		const content = Buffer.from("artifact");
-		for (const [index, names] of [["Foo.bin", "foo.bin"], ["CON"], ["valid."]].entries()) {
-			const checkpoint = Buffer.from(
-				`${JSON.stringify({
-					schema: "grimoire.engine.native_session_checkpoint.v1",
-					sessionId: "portable-artifact-session",
-					sessionJsonlHash: `sha256:${crypto.createHash("sha256").update(sessionBytes).digest("hex")}`,
-					sessionJsonlBase64: sessionBytes.toString("base64"),
-					artifacts: names.map(name => ({
-						name,
-						contentHash: `sha256:${crypto.createHash("sha256").update(content).digest("hex")}`,
-						byteLength: content.byteLength,
-						contentBase64: content.toString("base64"),
-					})),
-				})}\n`,
-			);
-			const targetRef = `grimoire://tasks/project/portable-${index}/agents/portable-${index}`;
-			await expect(
-				runtime.sessionRestoreStage({
-					agentInstanceId: engineAgentInstanceId(targetRef),
-					agentInstanceRef: targetRef,
-					authorityGeneration: 1,
-					contentHash: `sha256:${crypto.createHash("sha256").update(checkpoint).digest("hex")}`,
-					totalBytes: checkpoint.byteLength,
-					offset: 0,
-					contentBase64: checkpoint.toString("base64"),
-				}),
-			).rejects.toMatchObject({ code: "invalid_request" });
-		}
-		await runtime.dispose();
-	});
 
 	it("applies native history edit and branch starts without flattening or changing the source branch", async () => {
 		const dispatches: Array<{
@@ -2855,7 +1703,7 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		const sourceHistory = await runtime.sessionHistory(source.agentInstanceId);
+		const sourceHistory = await nativeHistory(runtime, source.agentInstanceId);
 		const sourceUser = sourceHistory.entries.find(entry => entry.role === "user");
 		const sourceAssistant = sourceHistory.entries.find(entry => entry.role === "assistant");
 		if (!sourceUser || !sourceAssistant || !sourceHistory.sessionLeafEntryId || !source.sessionFile) {
@@ -2908,7 +1756,7 @@ describe("EngineRuntime", () => {
 		expect(branchDispatch?.messages).not.toContain("answer:original user");
 		expect(await runtime.listInbox(branched, true)).toEqual([]);
 		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
-		const unchanged = await runtime.sessionHistory(source.agentInstanceId);
+		const unchanged = await nativeHistory(runtime, source.agentInstanceId);
 		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
 		await runtime.start(
 			{
@@ -2966,7 +1814,7 @@ describe("EngineRuntime", () => {
 		expect(editDispatch?.messages).toContain('"role":"assistant"');
 		expect(editDispatch?.messages).toContain("edited assistant");
 		expect(editDispatch?.messages).toContain("R-history-edit");
-		expect(JSON.stringify((await runtime.sessionHistory(source.agentInstanceId)).entries)).not.toContain(
+		expect(JSON.stringify((await nativeHistory(runtime, source.agentInstanceId)).entries)).not.toContain(
 			"R-history-edit",
 		);
 		expect(editDispatch?.messages).not.toContain('"role":"user","content":"edited assistant"');
@@ -3016,8 +1864,8 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		const history = await runtime.sessionHistory(source.agentInstanceId);
-		const fork = spyOn(SessionManager, "forkNativeHistory");
+		const history = await nativeHistory(runtime, source.agentInstanceId);
+		const fork = spyOn(SessionManager, "forkNativeContext");
 		try {
 			failProfile = true;
 			await expect(
@@ -3041,15 +1889,10 @@ describe("EngineRuntime", () => {
 				),
 			).rejects.toThrow("profile unavailable");
 			expect(fork).toHaveBeenCalledTimes(1);
-			const prepared = (await fork.mock.results[0]!.value) as NativeHistoryForkResult;
-			const sessionFile = prepared.sessionManager.getSessionFile();
-			expect(sessionFile).toBeDefined();
-			await expect(legacyEngineStore(runtime).sessionStorage.readText(sessionFile!)).rejects.toMatchObject({
-				code: "ENOENT",
-			});
+			expect(((await fork.mock.results[0]!.value) as SessionManager).getSessionFile()).toBeDefined();
 			expect(await runtime.store.getBinding("cleanup-branch")).toBeUndefined();
 			expect(await runtime.store.getAttempt("cleanup-branch")).toBeUndefined();
-			expect(await runtime.sessionHistory(source.agentInstanceId)).toEqual(history);
+			expect(await nativeHistory(runtime, source.agentInstanceId)).toEqual(history);
 		} finally {
 			fork.mockRestore();
 			await runtime.dispose();
@@ -3078,7 +1921,8 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await entered.promise;
-		const history = await runtime.sessionHistory(source.agentInstanceId);
+		await runtime.agentRegistry.get(source.engineAgentId)!.session!.sessionManager.flush();
+		const history = await nativeHistory(runtime, source.agentInstanceId);
 		if (!history.sessionLeafEntryId || !history.entries[0]) throw new Error("Expected active source history");
 
 		await expect(
@@ -3506,7 +2350,7 @@ describe("EngineRuntime", () => {
 				},
 			],
 		};
-		const store = legacyEngineStore(runtime);
+		const store = runtime.store;
 		const commitAttemptTransition = store.commitAttemptTransition.bind(store);
 		const transitionSpy = spyOn(store, "commitAttemptTransition").mockImplementation(
 			async (...args: Parameters<typeof commitAttemptTransition>) => {
@@ -3581,6 +2425,8 @@ describe("EngineRuntime", () => {
 			{
 				commandId: "command-indexed-start",
 				agentInstanceId: "agent-indexed",
+				// Input revisions are guarded on the projected input, which only refs are projected into.
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-indexed",
 				executionId: "execution-indexed",
 				attemptId: "attempt-indexed",
 				authorityGeneration: 1,
@@ -3686,7 +2532,7 @@ describe("EngineRuntime", () => {
 		// dispatch that appends directly never exercises the two checkpoint queues.
 		await withTimeout(runtime.drain(), 3_000, "User checkpoint deadlocked with the history lane");
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
-		const history = await runtime.sessionHistory(started.agentInstanceId);
+		const history = await nativeHistory(runtime, started.agentInstanceId);
 		expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
 			"checkpoint question",
 		]);
@@ -3751,9 +2597,9 @@ describe("EngineRuntime", () => {
 				replicated.push(entry.id);
 			};
 			const newerReplicate = (_entry: { id: string }) => {};
-			const createManager = SessionManager.create.bind(SessionManager);
+			const createManager = SessionManager.createNative.bind(SessionManager);
 			let observedManager: SessionManager | undefined;
-			const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+			const creation = spyOn(SessionManager, "createNative").mockImplementation((...args) => {
 				const manager = createManager(...args);
 				if (args[0] === cwd) {
 					manager.onEntryAppended = replicate;
@@ -3899,8 +2745,8 @@ describe("EngineRuntime", () => {
 			{ model: mock.model },
 		);
 		let stopOnAppend: (() => void) | undefined;
-		const createManager = SessionManager.create.bind(SessionManager);
-		const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+		const createManager = SessionManager.createNative.bind(SessionManager);
+		const creation = spyOn(SessionManager, "createNative").mockImplementation((...args) => {
 			const manager = createManager(...args);
 			if (args[0] === cwd) {
 				manager.onEntryAppended = entry => {
@@ -3958,7 +2804,7 @@ describe("EngineRuntime", () => {
 			expect(events.filter(event => event.kind === "reconciled").map(event => event.attemptId)).toEqual([
 				next.attemptId,
 			]);
-			const history = await runtime.sessionHistory(next.agentInstanceId);
+			const history = await nativeHistory(runtime, next.agentInstanceId);
 			expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
 				request.input!,
 				"only the next Attempt owns this user append",
@@ -3975,132 +2821,6 @@ describe("EngineRuntime", () => {
 			}
 		}
 	}, 20_000);
-
-	it("pages expanding public tool history through exact resources without skipping the retained prefix", async () => {
-		const { runtime, cwd } = await createRuntime();
-		const agentInstanceRef = "grimoire://tasks/grimoire/runtime-test/agents/history-expansion";
-		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
-		const started = await runtime.start(
-			{
-				commandId: "history-expansion-start",
-				agentInstanceId,
-				agentInstanceRef,
-				principalId: "owner",
-				executionId: "history-expansion-execution",
-				attemptId: "history-expansion-attempt",
-				authorityGeneration: 1,
-				cwd,
-				input: "history",
-			},
-			profile,
-		);
-		await runtime.drain();
-		const timestamp = new Date(0).toISOString();
-		const header = { type: "session", version: 3, id: "expanding-history", timestamp, cwd };
-		const entries = [
-			{ type: "message", id: "prefix", parentId: null, timestamp, message: { role: "user", content: "prefix" } },
-			{
-				type: "message",
-				id: "tool-call",
-				parentId: "prefix",
-				timestamp,
-				message: {
-					role: "assistant",
-					content: [{ type: "toolCall", id: "call", name: "test", arguments: { value: 1 } }],
-				},
-			},
-			{
-				type: "message",
-				id: "tool-result",
-				parentId: "tool-call",
-				timestamp,
-				message: { role: "toolResult", toolCallId: "call", isError: true, content: "x".repeat(600_000) },
-			},
-		];
-		await legacyEngineStore(runtime).sessionStorage.writeText(
-			started.sessionFile!,
-			`${[header, ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`,
-		);
-		const runtimeDir = path.dirname(cwd);
-		const server = await startEngineControlQueryServer({
-			runtime,
-			runtimeDir,
-			deviceId: "history-device",
-			engineId: "history-engine",
-			resolveLaunchProfile: async () => profile,
-		});
-		const client = new EngineControlQueryClient(runtimeDir);
-		try {
-			const params = { agentInstanceRef, principalId: "owner" };
-			const first = (await client.request("runtime.history", params)) as Record<string, unknown>;
-			validateRuntimeValue("historyPage", first);
-			expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(runtimeLimits.httpPageBytes);
-			expect(first).toMatchObject({ entries: [], entryRef: { entryId: "tool-result" }, work: { changes: 3 } });
-			expect((first.activities as Array<{ status: string }>).map(activity => activity.status)).toEqual([
-				"started",
-				"succeeded",
-			]);
-			const one = (await client.request("runtime.history", { ...params, limit: 1 })) as Record<string, unknown>;
-			expect(one).toMatchObject({
-				entries: [],
-				activities: [],
-				entryRef: { entryId: "tool-result" },
-				work: { changes: 1 },
-			});
-			expect(one.activityNextCursor).toBeString();
-			const lifecycle = (await client.request("runtime.history", {
-				...params,
-				activityCursor: one.activityNextCursor,
-				limit: 1,
-			})) as Record<string, unknown>;
-			validateRuntimeValue("historyPage", lifecycle);
-			expect(lifecycle).toMatchObject({
-				entries: [],
-				nextCursor: null,
-				activities: [{ status: "succeeded" }],
-				work: { changes: 1 },
-			});
-			expect(lifecycle.activityNextCursor).toBeString();
-			// Settle native-pipe rejection before Bun's matcher can poll a nested event loop.
-			expect(
-				await client
-					.request("runtime.history", {
-						...params,
-						cursor: one.nextCursor,
-						activityCursor: one.activityNextCursor,
-					})
-					.then(
-						() => null,
-						(error: unknown) => error,
-					),
-			).toMatchObject({ code: "invalid_request" });
-			const range = (await client.request("runtime.resource", {
-				principalId: "owner",
-				resource: first.entryRef,
-				offset: 0,
-				limit: 65_536,
-			})) as Record<string, unknown>;
-			validateRuntimeValue("httpRange", range);
-			expect(Buffer.from(String(range.contentBase64), "base64")).toEqual(
-				Buffer.from(JSON.stringify(entries[2])).subarray(0, 65_536),
-			);
-			const second = (await client.request("runtime.history", { ...params, cursor: first.nextCursor })) as Record<
-				string,
-				unknown
-			>;
-			validateRuntimeValue("historyPage", second);
-			expect(second).toMatchObject({ entries: [], entryRef: { entryId: "tool-call" } });
-			const third = (await client.request("runtime.history", { ...params, cursor: second.nextCursor })) as Record<
-				string,
-				unknown
-			>;
-			validateRuntimeValue("historyPage", third);
-			expect(third).toMatchObject({ entries: [{ entryId: "prefix", text: "prefix" }], nextCursor: null });
-			expect(third.revision).toBe(first.revision);
-		} finally {
-			await server.close();
-		}
-	}, 30_000);
 
 	it("cancels an Attempt that is waiting for Ask input", async () => {
 		const questions = [{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }];
@@ -4193,14 +2913,12 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("waits for an explicit permit decision before executing a tool", async () => {
-		let executed = false;
-		const { runtime, cwd } = await createRuntime(async session => {
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-permit", { path: "permit.txt" });
-			executed = true;
-			return true;
-		});
+		const mock = toolTurnModel("read-permit", "read", { path: "permit.txt" });
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
 		fs.writeFileSync(path.join(cwd, "permit.txt"), "approved");
 		const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
 		const started = await runtime.start(
@@ -4217,7 +2935,7 @@ describe("EngineRuntime", () => {
 		);
 		const approval = await approvalRequested;
 		const approvalId = String(approval.payload?.approvalId);
-		expect(executed).toBeFalse();
+		expect(toolResultOf(mock, "read-permit")).toBeUndefined();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
 		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
@@ -4229,7 +2947,8 @@ describe("EngineRuntime", () => {
 			decision: "approve",
 		});
 		await runtime.drain();
-		expect(executed).toBeTrue();
+		expect(toolResultOf(mock, "read-permit")).toMatchObject({ isError: false });
+		expect(JSON.stringify(toolResultOf(mock, "read-permit")?.content)).toContain("approved");
 		const events = await runtime.store.pendingEvents();
 		expect(events.filter(event => event.kind.startsWith("tool_")).map(event => event.kind)).toEqual([
 			"tool_approval_requested",
@@ -4322,20 +3041,22 @@ describe("EngineRuntime", () => {
 
 	it("settles a tracked async effect only after its owner job finishes", async () => {
 		const release = Promise.withResolvers<string>();
+		const mock = toolTurnModel("read-tracked", "read", { path: "tracked.txt" });
 		let runtime!: EngineRuntime;
 		let cwd = "";
-		({ runtime, cwd } = await createRuntime(async session => {
-			const jobId = runtime.asyncJobManager.register("bash", "tracked", () => release.promise, {
-				ownerId: session.getAgentId(),
-				attemptId: session.getAttemptId(),
-				sourceToolCallId: "read-tracked",
-			});
-			runtime.asyncJobManager.watchJobs([jobId]);
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-tracked", { path: "tracked.txt" });
-			return true;
-		}));
+		({ runtime, cwd } = await createRuntime(
+			(session, input) => {
+				const jobId = runtime.asyncJobManager.register("bash", "tracked", () => release.promise, {
+					ownerId: session.getAgentId(),
+					attemptId: session.getAttemptId(),
+					sourceToolCallId: "read-tracked",
+				});
+				runtime.asyncJobManager.watchJobs([jobId]);
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		));
 		fs.writeFileSync(path.join(cwd, "tracked.txt"), "tracked");
 		const toolStarted = nextEngineEvent(runtime, "tool_started");
 		const started = await runtime.start(
@@ -4368,20 +3089,22 @@ describe("EngineRuntime", () => {
 
 	it("keeps a background effect open while paused and settles only after resume", async () => {
 		const release = Promise.withResolvers<string>();
+		const mock = toolTurnModel("read-paused-background", "read", { path: "paused.txt" });
 		let runtime!: EngineRuntime;
 		let cwd = "";
-		({ runtime, cwd } = await createRuntime(async session => {
-			const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
-				ownerId: session.getAgentId(),
-				attemptId: session.getAttemptId(),
-				sourceToolCallId: "read-paused-background",
-			});
-			runtime.asyncJobManager.watchJobs([jobId]);
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-paused-background", { path: "paused.txt" });
-			return true;
-		}));
+		({ runtime, cwd } = await createRuntime(
+			(session, input) => {
+				const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
+					ownerId: session.getAgentId(),
+					attemptId: session.getAttemptId(),
+					sourceToolCallId: "read-paused-background",
+				});
+				runtime.asyncJobManager.watchJobs([jobId]);
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		));
 		fs.writeFileSync(path.join(cwd, "paused.txt"), "paused");
 		const toolStarted = nextEngineEvent(runtime, "tool_started");
 		const started = await runtime.start(
@@ -4419,20 +3142,26 @@ describe("EngineRuntime", () => {
 		"executes write→xd with a distinct durable device effect and honors %s",
 		async decision => {
 			let deviceResult: string | undefined;
-			const { runtime, cwd } = await createRuntime(async session => {
-				const write = session.getToolByName("write");
-				if (!write) throw new Error("write tool is unavailable");
-				const args = {
-					path: "xd://grep",
-					content: JSON.stringify({ pattern: "needle", path: "fixture.txt" }),
-				};
-				const result = await write.execute("outer-write", args);
-				if (!result.isError) {
-					deviceResult = JSON.stringify(result.content);
-					await expect(write.execute("outer-write", args)).rejects.toThrow();
-				}
-				return true;
-			});
+			const args = {
+				path: "xd://grep",
+				content: JSON.stringify({ pattern: "needle", path: "fixture.txt" }),
+			};
+			const mock = toolTurnModel("outer-write", "write", args);
+			const { runtime, cwd } = await createRuntime(
+				async (session, input) => {
+					await session.prompt(input);
+					const result = toolResultOf(mock, "outer-write");
+					if (result && !result.isError) {
+						deviceResult = JSON.stringify(result.content);
+						const write = session.getToolByName("write");
+						if (!write) throw new Error("write tool is unavailable");
+						await expect(write.execute("outer-write", args)).rejects.toThrow();
+					}
+					return true;
+				},
+				{},
+				{ model: mock.model },
+			);
 			try {
 				fs.writeFileSync(path.join(cwd, "fixture.txt"), "needle\n");
 				const requested = nextEngineEvent(runtime, "tool_approval_requested");
@@ -4496,12 +3225,12 @@ describe("EngineRuntime", () => {
 	);
 
 	it("records unrestricted tools without exposing their raw input", async () => {
-		const { runtime, cwd } = await createRuntime(async session => {
-			const read = session.getToolByName("read");
-			if (!read) throw new Error("read tool is unavailable");
-			await read.execute("read-unrestricted", { path: "secret-name.txt" });
-			return true;
-		});
+		const mock = toolTurnModel("read-unrestricted", "read", { path: "secret-name.txt" });
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
 		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
 		await runtime.start(
 			{
@@ -4526,6 +3255,52 @@ describe("EngineRuntime", () => {
 			policy: "unrestricted",
 		});
 		await runtime.dispose();
+	}, 60_000);
+
+	it("runs a turn of twelve parallel reads without refusing its own storage requests", async () => {
+		const count = 12;
+		const ids = Array.from({ length: count }, (_, index) => `read-parallel-${index}`);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ids.map((id, index) => ({
+						type: "toolCall" as const,
+						id,
+						name: "read",
+						arguments: { path: `parallel-${index}.txt` },
+					})),
+				},
+				{ content: ["done"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		for (let index = 0; index < count; index++)
+			fs.writeFileSync(path.join(cwd, `parallel-${index}.txt`), `parallel content ${index}`);
+		await runtime.start(
+			{
+				commandId: "command-parallel-reads",
+				agentInstanceId: "agent-parallel-reads",
+				executionId: "execution-parallel-reads",
+				attemptId: "attempt-parallel-reads",
+				authorityGeneration: 1,
+				cwd,
+				input: "read them all",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect((await runtime.store.getAttempt("attempt-parallel-reads"))?.state).toBe("completed");
+		for (const [index, id] of ids.entries()) {
+			const result = toolResultOf(mock, id);
+			expect(result?.isError).not.toBeTrue();
+			expect(JSON.stringify(result?.content)).toContain(`parallel content ${index}`);
+		}
+		const settled = (await runtime.store.pendingEvents()).filter(event => event.kind === "tool_settled");
+		expect(settled).toHaveLength(count);
 	}, 60_000);
 
 	it("records model dispatch certainty without exposing the prompt", async () => {
@@ -4673,7 +3448,7 @@ describe("EngineRuntime", () => {
 			provider.resolve();
 			expect(await usage).toMatchObject({ code: "stale_target" });
 			await runtime.drain();
-			const read = spyOn(legacyEngineStore(runtime).sessionStorage, "readText").mockRejectedValue(
+			const read = spyOn(RocksNativeSessionStorage.prototype, "readContext").mockRejectedValue(
 				new Error("Full history read forbidden"),
 			);
 			try {
@@ -5028,7 +3803,7 @@ describe("EngineRuntime", () => {
 				yield { content: ["Final answer"] };
 			})(),
 		});
-		const { runtime, cwd, options } = await createRuntime(
+		const { runtime, cwd } = await createRuntime(
 			(session, input) => session.prompt(input),
 			{},
 			{ model: mock.model },
@@ -5096,21 +3871,6 @@ describe("EngineRuntime", () => {
 			expect((await runtime.store.getAttempt(attemptId))?.transcript_revision).toBe(
 				Number((latest.payload!.transcriptCheckpoint as { revision: number }).revision),
 			);
-			const inspect = new SQL(`sqlite:${options.databasePath.replaceAll("\\", "/")}`);
-			try {
-				const rows = await inspect.unsafe(
-					"SELECT summary_payload,projection_payload FROM engine_event_outbox WHERE attempt_id=? AND kind='history_checkpoint'",
-					[attemptId],
-				);
-				for (const row of rows) {
-					expect(row.summary_payload).toBeNull();
-					const changes = JSON.parse(row.projection_payload);
-					expect(changes).toMatchObject([{ kind: "invalidate", attemptId, value: { resource: "history" } }]);
-					expect(changes).toHaveLength(1);
-				}
-			} finally {
-				await inspect.end();
-			}
 		} finally {
 			release.resolve();
 			unsubscribe();
@@ -5211,6 +3971,8 @@ describe("EngineRuntime", () => {
 				await releaseFinal.promise;
 				yield { content: [fullFinal] };
 			})(),
+			// Publishes the directly appended hidden entry through the next Attempt's transcript.
+			handler: { content: ["after the hidden entry"] },
 		});
 		const { runtime, cwd } = await createRuntime(
 			(session, input) => {
@@ -5282,7 +4044,7 @@ describe("EngineRuntime", () => {
 		const completed = events.find(event => event.kind === "completed");
 		expect(completed?.payload?.assistantMessageId).toBe(messageIds[1]);
 		expect(events.indexOf(settled!)).toBeLessThan(events.indexOf(completed!));
-		const history = await runtime.sessionHistory(started.agentInstanceId);
+		const history = await nativeHistory(runtime, started.agentInstanceId);
 		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
 		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
 		expect(history.activityCompleteness).toBe("complete");
@@ -5342,7 +4104,24 @@ describe("EngineRuntime", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		const hiddenHistory = await runtime.sessionHistory(started.agentInstanceId);
+		await retainedSessionManager?.flush();
+		// A terminal Attempt's history is cut at its own transcript; the next Attempt carries the hidden entry.
+		await runtime.start(
+			{
+				commandId: "command-hidden-reasoning",
+				agentInstanceId: started.agentInstanceId,
+				executionId: "execution-hidden-reasoning",
+				attemptId: "attempt-hidden-reasoning",
+				authorityGeneration: 1,
+				cwd,
+				input: "continue after hidden reasoning",
+				expectedIntentRevision: (await runtime.store.intent(started.agentInstanceId)).intentRevision,
+				explicitContinue: true,
+			},
+			{ ...profile, toolNames: ["read"], restrictToolNames: true },
+		);
+		await runtime.drain();
+		const hiddenHistory = await nativeHistory(runtime, started.agentInstanceId);
 		expect(hiddenHistory.entries.find(entry => entry.entryId === hiddenEntry)?.blocks).toEqual([
 			expect.objectContaining({ kind: "reasoning", status: "unavailable" }),
 		]);
@@ -5424,6 +4203,11 @@ describe("EngineRuntime", () => {
 		expect(maxInFlightBytes).toBeLessThanOrEqual(runtimeLimits.deliveryBatchBytes);
 		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
 		expect(completedAttempt?.state, completedAttempt?.cause ?? undefined).toBe("completed");
+		// A result beyond one storage write stays bounded; its transcript serves the rest.
+		expect(completedAttempt?.result_payload).toMatchObject({
+			outputTruncated: true,
+			transcriptRef: `history://${started.engineAgentId}`,
+		});
 		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
 		const page = await runtime.store.runtimeMessages(request);
 		const baseline = (page.items as Array<Record<string, unknown>>)[0];
@@ -5580,7 +4364,7 @@ describe("EngineRuntime", () => {
 		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
 		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
-		const retainedAnswer = (await runtime.sessionHistory(started.agentInstanceId)).entries.find(
+		const retainedAnswer = (await nativeHistory(runtime, started.agentInstanceId)).entries.find(
 			entry => entry.assistantMessageId === snapshots[0]?.payload?.assistantMessageId,
 		);
 		expect(retainedAnswer).toMatchObject({ text: "a".repeat(400), stopReason: "aborted" });
@@ -5588,40 +4372,35 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
-		let taskResults: string[] = [];
+		const taskCall = (index: number) => ({
+			type: "toolCall" as const,
+			id: `tool-child-${index}`,
+			name: "task",
+			arguments: {
+				profileRef: "gctx:2222222222222222",
+				workStepId: `child-step-${index}`,
+				assignment: `Do child step ${index}`,
+			},
+		});
+		const mock = createMockModel({
+			responses: [{ content: Array.from({ length: 7 }, (_, index) => taskCall(index)) }, { content: ["done"] }],
+		});
 		const launches: Array<{ toolCallId: string; workStepId?: string; maxSpawnDepth: number }> = [];
-		const { runtime, cwd } = await createRuntime(
-			async session => {
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine root did not expose task");
-				const results = await Promise.all(
-					Array.from({ length: 7 }, (_, index) =>
-						task.execute(`tool-child-${index}`, {
-							profileRef: "gctx:2222222222222222",
-							workStepId: `child-step-${index}`,
-							assignment: `Do child step ${index}`,
-						}),
-					),
-				);
-				taskResults = results.map(result => result.content.find(part => part.type === "text")?.text ?? "");
-				return true;
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			resolveSessionProfile: async () => ({
+				options: { model: mock.model },
+				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+				dispose() {},
+			}),
+			launchChild: async request => {
+				launches.push(request);
+				return {
+					agentInstanceId: `child-${request.toolCallId}`,
+					status: "completed",
+					assistantFinal: `done ${request.toolCallId}`,
+				};
 			},
-			{
-				resolveSessionProfile: async () => ({
-					options: {},
-					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
-					dispose() {},
-				}),
-				launchChild: async request => {
-					launches.push(request);
-					return {
-						agentInstanceId: `child-${request.toolCallId}`,
-						status: "completed",
-						assistantFinal: `done ${request.toolCallId}`,
-					};
-				},
-			},
-		);
+		});
 		await runtime.start(
 			{
 				commandId: "command-parent",
@@ -5643,62 +4422,62 @@ describe("EngineRuntime", () => {
 		);
 		await runtime.drain();
 		expect(launches).toHaveLength(6);
-		expect(taskResults.slice(0, 6)).toEqual(Array.from({ length: 6 }, (_, index) => `done tool-child-${index}`));
-		expect(taskResults[6]).toContain("maxChildren ceiling (6) reached");
-		expect(launches[0]).toMatchObject({
-			toolCallId: "tool-child-0",
-			workStepId: "child-step-0",
-			maxSpawnDepth: 0,
+		// Parallel calls reserve the ceiling in any order: exactly one of the seven is refused.
+		const outcomes = Array.from({ length: 7 }, (_, index) => {
+			const id = `tool-child-${index}`;
+			const text = toolResultOf(mock, id)?.content.find(part => part.type === "text")?.text ?? "";
+			if (text === `done ${id}`) return "done";
+			return text.includes("maxChildren ceiling (6) reached") ? "ceiling" : text;
 		});
-		expect(launches[1]).toMatchObject({
-			toolCallId: "tool-child-1",
-			workStepId: "child-step-1",
-		});
+		expect([...outcomes].sort()).toEqual(["ceiling", ...Array.from({ length: 6 }, () => "done")]);
+		expect(launches.map(launch => launch.toolCallId)).not.toContain(`tool-child-${outcomes.indexOf("ceiling")}`);
+		for (const launch of launches) {
+			expect(launch).toMatchObject({
+				workStepId: launch.toolCallId.replace("tool-child-", "child-step-"),
+				maxSpawnDepth: 0,
+			});
+		}
 		await runtime.dispose();
 	}, 60_000);
 
 	it("resets the child launch ceiling when an idle root binding is reused for a new Attempt", async () => {
-		let resultsA: string[] = [];
-		let resultsB: string[] = [];
-		const launches: string[] = [];
-		const { runtime, cwd } = await createRuntime(
-			async (session, input) => {
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine root did not expose task");
-				const results = await Promise.all(
-					Array.from({ length: 3 }, (_, index) =>
-						task.execute(`tool-child-${index}`, {
-							profileRef: "gctx:2222222222222222",
-							workStepId: `child-step-${index}`,
-							assignment: `Do child step ${index}`,
-						}),
-					),
-				);
-				const texts = results.map(result => result.content.find(part => part.type === "text")?.text ?? "");
-				if (input === "first round") resultsA = texts;
-				else resultsB = texts;
-				return true;
-			},
-			{
-				resolveSessionProfile: async () => ({
-					options: {},
-					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
-					dispose() {},
-				}),
-				launchChild: async request => {
-					launches.push(request.parentAttemptId);
-					if (request.parentAttemptId === "attempt-b" && request.toolCallId === "tool-child-0") {
-						throw new Error("child unavailable");
-					}
-					return {
-						agentInstanceId: `child-${request.toolCallId}`,
-						status: "completed",
-						assistantFinal: `done ${request.toolCallId}`,
-					};
+		const taskCalls = {
+			content: Array.from({ length: 3 }, (_, index) => ({
+				type: "toolCall" as const,
+				id: `tool-child-${index}`,
+				name: "task",
+				arguments: {
+					profileRef: "gctx:2222222222222222",
+					workStepId: `child-step-${index}`,
+					assignment: `Do child step ${index}`,
 				},
+			})),
+		};
+		const mock = createMockModel({
+			responses: [taskCalls, { content: ["done first"] }, taskCalls, { content: ["done second"] }],
+		});
+		const launches: string[] = [];
+		let failedSecondRound = false;
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			resolveSessionProfile: async () => ({
+				options: { model: mock.model },
+				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+				dispose() {},
+			}),
+			launchChild: async request => {
+				launches.push(request.parentAttemptId);
+				// Parallel task calls reserve the ceiling in any order, so the second round fails its first launch.
+				if (request.parentAttemptId === "attempt-b" && !failedSecondRound) {
+					failedSecondRound = true;
+					throw new Error("child unavailable");
+				}
+				return {
+					agentInstanceId: `child-${request.toolCallId}`,
+					status: "completed",
+					assistantFinal: `done ${request.toolCallId}`,
+				};
 			},
-		);
+		});
 		const parentProfile: EngineLaunchProfile = {
 			...profile,
 			spawns: "*",
@@ -5738,13 +4517,35 @@ describe("EngineRuntime", () => {
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(
 			runtime.agentRegistry.get(first.engineAgentId)?.session,
 		);
-		expect(resultsA.slice(0, 2)).toEqual(["done tool-child-0", "done tool-child-1"]);
-		expect(resultsA[2]).toContain("maxChildren ceiling (2) reached");
-		expect(resultsB[0]).toContain("Task execution failed: child unavailable");
-		expect(resultsB[1]).toBe("done tool-child-1");
-		expect(resultsB[2]).toContain("maxChildren ceiling (2) reached");
+		// The second round's last model call sees both rounds' task results; each round has its own three.
+		const results = mock.calls
+			.at(-1)!
+			.context.messages.flatMap(message =>
+				message.role === "toolResult"
+					? [{ id: message.toolCallId, text: message.content.find(part => part.type === "text")?.text ?? "" }]
+					: [],
+			);
+		expect(results).toHaveLength(6);
+		const outcomes = results.map(({ id, text }) => {
+			if (text === `done ${id}`) return "done";
+			if (text.includes("Task execution failed: child unavailable")) return "failed";
+			if (text.includes("maxChildren ceiling (2) reached")) return "ceiling";
+			return text;
+		});
+		for (const [start, expected] of [
+			[0, ["ceiling", "done", "done"]],
+			[3, ["ceiling", "done", "failed"]],
+		] as const) {
+			expect(
+				results
+					.slice(start, start + 3)
+					.map(result => result.id)
+					.sort(),
+			).toEqual(["tool-child-0", "tool-child-1", "tool-child-2"]);
+			expect(outcomes.slice(start, start + 3).sort()).toEqual([...expected]);
+		}
 		expect(launches).toEqual(["attempt-a", "attempt-a", "attempt-b", "attempt-b"]);
-		const entries = (await runtime.sessionHistory("parent-reuse-agent")).entries;
+		const entries = (await nativeHistory(runtime, "parent-reuse-agent")).entries;
 		expect(entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
 			"first round",
 			"second round",
@@ -5758,19 +4559,36 @@ describe("EngineRuntime", () => {
 		const descriptions = new Map<string, string>();
 		const results = new Map<string, boolean | undefined>();
 		const launches: string[] = [];
+		// Both parents share this model concurrently, so each call answers from its own context.
+		const mock = createMockModel({
+			handler: context =>
+				context.messages.at(-1)?.role === "toolResult"
+					? { content: ["done"] }
+					: {
+							content: [
+								{
+									type: "toolCall" as const,
+									id: "delegate",
+									name: "task",
+									arguments: {
+										profileRef: "gctx:2222222222222222",
+										workStepId: "child",
+										assignment: "Do child work",
+									},
+								},
+							],
+						},
+		});
 		const { runtime, cwd } = await createRuntime(
 			async (session, input) => {
 				const task = session.getToolByName("task");
 				if (!task) throw new Error("Engine root did not expose task");
 				descriptions.set(input, task.description);
-				const result = await task.execute("delegate", {
-					profileRef: "gctx:2222222222222222",
-					workStepId: "child",
-					assignment: "Do child work",
-				});
-				results.set(input, result.isError);
+				await session.prompt(input);
+				const result = session.messages.find(message => message.role === "toolResult");
+				results.set(input, result?.role === "toolResult" ? result.isError : undefined);
 				if (input === "first") {
-					expect(result.content).toEqual([
+					expect(result?.content).toEqual([
 						{ type: "text", text: "Task execution failed: WorkStep child is unavailable" },
 					]);
 				}
@@ -5778,7 +4596,7 @@ describe("EngineRuntime", () => {
 			},
 			{
 				resolveSessionProfile: async () => ({
-					options: {},
+					options: { model: mock.model },
 					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
 					dispose() {},
 				}),
@@ -5843,57 +4661,52 @@ describe("EngineRuntime", () => {
 		const foreignParentChildId = "history-child-foreign-parent";
 		const foreignTaskChildId = "history-child-foreign-task";
 		let runtimeRef: EngineRuntime;
-		let advertised = "";
-		const reads = new Map<string, string>();
-		let readChild: ((childId: string) => Promise<string>) | undefined;
-
-		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-			if (input === "spawn truncated child") {
-				const task = session.getToolByName("task");
-				if (!task) throw new Error("Engine parent did not expose task");
-				const result = await task.execute("spawn-history-child", {
-					profileRef: "gctx:2222222222222222",
-					workStepId: "child-history",
-					assignment: "Inspect child history",
-				});
-				advertised = result.content.find(part => part.type === "text")?.text ?? "";
-				session.sessionManager.appendMessage({
-					role: "toolResult",
-					toolCallId: "spawn-history-child",
-					toolName: "task",
-					content: [{ type: "text", text: advertised }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-			}
-			if (input === "read retained children") {
-				const read = session.getToolByName("read");
-				if (!read) throw new Error("Engine parent did not expose read");
-				let archiveReadSequence = 0;
-				readChild = async childId => {
-					const childEngineId = `Engine-${engineRouteToken(childId)}`;
-					const result = await read.execute(`read-archive-${++archiveReadSequence}-${childId}`, {
-						path: `history://${childEngineId}`,
-					});
-					return result.content.find(part => part.type === "text")?.text ?? "";
-				};
-				for (const childId of [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId]) {
-					const childEngineId = `Engine-${new Bun.SHA256().update(childId).digest("hex").slice(0, 32)}`;
-					try {
-						const result = await read.execute(`read-${childId}`, { path: `history://${childEngineId}` });
-						reads.set(childId, result.content.find(part => part.type === "text")?.text ?? "");
-					} catch (error) {
-						reads.set(childId, error instanceof Error ? error.message : String(error));
-					}
+		const childIds = [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId];
+		const engineIdOf = (id: string) => `Engine-${new Bun.SHA256().update(id).digest("hex").slice(0, 32)}`;
+		// The parent spawns through task, then reads child history after restart, both through the agent loop.
+		const mock = createMockModel({
+			handler: context => {
+				if (context.messages.at(-1)?.role === "toolResult") return { content: ["done"] };
+				const user = context.messages.filter(message => message.role === "user").at(-1)!;
+				if (JSON.stringify(user.content).includes("spawn truncated child")) {
+					return {
+						content: [
+							{
+								type: "toolCall" as const,
+								id: "spawn-history-child",
+								name: "task",
+								arguments: {
+									profileRef: "gctx:2222222222222222",
+									workStepId: "child-history",
+									assignment: "Inspect child history",
+								},
+							},
+						],
+					};
 				}
-			}
+				return {
+					content: childIds.map(childId => ({
+						type: "toolCall" as const,
+						id: `read-${childId}`,
+						name: "read",
+						arguments: { path: `history://${engineIdOf(childId)}` },
+					})),
+				};
+			},
+		});
+		const textOf = (toolCallId: string) =>
+			toolResultOf(mock, toolCallId)?.content.find(part => part.type === "text")?.text ?? "";
+
+		// Children keep their input as a plain transcript; only the parent runs the model.
+		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			if (input === "spawn truncated child" || input === "read retained children") return session.prompt(input);
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			return true;
 		};
 
 		const created = await createRuntime(dispatch, {
 			resolveSessionProfile: async () => ({
-				options: {},
+				options: { model: mock.model },
 				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
 				dispose() {},
 			}),
@@ -5955,9 +4768,7 @@ describe("EngineRuntime", () => {
 			parentProfile,
 		);
 		await runtimeRef.drain();
-		expect(advertised).toContain(
-			`history://Engine-${new Bun.SHA256().update(visibleChildId).digest("hex").slice(0, 32)}`,
-		);
+		expect(textOf("spawn-history-child")).toContain(`history://${engineIdOf(visibleChildId)}`);
 
 		const startForeign = async (id: string, agentInstanceRef: string, parentAgentInstanceId: string) => {
 			const request = {
@@ -6024,33 +4835,11 @@ describe("EngineRuntime", () => {
 			parentProfile,
 		);
 		await restarted.drain();
-		expect(reads.get(visibleChildId)).toContain("retained child transcript marker");
-		expect(reads.get(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
-		expect(reads.get(foreignParentChildId)).toContain("Unknown agent");
-		expect(reads.get(foreignTaskChildId)).toContain("Unknown agent");
-		try {
-			if (!readChild) throw new Error("Expected the parent's retained-history reader");
-			const child = await restarted.store.getBinding(visibleChildId);
-			if (!child?.sessionFile) throw new Error("Expected retained child session");
-			const childHistory = await restarted.sessionHistory(visibleChildId);
-			const parentHistory = await restarted.sessionHistory(parentId);
-			const snapshot = await restarted.sessionArchive(visibleChildId);
-			expect(snapshot.nextOffset).toBeNull();
-			const archivePath = path.join(
-				path.dirname(created.options.databasePath!),
-				`${snapshot.contentHash.slice(7)}.gz`,
-			);
-			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(snapshot.contentBase64, "base64")));
-			await restarted.sessionArchiveRetire(child, snapshot.contentHash, archivePath, "child-archive-1");
-			await expect(readChild(visibleChildId)).rejects.toThrow("archived");
-			expect(await readChild(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
-			expect(await restarted.sessionHistory(parentId)).toEqual(parentHistory);
-			await restarted.sessionArchiveRestore(child, snapshot.contentHash, "child-archive-1");
-			expect(await readChild(visibleChildId)).toContain("retained child transcript marker");
-			expect(await restarted.sessionHistory(visibleChildId)).toEqual(childHistory);
-		} finally {
-			await restarted.dispose();
-		}
+		expect(textOf(`read-${visibleChildId}`)).toContain("retained child transcript marker");
+		expect(textOf(`read-${unadvertisedChildId}`)).toContain(`private marker ${unadvertisedChildId}`);
+		expect(textOf(`read-${foreignParentChildId}`)).toContain("Unknown agent");
+		expect(textOf(`read-${foreignTaskChildId}`)).toContain("Unknown agent");
+		await restarted.dispose();
 	}, 60_000);
 
 	it("does not expose task when the pinned profile has no child catalog", async () => {
@@ -6329,7 +5118,7 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
-	it("fails a profile change when its retained conversation cannot be read or validated", async () => {
+	it("fails a profile change when its retained conversation cannot be read", async () => {
 		const { runtime, cwd } = await createRuntime(async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
@@ -6348,49 +5137,28 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		const storage = legacyEngineStore(runtime).sessionStorage;
-		const readText = storage.readText.bind(storage);
-		const failedRead = spyOn(storage, "readText").mockImplementation(async file => {
-			if (file === first.sessionFile) throw new Error("injected retained storage failure");
-			return await readText(file);
-		});
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-retained-read-b",
-					agentInstanceId: first.agentInstanceId,
-					agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
-					executionId: "execution-retained-read-b",
-					attemptId: "attempt-retained-read-b",
-					authorityGeneration: 1,
-					cwd,
-					input: "Must not silently reset",
-				},
-				{ ...profile, systemPrompt: "changed profile" },
-			),
-		).rejects.toThrow("Retained AgentSession conversation could not be loaded");
-		failedRead.mockRestore();
-
-		const invalidRead = spyOn(storage, "readText").mockImplementation(async file => {
-			if (file === first.sessionFile) return '{"type":"not-a-session"}\n';
-			return await readText(file);
-		});
-		await expect(
-			runtime.start(
-				{
-					commandId: "command-retained-read-c",
-					agentInstanceId: first.agentInstanceId,
-					agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
-					executionId: "execution-retained-read-c",
-					attemptId: "attempt-retained-read-c",
-					authorityGeneration: 1,
-					cwd,
-					input: "Must reject invalid history",
-				},
-				{ ...profile, systemPrompt: "changed profile" },
-			),
-		).rejects.toThrow("Retained AgentSession conversation is missing or invalid");
-		invalidRead.mockRestore();
+		const failedRead = spyOn(RocksNativeSessionStorage.prototype, "readContext").mockRejectedValue(
+			new Error("injected retained storage failure"),
+		);
+		try {
+			await expect(
+				runtime.start(
+					{
+						commandId: "command-retained-read-b",
+						agentInstanceId: first.agentInstanceId,
+						agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
+						executionId: "execution-retained-read-b",
+						attemptId: "attempt-retained-read-b",
+						authorityGeneration: 1,
+						cwd,
+						input: "Must not silently reset",
+					},
+					{ ...profile, systemPrompt: "changed profile" },
+				),
+			).rejects.toThrow("Retained AgentSession conversation could not be loaded");
+		} finally {
+			failedRead.mockRestore();
+		}
 		await runtime.dispose();
 	}, 60_000);
 
@@ -6888,10 +5656,11 @@ describe("EngineRuntime", () => {
 		const enabledTools = new Map<string, string[]>();
 		const { runtime, cwd } = await createRuntime(
 			async (session, input) => {
+				// A carried fork holds only the working context; its archive is not materialized.
 				priorUserMessages.set(
 					input,
 					session.sessionManager
-						.getBranch()
+						.getContextBranch()
 						.flatMap(entry =>
 							entry.type === "message" &&
 							entry.message.role === "user" &&
@@ -7078,7 +5847,7 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("removes only an uncommitted carried transcript when a pending start is cancelled", async () => {
-		const { runtime, cwd } = await createRuntime(async (session, input) => {
+		const { runtime, cwd, options } = await createRuntime(async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
 		});
@@ -7109,9 +5878,6 @@ describe("EngineRuntime", () => {
 			wakeIntent: true,
 		});
 		if (!first.sessionFile) throw new Error("Expected the retained session file");
-		const storage = legacyEngineStore(runtime).sessionStorage;
-		const sessionDir = path.dirname(first.sessionFile);
-		const filesBefore = storage.listFilesSync(sessionDir, "*.jsonl").sort();
 		const command = {
 			commandId: "command-carry-cancel-second",
 			operation: "start" as const,
@@ -7130,15 +5896,14 @@ describe("EngineRuntime", () => {
 
 		const forkStarted = Promise.withResolvers<void>();
 		const releaseFork = Promise.withResolvers<void>();
-		const writeTextAtomic = storage.writeTextAtomic.bind(storage);
+		const forkNativeContext = SessionManager.forkNativeContext.bind(SessionManager);
 		let forkPath: string | undefined;
-		const blockedWrite = spyOn(storage, "writeTextAtomic").mockImplementation(async (file, content, options) => {
-			if (!forkPath && file !== first.sessionFile) {
-				forkPath = file;
-				forkStarted.resolve();
-				await releaseFork.promise;
-			}
-			await writeTextAtomic(file, content, options);
+		const blockedWrite = spyOn(SessionManager, "forkNativeContext").mockImplementation(async (...args) => {
+			forkStarted.resolve();
+			await releaseFork.promise;
+			const forked = await forkNativeContext(...args);
+			forkPath = forked.getSessionFile();
+			return forked;
 		});
 		const next = {
 			commandId: command.commandId,
@@ -7173,9 +5938,10 @@ describe("EngineRuntime", () => {
 		}
 
 		expect(forkPath).toBeDefined();
-		expect(storage.existsSync(forkPath!)).toBe(false);
-		expect(storage.listFilesSync(sessionDir, "*.jsonl").sort()).toEqual(filesBefore);
-		expect(await storage.readText(first.sessionFile)).toContain("retained before cancelled profile change");
+		expect(forkPath).not.toBe(first.sessionFile);
+		expect(JSON.stringify((await retainedEntries(runtime, first.sessionFile)).entries)).toContain(
+			"retained before cancelled profile change",
+		);
 		expect(await runtime.store.getBinding(first.agentInstanceId)).toMatchObject({
 			sessionFile: first.sessionFile,
 			state: "released",
@@ -7186,11 +5952,13 @@ describe("EngineRuntime", () => {
 			sessionId: queued.item.sessionId,
 			disposition: "pending",
 		});
-		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+		// A later processor generation replays the durable rejection instead of starting the cancelled command.
+		await runtime.dispose();
+		const restarted = await openRuntime(options);
+		expect(await restarted.store.admitCommand(command, restarted.engineGeneration)).toMatchObject({
 			status: "replay",
 			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
 		});
-		await runtime.dispose();
 	}, 60_000);
 
 	it("aborts profile resolution only after a pending Start is durably cancelled", async () => {
@@ -7198,7 +5966,7 @@ describe("EngineRuntime", () => {
 		const releaseResolution = Promise.withResolvers<void>();
 		let promptCalls = 0;
 		let disposeCalls = 0;
-		const { runtime, cwd } = await createRuntime(
+		const { runtime, cwd, options } = await createRuntime(
 			async () => {
 				promptCalls += 1;
 				return true;
@@ -7280,11 +6048,12 @@ describe("EngineRuntime", () => {
 					(event.kind.startsWith("model_") || event.kind.startsWith("tool_")),
 			),
 		).toEqual([]);
-		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+		await runtime.dispose();
+		const restarted = await openRuntime(options);
+		expect(await restarted.store.admitCommand(command, restarted.engineGeneration)).toMatchObject({
 			status: "replay",
 			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
 		});
-		await runtime.dispose();
 	}, 60_000);
 
 	it("applies a Stop compiled before Start binding using only the persisted source revision", async () => {
@@ -7747,12 +6516,15 @@ describe("EngineRuntime", () => {
 
 	it("disposes a newborn held child while its effect admission is returning", async () => {
 		const parentPrompt = Promise.withResolvers<boolean>();
+		const parentDispatched = Promise.withResolvers<void>();
 		const busyReached = Promise.withResolvers<void>();
 		const returnBusy = Promise.withResolvers<void>();
 		const prompts: string[] = [];
 		const { runtime, cwd } = await createRuntime(async (_session, input) => {
 			prompts.push(input);
-			return input === "parent work" ? parentPrompt.promise : true;
+			if (input !== "parent work") return true;
+			parentDispatched.resolve();
+			return parentPrompt.promise;
 		});
 		const parent = await runtime.start(
 			{
@@ -7767,19 +6539,19 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
+		// The parent pauses mid-prompt: its model admission is already settled, only the newborn child is held.
+		await withTimeout(parentDispatched.promise, 2000, "Parent prompt was not dispatched");
 		await runtime.pause({ ...parent, commandId: "dispose-held-parent-pause", initiator: { kind: "human" } });
 		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
-		const admission = spyOn(legacyEngineStore(runtime), "startModelEffect").mockImplementation(
-			async (target, effect) => {
-				try {
-					return await originalAdmission(target, effect);
-				} catch (error) {
-					busyReached.resolve();
-					await returnBusy.promise;
-					throw error;
-				}
-			},
-		);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(async (target, effect) => {
+			try {
+				return await originalAdmission(target, effect);
+			} catch (error) {
+				busyReached.resolve();
+				await returnBusy.promise;
+				throw error;
+			}
+		});
 		try {
 			const child = await runtime.start(
 				{
@@ -7821,6 +6593,75 @@ describe("EngineRuntime", () => {
 			returnBusy.resolve();
 			parentPrompt.resolve(true);
 			admission.mockRestore();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+		}
+	}, 15000);
+
+	it("disposes an agent whose model admission is parked behind a hold", async () => {
+		const prompts: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (_session, input) => {
+			prompts.push(input);
+			return true;
+		});
+		// A quiet store: no unrelated change will wake a parked admission, only the Engine itself can.
+		const quiet = spyOn(runtime.store, "changeSignal").mockReturnValue(Promise.withResolvers<void>().promise);
+		const held = Promise.withResolvers<void>();
+		const parked = Promise.withResolvers<void>();
+		let refused = false;
+		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(
+			async (target, effect, checkpoint) => {
+				await held.promise;
+				try {
+					return await originalAdmission(target, effect, checkpoint);
+				} catch (error) {
+					refused = true;
+					throw error;
+				}
+			},
+		);
+		// A refused admission re-reads the hold in its agent lane before it waits for a store change.
+		const originalIntent = runtime.store.intent.bind(runtime.store);
+		const intent = spyOn(runtime.store, "intent").mockImplementation(async agentInstanceId => {
+			const afterRefusal = refused;
+			const result = await originalIntent(agentInstanceId);
+			if (afterRefusal) parked.resolve();
+			return result;
+		});
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "parked-admission-start",
+					agentInstanceId: "parked-admission-agent",
+					agentInstanceRef: "grimoire://tasks/p/t/agents/parked-admission-agent",
+					executionId: "parked-admission-execution",
+					attemptId: "parked-admission-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "parked work",
+				},
+				profile,
+			);
+			// The hold settles before the first model admission, so that admission is refused and parks.
+			const paused = nextEngineEvent(runtime, "paused", started.attemptId);
+			await runtime.pause({ ...started, commandId: "parked-admission-pause", initiator: { kind: "human" } });
+			await withTimeout(paused, 2000, "Pause did not settle before model admission");
+			held.resolve();
+			await withTimeout(parked.promise, 2000, "Model admission did not park behind the hold");
+			// Only microtasks separate that re-read from the wait; one macrotask turn lets the admission reach it.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			await withTimeout(runtime.dispose({ closeStore: false }), 5000, "Parked admission blocked disposal");
+			expect(prompts).toEqual([]);
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "interrupted" });
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
+		} finally {
+			held.resolve();
+			admission.mockRestore();
+			intent.mockRestore();
+			quiet.mockRestore();
 			await runtime.dispose({ closeStore: false });
 			await runtime.store.close();
 		}
@@ -8907,7 +7748,7 @@ describe("EngineRuntime", () => {
 			const events = await runtime.store.pendingEvents();
 			const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
 			const modelEffect = await runtime.store.getEffect(modelEffectId);
-			const history = await runtime.sessionHistory(started.agentInstanceId);
+			const history = await nativeHistory(runtime, started.agentInstanceId);
 			expect(history.entries).toHaveLength(1);
 			expect(history.entries[0]).toMatchObject({ role: "assistant", stopReason: "error" });
 			expect(history.entries[0]).not.toHaveProperty("errorMessage");
@@ -9043,7 +7884,7 @@ console.log("alive");`,
 		expect((await run('new Error("unrelated failure")')).code).not.toBe(0);
 	}, 60000);
 
-	it("preserves terminal child history by default and honors explicit expiry policies", async () => {
+	it("preserves terminal child history by default and refuses explicit expiry policies", async () => {
 		const starts = new Map<string, number>();
 		const startAgent = async (runtime: EngineRuntime, cwd: string, id: string, input: string, child = true) => {
 			if (child) {
@@ -9087,11 +7928,13 @@ console.log("alive");`,
 			return true;
 		};
 		const cancelledPrompt = Promise.withResolvers<boolean>();
+		const cancelledDispatched = Promise.withResolvers<void>();
 		const preserved = await createRuntime(async (session, input, identity) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			if (input.startsWith("fail")) throw new Error("injected failed child");
-			if (input.startsWith("cancel")) return await cancelledPrompt.promise;
-			return true;
+			if (!input.startsWith("cancel")) return true;
+			cancelledDispatched.resolve();
+			return await cancelledPrompt.promise;
 		});
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-failed", "fail but retain child history");
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-completed", "complete and retain child history");
@@ -9119,6 +7962,8 @@ console.log("alive");`,
 			preserved.runtime.engineGeneration,
 		);
 		const cancelledStarted = await preserved.runtime.start(cancelledRequest, profile);
+		// Stop the child mid-prompt; a Stop before model admission never dispatches the prompt at all.
+		await withTimeout(cancelledDispatched.promise, 2000, "Cancelled child prompt was not dispatched");
 		await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
 		cancelledPrompt.resolve(true);
 		await preserved.runtime.drain();
@@ -9127,44 +7972,27 @@ console.log("alive");`,
 		expect((await preserved.runtime.store.getAttempt("attempt-child-local-cancelled-1"))?.state).toBe("cancelled");
 		await preserved.runtime.dispose();
 		const preservedRestart = await openRuntime(preserved.options);
-		expect(await preservedRestart.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
+		expect(await preservedRestart.sweepExpiredChildHistory()).toEqual({
 			expired: 0,
 			archived: 0,
 			deleted: 0,
 			retained: 0,
 		});
-		expect(await preservedRestart.sessionHistory("child-local-failed")).toMatchObject({
+		expect(await nativeHistory(preservedRestart, "child-local-failed")).toMatchObject({
 			entries: [{ role: "user", text: "fail but retain child history" }],
 		});
-		expect(await preservedRestart.sessionHistory("child-local-completed")).toMatchObject({
+		expect(await nativeHistory(preservedRestart, "child-local-completed")).toMatchObject({
 			entries: [{ role: "user", text: "complete and retain child history" }],
 		});
-		expect(await preservedRestart.sessionHistory("child-local-cancelled")).toMatchObject({
+		expect(await nativeHistory(preservedRestart, "child-local-cancelled")).toMatchObject({
 			entries: [{ role: "user", text: "cancel but retain child history" }],
 		});
 		await preservedRestart.dispose();
 
+		// Expiring retained child history is deferred for native storage; explicit policies refuse.
 		const local = await createRuntime(recordPrompt, { childHistoryRetention: "off" });
-		await startAgent(local.runtime, local.cwd, "child-off", "delete locally");
-		await startAgent(local.runtime, local.cwd, "child-off", "ordinary continuation", false);
-		expect(await local.runtime.sessionHistory("child-off")).toMatchObject({
-			entries: [{ role: "user", text: "ordinary continuation" }],
-		});
+		await expect(local.runtime.sweepExpiredChildHistory()).rejects.toMatchObject({ code: "invalid_request" });
 		await local.runtime.dispose();
-		const restarted = await openRuntime(local.options);
-		expect(await restarted.sessionHistory("child-off")).toMatchObject({
-			entries: [{ role: "user", text: "ordinary continuation" }],
-		});
-		expect(await restarted.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
-			expired: 1,
-			archived: 0,
-			deleted: 1,
-			retained: 0,
-		});
-		await expect(restarted.sessionHistory("child-off")).rejects.toMatchObject({ code: "history_expired" });
-		await expect(restarted.sessionHistory("unknown-child")).rejects.toMatchObject({ code: "agent_not_found" });
-		expect((await restarted.store.getBinding("child-off"))?.sessionFile).toBeUndefined();
-		await restarted.dispose();
 
 		const correlated = await createRuntime(recordPrompt);
 		const firstCorrelation = {
@@ -9193,7 +8021,7 @@ console.log("alive");`,
 		await correlated.runtime.dispose();
 
 		const correlatedRestart = await openRuntime(correlated.options);
-		const correlatedHistory = await correlatedRestart.sessionHistory("history-correlated-agent");
+		const correlatedHistory = await nativeHistory(correlatedRestart, "history-correlated-agent");
 		expect(
 			correlatedHistory.entries.map(entry => [entry.text, entry.sourceCommandId, entry.clientMessageId]),
 		).toEqual([
@@ -9202,31 +8030,6 @@ console.log("alive");`,
 		]);
 		await correlatedRestart.dispose();
 
-		let archivedContent = "";
-		const grimoire = await createRuntime(recordPrompt, {
-			childHistoryRetention: "grimoire",
-			archiveChildHistory: async request => {
-				if (request.agentInstanceId === "child-archive-fail") throw new Error("archive unavailable");
-				archivedContent = request.content;
-			},
-		});
-		await startAgent(grimoire.runtime, grimoire.cwd, "child-archive-ok", "archive then delete");
-		await startAgent(grimoire.runtime, grimoire.cwd, "child-archive-fail", "retain for retry");
-		expect(await grimoire.runtime.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
-			expired: 2,
-			archived: 1,
-			deleted: 1,
-			retained: 1,
-		});
-		expect(archivedContent).toContain("archive then delete");
-		await expect(grimoire.runtime.sessionHistory("child-archive-ok")).rejects.toMatchObject({
-			code: "history_expired",
-		});
-		expect(await grimoire.runtime.sessionHistory("child-archive-fail")).toMatchObject({
-			entries: [{ role: "user", text: "retain for retry" }],
-		});
-		await grimoire.runtime.dispose();
-
 		const projection = await createRuntime(async session => {
 			session.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
 			session.sessionManager.appendMessage({ role: "user", content: "", timestamp: Date.now() });
@@ -9234,7 +8037,7 @@ console.log("alive");`,
 			return true;
 		});
 		await startAgent(projection.runtime, projection.cwd, "child-projection", "ignored");
-		const history = await projection.runtime.sessionHistory("child-projection");
+		const history = await nativeHistory(projection.runtime, "child-projection");
 		expect(history.entries.map(entry => entry.text)).toEqual(["first", "last"]);
 		expect(history.entries[1]?.parentEntryId).toBe(history.entries[0]?.entryId);
 		expect(history.leafEntryId).toBe(history.entries[1]?.entryId);

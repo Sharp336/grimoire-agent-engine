@@ -25,12 +25,13 @@ import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
+import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
 
-describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
+describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEngineAdapter", () => {
+	bindTestsToStorageWorker();
 	let tempDir: string | undefined;
 
 	afterEach(() => {
@@ -68,9 +69,10 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		let adapter: NatsEngineAdapter | undefined;
 		try {
 			await runtime.store.admitCommand(identity, runtime.engineGeneration);
+			// Beyond one live change, below one storage write: the receipt is retained whole but projected bounded.
 			await runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
 				outcome: "applied",
-				detail: { text: "legacy".repeat(1_400_000) },
+				detail: { text: "legacy".repeat(20_000) },
 			});
 			server = await startEngineControlQueryServer(options);
 			adapter = await NatsEngineAdapter.connect(options);
@@ -78,7 +80,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			const receipt = await native.request("command", { command });
 			expect(receipt).toEqual({
 				outcome: "applied",
-				detail: { partial: true, unavailable: "legacy_result_exceeds_projection_limit" },
+				detail: { partial: true, unavailable: "result_exceeds_projection_limit" },
 			});
 			expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThan(runtimeLimits.liveChangeBytes);
 			expect(
@@ -346,173 +348,6 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		}
 	}, 30000);
 
-	it("commits only the broker acknowledged prefix and deduplicates replay after delivery transaction failure", async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-delivery-${Snowflake.next()}-`));
-		const broker = await startNatsServer(tempDir);
-		const databasePath = path.join(tempDir, "engine.sqlite");
-		const runtime = await EngineRuntime.create({ databasePath });
-		const adapter = await NatsEngineAdapter.connect({
-			runtime,
-			deviceId: "delivery-device",
-			engineId: "delivery-engine",
-			servers: broker.url,
-			authorizeCommand: () => {},
-			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ profileDigest: "delivery-profile", spawns: "" }),
-		});
-		const client = await connect({ servers: broker.url });
-		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
-		try {
-			const manager = await jetstreamManager(client);
-			const sink = `nats:${adapter.deviceRoute}:${adapter.engineRoute}`;
-			const append = () =>
-				runtime.store.appendEvent({
-					causationCommandId: "delivery-command",
-					agentInstanceId: "delivery-agent",
-					executionId: "delivery-execution",
-					attemptId: "delivery-attempt",
-					bindingId: "delivery-binding",
-					engineGeneration: runtime.engineGeneration,
-					bindingGeneration: 1,
-					authorityGeneration: 1,
-					kind: "trace_reasoning",
-					payload: { state: "completed" },
-				});
-			const first = await Promise.all([append(), append(), append()]);
-			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: 1, discard: DiscardPolicy.New });
-			await expect(adapter.flushEvents()).rejects.toThrow();
-			expect((await runtime.store.pendingEventsForSink(sink)).events.map(event => event.eventId)).toEqual(
-				first.slice(1).map(event => event.eventId),
-			);
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(1);
-			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: -1, discard: DiscardPolicy.Old });
-			await adapter.flushEvents();
-			expect((await runtime.store.pendingEventsForSink(sink)).events).toEqual([]);
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(3);
-
-			const second = await Promise.all([append(), append(), append()]);
-			await inspect.unsafe(`CREATE TRIGGER reject_delivery_batch BEFORE INSERT ON engine_event_deliveries
-				WHEN NEW.event_id=${second[1].eventId} BEGIN SELECT RAISE(ABORT, 'delivery commit failed'); END`);
-			await expect(adapter.flushEvents()).rejects.toThrow("delivery commit failed");
-			// All three broker ACKs happened, but the whole SQLite marking group rolled back.
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(6);
-			expect((await runtime.store.pendingEventsForSink(sink)).events.map(event => event.eventId)).toEqual(
-				second.map(event => event.eventId),
-			);
-			await inspect.unsafe("DROP TRIGGER reject_delivery_batch");
-			await adapter.flushEvents();
-			expect((await runtime.store.pendingEventsForSink(sink)).events).toEqual([]);
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(6);
-			expect(
-				(await runtime.store.pendingEventsForSink("independent-sink")).events.map(event => event.eventId),
-			).toEqual([...first, ...second].map(event => event.eventId));
-
-			// A notification arriving after an empty read but before the drain returns
-			// still wakes the existing flush, without one pending promise per event.
-			const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
-			const emptyRead = Promise.withResolvers<void>();
-			const releaseRead = Promise.withResolvers<void>();
-			let fence = true;
-			runtime.store.pendingEventsForSink = async (...args) => {
-				const events = await pending(...args);
-				if (fence && events.scannedRecords === 0) {
-					fence = false;
-					emptyRead.resolve();
-					await releaseRead.promise;
-				}
-				return events;
-			};
-			try {
-				const draining = adapter.flushEvents();
-				await emptyRead.promise;
-				await append();
-				for (let i = 0; i < 1000; i++) adapter.wakeEvents();
-				releaseRead.resolve();
-				await draining;
-				await waitFor(async () => (await pending(sink)).events.length === 0);
-				expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(7);
-			} finally {
-				releaseRead.resolve();
-				runtime.store.pendingEventsForSink = pending;
-			}
-		} finally {
-			await inspect.end();
-			await client.drain();
-			await adapter.dispose();
-			await runtime.dispose();
-			broker.process.kill();
-			await broker.process.exited;
-		}
-	}, 30000);
-
-	it("drains sparse holes through bounded delivered pages and keeps a warm sink at its tail", async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-prefix-${Snowflake.next()}-`));
-		const broker = await startNatsServer(tempDir);
-		const databasePath = path.join(tempDir, "engine.sqlite");
-		const runtime = await EngineRuntime.create({ databasePath });
-		const adapter = await NatsEngineAdapter.connect({
-			runtime,
-			deviceId: "prefix-device",
-			engineId: "prefix-engine",
-			servers: broker.url,
-			authorizeCommand: () => {},
-			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ profileDigest: "prefix-profile", spawns: "" }),
-		});
-		const client = await connect({ servers: broker.url });
-		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
-		const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
-		const reads: Array<{ after: number; scanned: number }> = [];
-		try {
-			const sink = `nats:${adapter.deviceRoute}:${adapter.engineRoute}`;
-			await inspect.unsafe(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1000)
-				INSERT INTO engine_event_outbox(event_id,seq,causation_command_id,agent_instance_id,execution_id,
-				attempt_id,binding_id,engine_generation,binding_generation,authority_generation,kind,payload,created_at)
-				SELECT n,n,'prefix-command','prefix-agent','prefix-execution','prefix-attempt','prefix-binding',1,1,1,
-				'trace_reasoning','{"state":"completed"}',0 FROM ids`);
-			await inspect.unsafe(
-				`INSERT INTO engine_event_deliveries(event_id,sink_id,state,attempts,delivered_at,updated_at)
-				SELECT event_id,?,'delivered',1,0,0 FROM engine_event_outbox WHERE event_id NOT IN (37,989)`,
-				[sink],
-			);
-			runtime.store.pendingEventsForSink = async (...args) => {
-				const page = await pending(...args);
-				reads.push({ after: args[2] ?? 0, scanned: page.scannedRecords });
-				return page;
-			};
-			await adapter.flushEvents();
-			expect(reads.map(read => read.after)).toEqual(Array.from({ length: 11 }, (_, i) => i * 100));
-			expect(reads.every(read => read.scanned <= 100)).toBe(true);
-			const manager = await jetstreamManager(client);
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(2);
-			reads.length = 0;
-			await adapter.flushEvents();
-			expect(reads).toEqual([{ after: 1000, scanned: 0 }]);
-			await runtime.store.appendEvent({
-				causationCommandId: "warm-command",
-				agentInstanceId: "warm-agent",
-				executionId: "warm-execution",
-				attemptId: "warm-attempt",
-				bindingId: "warm-binding",
-				engineGeneration: runtime.engineGeneration,
-				bindingGeneration: 1,
-				authorityGeneration: 1,
-				kind: "accepted",
-			});
-			await adapter.flushEvents();
-			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(3);
-			expect(reads.every(read => read.after >= 1000)).toBe(true);
-		} finally {
-			runtime.store.pendingEventsForSink = pending;
-			await inspect.end();
-			await client.drain();
-			await adapter.dispose();
-			await runtime.dispose();
-			broker.process.kill();
-			await broker.process.exited;
-		}
-	}, 30000);
-
 	it("runs two agent command routes, event outbox and an offline durable mailbox", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
@@ -637,7 +472,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				"attempt.completed",
 			]);
 			expect(dispatchCount).toBe(2);
-			expect(await runtime.sessionHistory("agent-a")).toMatchObject({
+			expect(await runtime.sessionHistoryPage("agent-a", "grimoire://tasks/grimoire/nats/agents/a")).toMatchObject({
 				entries: [
 					{
 						role: "user",
@@ -1134,7 +969,9 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				{ msgID: retainedFirst.commandId },
 			);
 			await waitFor(async () => (await runtime.store.getAttempt(retainedFirst.attemptId!))?.state === "completed");
-			const retainedSessionId = (await runtime.sessionHistory(retainedFirst.agentInstanceId)).sessionId;
+			const retainedHistory = (agentInstanceId: string) =>
+				runtime.sessionHistoryPage(agentInstanceId, "grimoire://tasks/grimoire/nats/agents/retained");
+			const retainedSessionId = (await retainedHistory(retainedFirst.agentInstanceId)).sessionId;
 			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd);
 			await js.publish(
 				adapter.commandSubject(retainedRejected.agentInstanceId, "start"),
@@ -1148,7 +985,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				payload: { code: "launch_failed" },
 			});
 			expect((retainedRejectedEvent?.payload as Record<string, unknown> | undefined)?.sessionState).toBeUndefined();
-			expect((await runtime.sessionHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
+			expect((await retainedHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
 
 			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd);
 			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
@@ -1469,6 +1306,136 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			);
 		} finally {
 			failing.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("takes back its own claim after a failed release instead of redelivering it as in progress forever", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-release-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		let dispatches = 0;
+		const failing = spyOn(runtime, "reconcile").mockImplementation(async () => {
+			dispatches++;
+			throw new Error("ENOENT: reconcile fixture storage is offline");
+		});
+		let releases = 0;
+		const release = spyOn(runtime.store, "releaseCommand").mockImplementation(async () => {
+			releases++;
+			throw new Error("release fixture storage is offline");
+		});
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
+			onError: () => {},
+			commandAttempts: 3,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			const consumer = `engine_${adapter.engineRoute}`;
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-release-failing",
+				op: "reconcile",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: "agent-release-failing",
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {},
+			};
+			await js.publish(adapter.commandSubject(command.agentInstanceId, "reconcile"), JSON.stringify(command), {
+				msgID: "delivery-1",
+			});
+			// Every failed release leaves the claim on this generation; the next delivery is the next attempt.
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
+				return dispatches === 3 && info.num_pending === 0 && info.num_ack_pending === 0;
+			}, 15_000);
+			expect(releases).toBe(2);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: {
+					outcome: "rejected",
+					detail: {
+						code: "command_failed",
+						message: "Command failed after 3 attempts: ENOENT: reconcile fixture storage is offline",
+					},
+				},
+			});
+		} finally {
+			failing.mockRestore();
+			release.mockRestore();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("ends a peer message that keeps failing after the bounded delivery budget", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-mailbox-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+		});
+		let deliveries = 0;
+		const delivering = spyOn(runtime, "deliverPeerMessage").mockImplementation(async message => {
+			deliveries++;
+			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+		});
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
+			commandAttempts: 2,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			await adapter.provisionMailbox("agent-c");
+			const message = {
+				schema: "grimoire.agent.message.v1",
+				messageId: "message-failing",
+				fromAgentInstanceId: "agent-a",
+				toAgentInstanceId: "agent-c",
+				authorityGeneration: 1,
+				sentAt: Date.now(),
+				kind: "text",
+				payload: { body: "never delivered" },
+			};
+			await js.publish(adapter.messageSubject("agent-a", "agent-c"), JSON.stringify(message), {
+				msgID: message.messageId,
+			});
+			// Work-queue retention drops the message once it is terminated; a redelivered one stays in the stream.
+			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 0, 15_000);
+			expect(deliveries).toBe(2);
+		} finally {
+			delivering.mockRestore();
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();

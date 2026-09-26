@@ -8,9 +8,9 @@
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
-export const STORAGE_PROTOCOL_REVISION = 12 as const;
+export const STORAGE_PROTOCOL_REVISION = 18 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:3bb42913852ed0aae8bffd2734a70510360a1c403fd2af9a57effb438114e681" as const;
+	"sha256:28096f927ece6cdddf6c64fda1e823f89d042607c74e3edcb94628c0153007f9" as const;
 
 export type StorageOperation =
 	| "write"
@@ -148,7 +148,11 @@ export type StorageRuntimeIndex =
 	| "identity_root"
 	| "event_lifecycle"
 	| "attempt_all"
-	| "kind_primary";
+	| "kind_primary"
+	| "delete_pending"
+	| "attempt_open"
+	| "command_received"
+	| "inbox_pending";
 
 export interface StorageRuntimeQuery {
 	requestId: string;

@@ -1,6 +1,5 @@
 import { expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { StreamAdmissionLimits } from "@oh-my-pi/pi-ai/utils/stream-admission";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -8,6 +7,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
+
+const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
+const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
 
 const frame = (content: string, finishReason: string | null = null) =>
 	`data: ${JSON.stringify({
@@ -65,7 +68,11 @@ async function runFlood(
 			return new Response(body, { headers: { "content-type": "text/event-stream" } });
 		},
 	});
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-delta-coalescing-"));
+	const root = await fs.mkdtemp(path.join(runRoot!, "delta-coalescing-"));
+	const worker = await startStorageWorker(executable!, root, `${crypto.randomUUID()}${crypto.randomUUID()}`, 1);
+	const savedEnv = { binding: process.env.GRIMOIRE_STORAGE_BINDING, blobs: process.env.PI_BLOBS_DIR };
+	process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
+	process.env.PI_BLOBS_DIR = storageBlobsDir(root);
 	const cwd = path.join(root, "workspace");
 	const agentDir = path.join(root, "agent");
 	await fs.mkdir(cwd);
@@ -139,7 +146,10 @@ async function runFlood(
 				event.kind === "message_updated" &&
 				event.payload?.stream === "assistant",
 		);
-		const history = await runtime.sessionHistory(started.agentInstanceId);
+		const history = await runtime.sessionHistoryPage(
+			started.agentInstanceId,
+			"grimoire://tasks/grimoire/flood/agents/flood",
+		);
 		const answer = history.entries
 			.filter(entry => entry.role === "assistant")
 			.flatMap(entry => entry.blocks ?? [])
@@ -150,34 +160,50 @@ async function runFlood(
 	} finally {
 		store.mockRestore();
 		await runtime.dispose();
+		await worker.stop();
+		for (const [name, value] of [
+			["GRIMOIRE_STORAGE_BINDING", savedEnv.binding],
+			["PI_BLOBS_DIR", savedEnv.blobs],
+		] as const) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
 		auth.close();
 		server.stop(true);
 		await fs.rm(root, { recursive: true, force: true });
 	}
 }
 
-it("streams thousands of deltas past stalled storage into few durable updates with the exact text", async () => {
-	// Three times the stream admission event budget; one durable write per delta cannot keep up.
-	const { deltas, attempt, updates, answer } = await runFlood(Array(60).fill(50), { stallAfterFirstUpdate: true });
-	expect(attempt?.state, attempt?.cause ?? undefined).toBe("completed");
-	// The first delta is durable on its own and at once; the rest are coalesced, not written per delta.
-	expect(updates[0]?.payload?.text).toBe(deltas[0]);
-	expect(updates.length).toBeLessThan(deltas.length / 100);
-	expect(updates.map(event => String(event.payload?.text)).join("")).toBe(deltas.join(""));
-	expect(updates.at(-1)?.payload?.status).toBe("settled");
-	expect(answer).toBe(deltas.join(""));
-}, 30_000);
+it.skipIf(!(executable && runRoot))(
+	"streams thousands of deltas past stalled storage into few durable updates with the exact text",
+	async () => {
+		// Three times the stream admission event budget; one durable write per delta cannot keep up.
+		const { deltas, attempt, updates, answer } = await runFlood(Array(60).fill(50), { stallAfterFirstUpdate: true });
+		expect(attempt?.state, attempt?.cause ?? undefined).toBe("completed");
+		// The first delta is durable on its own and at once; the rest are coalesced, not written per delta.
+		expect(updates[0]?.payload?.text).toBe(deltas[0]);
+		expect(updates.length).toBeLessThan(deltas.length / 100);
+		expect(updates.map(event => String(event.payload?.text)).join("")).toBe(deltas.join(""));
+		expect(updates.at(-1)?.payload?.status).toBe("settled");
+		expect(answer).toBe(deltas.join(""));
+	},
+	90_000,
+);
 
-it("keeps the text already streamed when stream capacity is exceeded and interrupts the Attempt", async () => {
-	// The second network chunk crosses the provider event budget part-way through.
-	const { deltas, ends, attempt, updates, answer, publishedText } = await runFlood([20, 400], {
-		streamAdmissionLimits: { maxProviderEvents: 30 },
-	});
-	expect(attempt?.state).toBe("interrupted");
-	expect(attempt?.cause).toContain("maxProviderEvents");
-	// Everything the user already saw survives in history, including text from the chunk that overflowed.
-	expect(publishedText.startsWith(deltas.slice(0, ends[0]).join(""))).toBe(true);
-	expect(answer.startsWith(publishedText)).toBe(true);
-	expect(deltas.join("").startsWith(answer)).toBe(true);
-	expect(updates.at(-1)?.payload).toMatchObject({ status: "cancelled" });
-}, 30_000);
+it.skipIf(!(executable && runRoot))(
+	"keeps the text already streamed when stream capacity is exceeded and interrupts the Attempt",
+	async () => {
+		// The second network chunk crosses the provider event budget part-way through.
+		const { deltas, ends, attempt, updates, answer, publishedText } = await runFlood([20, 400], {
+			streamAdmissionLimits: { maxProviderEvents: 30 },
+		});
+		expect(attempt?.state).toBe("interrupted");
+		expect(attempt?.cause).toContain("maxProviderEvents");
+		// Everything the user already saw survives in history, including text from the chunk that overflowed.
+		expect(publishedText.startsWith(deltas.slice(0, ends[0]).join(""))).toBe(true);
+		expect(answer.startsWith(publishedText)).toBe(true);
+		expect(deltas.join("").startsWith(answer)).toBe(true);
+		expect(updates.at(-1)?.payload).toMatchObject({ status: "cancelled" });
+	},
+	90_000,
+);

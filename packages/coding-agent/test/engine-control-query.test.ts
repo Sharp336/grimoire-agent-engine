@@ -1,10 +1,10 @@
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { EngineBindingSnapshot } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 	ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS,
@@ -14,13 +14,45 @@ import {
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
-import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
+import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
+import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { SQL } from "bun";
-import { legacyEngineStore } from "./helpers/legacy-engine-store";
+import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
-describe("Engine Control + Query", () => {
+describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
+	bindTestsToStorageWorker();
 	let tempDir: string | undefined;
+
+	/** Complete a running Attempt on a durable native transcript: the owner settles completion only with one. */
+	async function completeNative(runtime: EngineRuntime, binding: EngineBindingSnapshot, event: EngineTransitionEvent) {
+		const familyId = `family-${binding.attemptId}`;
+		const client = runtime.store.storageClient;
+		await client.write({
+			operationId: `transcript-${binding.attemptId}`,
+			familyId,
+			generationId: "main",
+			firstSeq: 1,
+			entries: [
+				{
+					entryId: "leaf",
+					parentId: null,
+					kind: "message",
+					payload: { type: "message", message: { role: "assistant", content: "done" } },
+				},
+			],
+			durability: "required",
+			dependencies: [],
+		});
+		await runtime.store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [event], {
+			transcriptCheckpoint: {
+				sessionId: familyId,
+				sessionPath: `native:${familyId}/main`,
+				leafEntryId: "leaf",
+				byteBoundary: 0,
+				native: { familyId, generationId: "main", throughSeq: 1, incarnation: client.incarnation },
+			},
+		});
+	}
 
 	afterEach(() => {
 		if (tempDir) removeSyncWithRetries(tempDir);
@@ -70,98 +102,9 @@ describe("Engine Control + Query", () => {
 			expect(
 				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
 			).toEqual({ removed: true });
-			await assert.rejects(client.request("attachments.stage", request), /removed/);
+			// Removal discards the staged bytes: the upload can only start over at offset zero.
+			await assert.rejects(client.request("attachments.stage", { ...request, offset: bytes.length }), /offset zero/);
 			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
-		} finally {
-			await server.close();
-			await runtime.dispose();
-		}
-	});
-
-	it("reclaims actual database bytes and resyncs snapshot cursors without losing events or retained history", async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reclaim-${Snowflake.next()}-`));
-		const databasePath = path.join(tempDir, "engine.sqlite");
-		const runtime = await EngineRuntime.create({ databasePath });
-		const server = await startEngineControlQueryServer({
-			runtimeDir: tempDir,
-			runtime,
-			deviceId: "test-device",
-			engineId: "test-engine",
-			resolveLaunchProfile: async () => {
-				throw new Error("No model launches in storage test");
-			},
-		});
-		const client = new EngineControlQueryClient(tempDir);
-		const kept = path.join(tempDir, "kept.jsonl");
-		const removed = path.join(tempDir, "removed.jsonl");
-		const content = `${JSON.stringify({ type: "session", id: "kept", version: 3 })}\n`;
-		try {
-			for (const id of ["a", "b"]) {
-				const binding = {
-					bindingId: `binding-${id}`,
-					commandId: `start-${id}`,
-					agentInstanceId: `agent-${id}`,
-					executionId: `execution-${id}`,
-					attemptId: `attempt-${id}`,
-					engineAgentId: `Engine-${id}`,
-					profileDigest: "test-profile",
-					state: "idle" as const,
-					engineGeneration: runtime.engineGeneration,
-					bindingGeneration: 1,
-					authorityGeneration: 1,
-				};
-				await runtime.store.putBinding(binding);
-				await runtime.store.putAttempt(binding, "completed");
-				await runtime.store.appendEvent({ ...binding, causationCommandId: `complete-${id}`, kind: "completed" });
-			}
-			await legacyEngineStore(runtime).sessionStorage.writeTextAtomic(kept, content);
-			await legacyEngineStore(runtime).sessionStorage.writeTextAtomic(
-				removed,
-				content + "x".repeat(4 * 1024 * 1024),
-			);
-			await legacyEngineStore(runtime).sessionStorage.unlink(removed);
-			await runtime.store.drain();
-			const fileBytes = () =>
-				fs.statSync(databasePath).size +
-				(fs.existsSync(`${databasePath}-wal`) ? fs.statSync(`${databasePath}-wal`).size : 0);
-			const before = fileBytes();
-			const page = (await client.request("snapshots.list", { limit: 1 })) as { nextCursor: string };
-			const events = (await client.request("events.list", { attemptId: "attempt-a" })) as { nextCursor: string };
-			const identity = await runtime.store.getStoreEpoch();
-			const result = await client.request("storage.reclaim");
-			const after = fileBytes();
-			expect(result).toEqual({
-				schema: "grimoire.engine.storage_reclaim.v1",
-				scope: "engine_database",
-				status: "completed",
-				beforeBytes: before,
-				afterBytes: after,
-				freedBytes: before - after,
-			});
-			expect(before - after).toBeGreaterThan(4 * 1024 * 1024);
-			expect(await runtime.store.getStoreEpoch()).toBe(identity);
-			expect(await legacyEngineStore(runtime).sessionStorage.readText(kept)).toBe(content);
-			expect(await client.request("snapshots.list", { cursor: page.nextCursor })).toMatchObject({
-				resyncRequired: true,
-				items: [],
-			});
-			expect(await client.request("snapshots.list")).toMatchObject({
-				resyncRequired: false,
-				items: [{ attemptId: "attempt-a" }, { attemptId: "attempt-b" }],
-			});
-			expect(
-				await client.request("events.list", { attemptId: "attempt-a", cursor: events.nextCursor }),
-			).toMatchObject({ resyncRequired: false });
-			expect((await runtime.store.pendingEvents()).map(event => event.attemptId)).toEqual([
-				"attempt-a",
-				"attempt-b",
-			]);
-			const database = new Database(databasePath, { readonly: true });
-			try {
-				expect(database.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
-			} finally {
-				database.close();
-			}
 		} finally {
 			await server.close();
 			await runtime.dispose();
@@ -171,6 +114,13 @@ describe("Engine Control + Query", () => {
 	it("serves authenticated durable commands and restart-safe oldest-first queries", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-query-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		// The owner projects Attempt events only for AgentInstances with a canonical ref, as every launch carries.
+		for (const id of ["agent-a", "agent-b", "agent-failed", "agent-cancelled"])
+			await runtime.store.registerAgent({
+				agentInstanceId: id,
+				agentInstanceRef: `grimoire://tasks/grimoire/control-query/agents/${id}`,
+				authorityGeneration: 2,
+			});
 		const binding = {
 			bindingId: "binding-a",
 			commandId: "start-a",
@@ -185,7 +135,7 @@ describe("Engine Control + Query", () => {
 			authorityGeneration: 2,
 		};
 		await runtime.store.putBinding(binding);
-		await runtime.store.putAttempt(binding, "completed");
+		await runtime.store.commitAttemptTransition(binding, "running", [], { requireNew: true });
 		await runtime.store.appendEvent({
 			...binding,
 			causationCommandId: "trace-a",
@@ -193,8 +143,7 @@ describe("Engine Control + Query", () => {
 			payload: { state: "completed", reasoning: "must-not-leak" },
 		});
 		const full = "x".repeat(ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS + 20);
-		await runtime.store.appendEvent({
-			...binding,
+		await completeNative(runtime, binding, {
 			causationCommandId: "complete-a",
 			kind: "completed",
 			payload: { assistantFinal: full, transcriptRef: "history://Engine-a" },
@@ -210,9 +159,8 @@ describe("Engine Control + Query", () => {
 			profileDigest: "profile-b",
 		};
 		await runtime.store.putBinding(secondBinding);
-		await runtime.store.putAttempt(secondBinding, "completed");
-		await runtime.store.appendEvent({
-			...secondBinding,
+		await runtime.store.commitAttemptTransition(secondBinding, "running", [], { requireNew: true });
+		await completeNative(runtime, secondBinding, {
 			causationCommandId: "complete-b",
 			kind: "completed",
 			payload: { assistantFinal: "second" },
@@ -440,68 +388,6 @@ describe("Engine Control + Query", () => {
 			attemptId: received.attemptId,
 			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
 		});
-		runtime.sessionHistory = async agentInstanceId => ({
-			sessionId: `session-${agentInstanceId}`,
-			leafEntryId: "entry-assistant",
-			sessionLeafEntryId: "entry-hidden-canonical",
-			entries: [
-				{
-					entryId: "entry-user",
-					parentEntryId: null,
-					role: "user",
-					text: "question",
-					createdAt: "2026-09-03T10:00:00Z",
-					textTruncated: false,
-				},
-				{
-					entryId: "entry-assistant",
-					parentEntryId: "entry-user",
-					role: "assistant",
-					text: "answer",
-					createdAt: "2026-09-03T10:01:00Z",
-					textTruncated: false,
-				},
-			],
-			activityCompleteness: "legacy_messages_only" as const,
-		});
-		runtime.sessionArchive = async (agentInstanceId, expectedContentHash, offset = 0, limit = 24_000) => ({
-			schema: "grimoire.engine.session_archive.v1",
-			agentInstanceId,
-			sessionId: `session-${agentInstanceId}`,
-			payloadSchema: "grimoire.engine.native_session_checkpoint.v1",
-			contentHash: expectedContentHash ?? `sha256:${"a".repeat(64)}`,
-			byteLength: 4,
-			offset,
-			nextOffset: null,
-			contentBase64: Buffer.from("test")
-				.subarray(offset, offset + limit)
-				.toString("base64"),
-		});
-		let replaceRetainedBinding: boolean | undefined;
-		runtime.sessionArchiveVerify = async (received, contentHash) => {
-			expect(received).toEqual(target);
-			expect(contentHash).toBe(`sha256:${"a".repeat(64)}`);
-			return {
-				schema: "grimoire.engine.session_archive_verification.v1",
-				agentInstanceId: received.agentInstanceId,
-				sessionId: "session-a",
-				contentHash,
-				byteLength: 4,
-				sourceBytes: 3,
-				sourceRetired: false,
-				freedBytes: 0,
-			};
-		};
-		runtime.sessionRestoreStage = async request => {
-			replaceRetainedBinding = request.replaceRetainedBinding;
-			return {
-				restoreId: "b".repeat(64),
-				contentHash: request.contentHash,
-				totalBytes: request.totalBytes,
-				nextOffset: request.offset + Buffer.from(request.contentBase64, "base64").byteLength,
-				complete: true,
-			};
-		};
 		runtime.listInbox = async received => [
 			{
 				queueId: "queue-a",
@@ -547,111 +433,23 @@ describe("Engine Control + Query", () => {
 		expect(await client.request("session.usage", target)).toMatchObject({
 			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
 		});
-		expect(
-			await client.request("session.archive", {
-				agentInstanceId: "agent-a",
-				expectedContentHash: `sha256:${"a".repeat(64)}`,
-				offset: 1,
-				limit: 2,
-			}),
-		).toMatchObject({
-			schema: "grimoire.engine.session_archive.v1",
-			agentInstanceId: "agent-a",
-			contentBase64: Buffer.from("es").toString("base64"),
-		});
-		expect(
-			await client.request("session.restore.stage", {
-				agentInstanceId: "agent-restored",
-				agentInstanceRef: "grimoire://tasks/project/task/agents/agent-restored",
-				authorityGeneration: 4,
-				contentHash: `sha256:${"b".repeat(64)}`,
-				totalBytes: 4,
-				offset: 0,
-				contentBase64: Buffer.from("test").toString("base64"),
-				replaceRetainedBinding: true,
-			}),
-		).toMatchObject({ restoreId: "b".repeat(64), nextOffset: 4, complete: true });
-		expect(replaceRetainedBinding).toBe(true);
-		expect(
-			await client.request("session.archive.verify", { ...target, contentHash: `sha256:${"a".repeat(64)}` }),
-		).toMatchObject({ sourceBytes: 3, sourceRetired: false, freedBytes: 0 });
-		await expect(
-			client.request("session.archive.verify", {
-				agentInstanceId: "agent-a",
-				contentHash: `sha256:${"a".repeat(64)}`,
-			}),
-		).rejects.toMatchObject({ code: "invalid_request" });
-		const restoreSelection = {
-			agentInstanceId: "agent-restored",
-			agentInstanceRef: "grimoire://tasks/project/task/agents/agent-restored",
-			authorityGeneration: 4,
-			restoreId: "b".repeat(64),
-			contentHash: `sha256:${"b".repeat(64)}`,
-			limit: 1,
-		};
-		const restoredPage = (await client.request("session.restore.history", restoreSelection)) as {
-			previousCursor: string;
-		};
-		expect(restoredPage).toMatchObject({ entries: [{ entryId: "entry-assistant" }], hasMore: true });
-		expect(
-			await client.request("session.restore.history", {
-				...restoreSelection,
-				cursor: restoredPage.previousCursor,
-			}),
-		).toMatchObject({ entries: [{ entryId: "entry-user" }], hasMore: false });
-		expect(
-			await client.request("session.restore.history", {
-				...restoreSelection,
-				authorityGeneration: 5,
-				cursor: restoredPage.previousCursor,
-			}),
-		).toMatchObject({ entries: [], resyncRequired: true });
-		expect(
-			await client.request("session.restore.history", {
-				...restoreSelection,
-				contentHash: `sha256:${"c".repeat(64)}`,
-				cursor: restoredPage.previousCursor,
-			}),
-		).toMatchObject({ entries: [], resyncRequired: true });
-		const newestHistory = (await client.request("session.history", {
-			agentInstanceId: "agent-a",
-			limit: 1,
-		})) as {
-			entries: Array<{ entryId: string }>;
-			previousCursor: string;
-			hasMore: boolean;
-			sessionLeafEntryId: string;
-		};
-		expect(newestHistory).toMatchObject({
-			entries: [{ entryId: "entry-assistant" }],
-			leafEntryId: "entry-assistant",
-			sessionLeafEntryId: "entry-hidden-canonical",
-			hasMore: true,
-			resyncRequired: false,
-			activityCompleteness: "legacy_messages_only",
-		});
-		expect(
-			await client.request("session.history", {
-				agentInstanceId: "agent-a",
-				cursor: newestHistory.previousCursor,
-				limit: 1,
-			}),
-		).toMatchObject({
-			entries: [{ entryId: "entry-user" }],
-			sessionLeafEntryId: "entry-hidden-canonical",
-			hasMore: false,
-			resyncRequired: false,
-		});
-		expect(
-			await client.request("session.history", {
-				agentInstanceId: "agent-b",
-				cursor: newestHistory.previousCursor,
-			}),
-		).toMatchObject({
-			entries: [],
-			sessionLeafEntryId: "entry-hidden-canonical",
-			resyncRequired: true,
-		});
+		// Archive, restore and reclaim routes stay addressable and refuse in native storage.
+		for (const method of [
+			"session.archive",
+			"session.archive.verify",
+			"session.archive.retire",
+			"session.archive.restore",
+			"session.restore.stage",
+			"session.restore.history",
+			"storage.reclaim",
+		] as const) {
+			expect(
+				await client.request(method, { ...target, contentHash: `sha256:${"a".repeat(64)}` }).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "invalid_request" });
+		}
 		expect(await client.request("inbox.list", target)).toMatchObject({
 			items: [{ queueId: "queue-a", sourceType: "user", deliveryPayload: "edited" }],
 		});
@@ -823,13 +621,14 @@ describe("Engine Control + Query", () => {
 			bindingGeneration: 1,
 		};
 		await runtime.store.commitAttemptTransition(binding, "running", [{ kind: "running" }]);
-		const sql = new SQL(`sqlite:${path.join(tempDir, "engine.sqlite").replaceAll("\\", "/")}`);
-		await sql.unsafe(
-			`WITH RECURSIVE children(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM children WHERE n<?)
-			INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at)
-			SELECT 'budget-child-'||n,'grimoire://tasks/grimoire/control-budget/agents/child-'||n,'budget-root','owner',1,1,1 FROM children`,
-			[runtimeLimits.branchControlRecords],
-		);
+		for (let n = 1; n <= runtimeLimits.branchControlRecords; n++)
+			await runtime.store.registerAgent({
+				agentInstanceId: `budget-child-${n}`,
+				agentInstanceRef: `grimoire://tasks/grimoire/control-budget/agents/child-${n}`,
+				parentAgentInstanceId: "budget-root",
+				principalId: "owner",
+				authorityGeneration: 1,
+			});
 		let profileCalls = 0;
 		const server = await startEngineControlQueryServer({
 			runtime,
@@ -876,28 +675,27 @@ describe("Engine Control + Query", () => {
 				target: command.browserTarget,
 				error: { code: "restore_budget" },
 			});
-			expect(
-				(await sql.unsafe("SELECT SUM(intent_revision) AS revision FROM engine_agent_identity"))[0]?.revision,
-			).toBe(0);
-			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
-			expect(await sql.unsafe("SELECT * FROM engine_effects")).toHaveLength(0);
-			expect(await sql.unsafe("SELECT kind FROM engine_event_outbox WHERE kind='holds_changed'")).toHaveLength(0);
+			expect(await runtime.store.intent(binding.agentInstanceId)).toMatchObject({ intentRevision: 0 });
+			expect(await runtime.store.intent("budget-child-1")).toMatchObject({ intentRevision: 0, holds: [] });
+			expect((await runtime.store.pendingEvents(1000)).filter(event => event.kind === "holds_changed")).toHaveLength(
+				0,
+			);
 			expect(profileCalls).toBe(0);
-			await client.request("command", { command }).then(
+			// A retry replays the durable rejection instead of applying the command.
+			const retried = await client.request("command", { command }).then(
 				() => null,
 				(error: unknown) => error,
 			);
-			const records = await sql.unsafe("SELECT command_id,state FROM engine_commands WHERE command_id=?", [
-				command.commandId,
-			]);
-			expect(records).toHaveLength(1);
-			expect(records[0]).toMatchObject({ command_id: command.commandId, state: "settled" });
+			expect(retried).toMatchObject({ message: (denied as Error).message });
+			expect(
+				await client.request("runtime.command.get", { principalId: "owner", commandId: command.commandId }),
+			).toMatchObject({ stage: "rejected", error: { code: "restore_budget" } });
+			expect(await runtime.store.intent(binding.agentInstanceId)).toMatchObject({ intentRevision: 0 });
 		} finally {
 			await server.close();
-			await sql.end();
 			await runtime.dispose();
 		}
-	});
+	}, 120_000);
 	it("serves an exact paused tool baseline through the native request validator", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
@@ -1074,7 +872,7 @@ describe("Engine Control + Query", () => {
 		}
 	});
 
-	it("publishes retention config and streams a temporary compressed archive through the core endpoint", async () => {
+	it("publishes retention config and resolves the core endpoint", async () => {
 		for (const input of [
 			"https://grimoire.example",
 			"https://grimoire.example/mcp",
@@ -1109,37 +907,6 @@ describe("Engine Control + Query", () => {
 				{ status: "running" },
 			),
 		).toMatchObject({ childHistoryTtlMinutes: 90, childHistoryRetention: "grimoire" });
-
-		const content = '{"type":"session","id":"session-a"}\n';
-		let imported: Record<string, unknown> | undefined;
-		let sourcePath: string | undefined;
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-history-archive-${Snowflake.next()}-`));
-		const rpc = {
-			call: async (method: string, params: Record<string, unknown>) => {
-				expect(method).toBe("grimoire_artifact_import");
-				imported = params;
-				sourcePath = String(params.source_path);
-				const bytes = fs.readFileSync(sourcePath);
-				expect(Buffer.from(Bun.gunzipSync(bytes)).toString("utf8")).toBe(content);
-				return {
-					artifact: {
-						artifact_ref: "gctx:archive",
-						content_hash: `sha256:${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}`,
-						size_bytes: bytes.byteLength,
-					},
-				};
-			},
-		};
-		await archiveChildHistory(rpc as never, tempDir, {
-			agentInstanceId: "child-a",
-			agentInstanceRef: "grimoire://tasks/grimoire/task-a/agents/child-a",
-			attemptId: "attempt-a",
-			terminalAt: Date.now(),
-			content,
-		});
-		expect(imported?.content_base64).toBeUndefined();
-		expect(sourcePath).toBeDefined();
-		expect(fs.existsSync(sourcePath!)).toBeFalse();
 	});
 });
 

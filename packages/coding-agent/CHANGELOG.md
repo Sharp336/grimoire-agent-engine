@@ -6,18 +6,25 @@
 
 - Optional voice runtime and associated native audio bindings; automatic Codex credit redemption, excess uploaders, Ruby/Julia eval, built-in opinionated rules, and terminal animation extras.
 - Removed Advisor background reviews and Prewalk while preserving PlanYolo and normal agents.
+- `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
 
 - Managed (`--status-file`) logins for loopback OAuth providers with paste-code fallback (Anthropic, Z.ai, OpenRouter) stay in `authorization_required` until the loopback callback, instead of failing with `oauth_login_failed` because the headless flow had no interactive paste prompt.
 - Python shell, Bash, and pip subprocesses no longer open extra console windows on Windows.
 - Engine agents retain their canonical display names and delegation hints without changing chat identity or routing.
+- A native Engine turn with eight or more parallel tool calls, such as eight `read` calls at once, no longer fails every call and the Attempt with `Storage client admission budget exhausted`: a storage write, barrier or control read that finds its lane full now waits, oldest first, for a slot until its deadline, as reads already did. Only a request that never got a slot is refused, and it was never sent, so the refusal cannot fence the client.
+- Parallel tool calls in one native Engine turn, such as launching six children at once, no longer fail with `Runtime mutation admission exhausted` beyond the fourth: a chat's state changes wait their turn, and the Engine refuses them only after a chat or the Engine has queued far more than any real turn.
 - Native Engine history stores images as `blob:sha256:` references in the contour body root (`PI_BLOBS_DIR`) instead of base64, restores them when a chat is opened, forked or edited, and admits large image or text messages that the 8 MiB entry budget used to reject.
 - A native Engine chat reopened after an unclean stop now confirms writes that were applied but not yet durable, so its next message follows them instead of failing with `write does not follow accepted prefix`.
 - After an Engine restart the model can read a chat's original attachments again; the read resolves them in the active context instead of requiring the full native history.
 - A native Engine Start that is refused before its Attempt exists, such as a queued wake with a file under a profile without `read`, no longer leaves a pending Start in the chat summary, so Stop and a new Start work again.
+- An Engine command whose claim could not be released after a failure is no longer redelivered as in progress until an Engine restart: the next delivery takes the claim back as a new attempt, so the command ends with a terminal failed receipt after its attempt budget.
+- A peer message that keeps failing to deliver is dropped after the same bounded delivery budget instead of being redelivered every second forever.
+- An Engine event committed together with its command settlement now projects that command as settled.
 - Long answers from fast models no longer stop with `Stream admission capacity exceeded: maxEvents`: the Engine persists the first streamed delta of each block at once and coalesces the rest into at most one durable update per 100 ms or 8 KiB, so model streaming no longer waits on storage for every token.
 - An answer interrupted by a stream capacity limit keeps the text already streamed in chat history instead of showing only the trace, and the overflow no longer escapes as an unhandled rejection that could stop the Engine.
+- A native Engine answer that hits the output length limit while thinking, when compaction cannot recover it, stays in chat history with its thinking and `stopReason: length` instead of vanishing behind `Full native history is not loaded` and a silently completed Attempt.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
 - Pause and Resume remain responsive while neighboring native sessions produce events.
 - Child agents start from a local assignment even when Grimoire is unavailable, retain their results across retries and restarts, and sync their lifecycle after reconnection.
@@ -26,6 +33,8 @@
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.
 
 - Agent tools no longer inherit private Grimoire transport credentials or provider binding keys from the Engine process.
+- Agent tools, including a nested `omp` started from bash, no longer inherit the Engine's contour body root (`PI_BLOBS_DIR`), so their image bodies stay in their own store instead of becoming ownerless bodies the storage worker reclaims.
+- The Engine publishes every body into a storage contour through one asynchronous protocol: an intent pins the body until the record that owns it is applied, and an abandoned or crashed publication leaves the body to the storage worker's reclaim instead of a completion marker written before the owner record.
 - An idle binding reused for a new Attempt now starts the AgentProfile maxChildren ceiling from zero instead of inheriting the previous Attempt's child launch count; failed launches still consume the allowance and the cap still holds within a single Attempt.
 
 ### Added

@@ -94,7 +94,6 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 		let runtime: EngineRuntime | undefined;
 		try {
 			runtime = await EngineRuntime.create(options);
-			expect(runtime.storageMode).toBe("native");
 			const parentAgentInstanceRef = `grimoire://tasks/grimoire/child-test/agents/parent-${crypto.randomUUID()}`;
 			const parentAgentInstanceId = engineAgentInstanceId(parentAgentInstanceRef);
 			await runtime.store.registerAgent({
@@ -163,7 +162,6 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			abort.abort();
 			expect(await pending).toMatchObject({ status: "cancelled" });
 			expect(calls).toBe(1);
-			expect(await Bun.file(options.databasePath).exists()).toBe(false);
 			await runtime.dispose();
 			runtime = undefined;
 			resolving = undefined;

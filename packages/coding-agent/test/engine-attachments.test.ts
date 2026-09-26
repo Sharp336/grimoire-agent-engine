@@ -1,14 +1,57 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type EngineAttachment, EngineAttachmentUploads } from "@oh-my-pi/pi-coding-agent/engine/runtime-attachments";
+import {
+	attachmentUploadKey,
+	type EngineAttachment,
+	EngineAttachmentUploads,
+} from "@oh-my-pi/pi-coding-agent/engine/runtime-attachments";
 import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
+import { RuntimeRecords, RuntimeTransaction } from "@oh-my-pi/pi-coding-agent/engine/runtime-records";
 import { BLOB_RANGE_BYTES, BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { withOriginalAttachmentNotices } from "@oh-my-pi/pi-coding-agent/session/original-attachments";
 import { collectPersistedBlobHashes } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { StorageClient } from "@oh-my-pi/pi-coding-agent/session/storage-client";
+import {
+	STORAGE_PROTOCOL_SCHEMA_HASH,
+	type StorageRuntimeKey,
+	type StorageRuntimeRecord,
+} from "@oh-my-pi/pi-coding-agent/session/storage-protocol";
 import { MAX_IMAGE_INPUT_BYTES } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+/** The Rocks runtime ledger as the storage owner applies it: exact rows, atomic puts and deletes. */
+class MemoryRecords extends RuntimeRecords {
+	readonly rows = new Map<string, StorageRuntimeRecord>();
+	constructor() {
+		super(
+			new StorageClient({
+				url: "http://127.0.0.1:1",
+				token: "test-only-not-a-credential",
+				incarnation: 1,
+				protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+			}),
+		);
+	}
+	override async getMany(keys: StorageRuntimeKey[]): Promise<StorageRuntimeRecord[]> {
+		return keys.map(({ kind, id }) =>
+			structuredClone(this.rows.get(`${kind}:${id}`) ?? { kind, id, revision: null, value: null }),
+		);
+	}
+	override async mutate<T>(_scope: string, work: (tx: RuntimeTransaction) => Promise<T>): Promise<T> {
+		const tx = new RuntimeTransaction(this, true);
+		const result = await work(tx);
+		const { puts, deletes } = tx.mutation();
+		for (const { kind, id, value } of puts) this.rows.set(`${kind}:${id}`, { kind, id, revision: 1, value });
+		for (const { kind, id } of deletes) this.rows.delete(`${kind}:${id}`);
+		return result;
+	}
+}
+
+function uploadsAt(root: string, blobs: BlobStore, records = new MemoryRecords()): EngineAttachmentUploads {
+	return new EngineAttachmentUploads(root, blobs, records);
+}
 
 function identity(bytes: Buffer, uploadId = "upload-a"): EngineAttachment {
 	return {
@@ -85,10 +128,7 @@ describe("Engine attachment admission", () => {
 
 	it("applies the cumulative model-image budget before materializing a batch of individually permitted uploads", async () => {
 		using temp = TempDir.createSync("@omp-image-batch-budget-");
-		const uploads = new EngineAttachmentUploads(
-			path.join(temp.path(), "uploads"),
-			new BlobStore(path.join(temp.path(), "blobs")),
-		);
+		const uploads = uploadsAt(path.join(temp.path(), "uploads"), new BlobStore(path.join(temp.path(), "blobs")));
 		const data = Buffer.alloc(MAX_IMAGE_INPUT_BYTES / 2 + 1, 1);
 		for (const uploadId of ["one", "two"]) {
 			const attachment = identity(data, uploadId);
@@ -112,7 +152,7 @@ describe("Engine attachment admission", () => {
 	it("checks image bytes again at delivery and keeps nonimage originals outside the model image payload", async () => {
 		using temp = TempDir.createSync("@omp-attachment-image-");
 		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
-		const uploads = new EngineAttachmentUploads(path.join(temp.path(), "uploads"), blobs);
+		const uploads = uploadsAt(path.join(temp.path(), "uploads"), blobs);
 		const png = Buffer.from(
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
 			"base64",
@@ -162,10 +202,7 @@ describe("Engine attachment admission", () => {
 
 	it("resolves only explicitly ordered uploads for one message, without partial success or caller mutation", async () => {
 		using temp = TempDir.createSync("@omp-attachment-message-");
-		const uploads = new EngineAttachmentUploads(
-			path.join(temp.path(), "uploads"),
-			new BlobStore(path.join(temp.path(), "blobs")),
-		);
+		const uploads = uploadsAt(path.join(temp.path(), "uploads"), new BlobStore(path.join(temp.path(), "blobs")));
 		const data = Buffer.from("retained attachment bytes");
 		for (const uploadId of ["first", "second", "unselected"]) {
 			await uploads.stage("alice", {
@@ -182,7 +219,9 @@ describe("Engine attachment admission", () => {
 		await expect(uploads.resolveMessage("message-b", { principalId: "alice", uploadIds: ["first"] })).rejects.toThrow(
 			"message",
 		);
-		await expect(uploads.resolveMessage("message-a", references)).rejects.toThrow("owner");
+		await expect(uploads.resolveMessage("message-a", references)).rejects.toMatchObject({
+			code: "attachment_expired",
+		});
 		await expect(
 			uploads.resolveMessage("message-a", { principalId: "alice", uploadIds: ["first", "first"] }),
 		).rejects.toThrow("duplicate");
@@ -206,7 +245,7 @@ describe("Engine attachment admission", () => {
 		await uploads.remove("alice", "second");
 		await expect(
 			uploads.resolveMessage("message-a", { principalId: "alice", uploadIds: ["first", "second"] }),
-		).rejects.toThrow("removed");
+		).rejects.toMatchObject({ code: "attachment_expired" });
 		expect(
 			(await uploads.resolveMessage("message-a", { principalId: "alice", uploadIds: ["first"] })).map(
 				attachment => attachment.uploadId,
@@ -214,17 +253,24 @@ describe("Engine attachment admission", () => {
 		).toEqual(["first"]);
 	});
 
-	it("resumes exact chunks after restart, deduplicates retries, and binds ready bytes to owner plus message", async () => {
+	it("resumes exact chunks after restart, keeps only the ready row once complete, and binds it to owner plus message", async () => {
 		using temp = TempDir.createSync("@omp-attachment-");
 		const root = path.join(temp.path(), "uploads");
 		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
-		let uploads = new EngineAttachmentUploads(root, blobs);
+		const records = new MemoryRecords();
+		let uploads = uploadsAt(root, blobs, records);
 		const data = Buffer.alloc(BLOB_RANGE_BYTES * 2 + 13, 71);
 		const attachment = identity(data);
 		const first = { ...attachment, offset: 0, contentBase64: data.subarray(0, BLOB_RANGE_BYTES).toString("base64") };
 		expect(await uploads.stage("alice", first)).toMatchObject({ complete: false, nextOffset: BLOB_RANGE_BYTES });
-		await expect(uploads.resolve("alice", "message-a", "upload-a")).rejects.toThrow("not ready");
-		uploads = new EngineAttachmentUploads(root, blobs);
+		// Pending is only `<root>/<key>/payload.bin`: no manifest, no row.
+		const [dir] = await fs.readdir(root);
+		expect(await fs.readdir(path.join(root, dir!))).toEqual(["payload.bin"]);
+		expect(records.rows.size).toBe(0);
+		await expect(uploads.resolve("alice", "message-a", "upload-a")).rejects.toMatchObject({
+			code: "attachment_expired",
+		});
+		uploads = uploadsAt(root, blobs, records);
 		expect(await uploads.stage("alice", first)).toMatchObject({ complete: false, nextOffset: BLOB_RANGE_BYTES });
 		const second = {
 			...attachment,
@@ -239,24 +285,45 @@ describe("Engine attachment admission", () => {
 		};
 		expect(await uploads.stage("alice", last)).toEqual({ attachment, nextOffset: data.length, complete: true });
 		expect(await uploads.stage("alice", last)).toEqual({ attachment, nextOffset: data.length, complete: true });
+		// Ready is only the Rocks row that owns the linked body; the upload directory is gone.
+		expect(await fs.readdir(root)).toEqual([]);
+		expect([...records.rows.values()]).toEqual([
+			{
+				kind: "metadata",
+				id: `blob-upload:${dir}`,
+				revision: 1,
+				value: {
+					subtype: "blob_upload",
+					state: "ready",
+					owner_hash: new Bun.SHA256().update("alice").digest("hex"),
+					attachment,
+					ready_at: expect.any(Number),
+				},
+			},
+		]);
+		expect(await fs.readdir(path.join(blobs.intentsDir, attachment.contentHash.slice(7)))).toEqual([]);
 		expect(await uploads.resolve("alice", "message-a", "upload-a")).toEqual(attachment);
-		await expect(uploads.resolve("bob", "message-a", "upload-a")).rejects.toThrow("owner");
+		await expect(uploads.resolve("bob", "message-a", "upload-a")).rejects.toMatchObject({
+			code: "attachment_expired",
+		});
 		await expect(uploads.resolve("alice", "message-b", "upload-a")).rejects.toThrow("message");
 		await expect(uploads.stage("alice", { ...last, name: "changed.png" })).rejects.toThrow("identity changed");
-		expect(await fs.readFile(path.join(blobs.liveDir, attachment.contentHash.slice(7)))).toEqual(data);
-		const [dir] = await fs.readdir(root);
-		expect(await fs.readdir(path.join(root, dir!))).toEqual(["manifest.json"]);
 		expect(await uploads.remove("alice", "upload-a")).toEqual({ removed: true });
-		await expect(new EngineAttachmentUploads(root, blobs).stage("alice", last)).rejects.toThrow("removed");
-		await expect(uploads.resolve("alice", "message-a", "upload-a")).rejects.toThrow("removed");
+		expect(records.rows.size).toBe(0);
+		// A removed draft cannot resume; its body is left to the storage owner, never deleted here.
+		await expect(uploadsAt(root, blobs, records).stage("alice", last)).rejects.toThrow("offset zero");
+		await expect(uploads.resolve("alice", "message-a", "upload-a")).rejects.toMatchObject({
+			code: "attachment_expired",
+		});
 		expect(await fs.readFile(path.join(blobs.liveDir, attachment.contentHash.slice(7)))).toEqual(data);
 	});
 
-	it("recovers a torn chunk only when the prefix matches, and removal fences even a not-yet-arrived upload", async () => {
+	it("recovers a torn chunk only when the prefix matches, and asks for a fresh upload when the whole file is torn", async () => {
 		using temp = TempDir.createSync("@omp-attachment-");
 		const root = path.join(temp.path(), "uploads");
 		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
-		const uploads = new EngineAttachmentUploads(root, blobs);
+		const records = new MemoryRecords();
+		const uploads = uploadsAt(root, blobs, records);
 		const data = Buffer.alloc(BLOB_RANGE_BYTES + 11, 67);
 		const attachment = identity(data);
 		const first = { ...attachment, offset: 0, contentBase64: data.subarray(0, BLOB_RANGE_BYTES).toString("base64") };
@@ -264,26 +331,52 @@ describe("Engine attachment admission", () => {
 		const [dir] = await fs.readdir(root);
 		const payload = path.join(root, dir!, "payload.bin");
 		await fs.truncate(payload, 107);
-		const resumed = new EngineAttachmentUploads(root, blobs);
+		const resumed = uploadsAt(root, blobs, records);
 		await expect(
 			resumed.stage("alice", { ...first, contentBase64: Buffer.alloc(BLOB_RANGE_BYTES, 1).toString("base64") }),
 		).rejects.toThrow("conflicts");
 		expect((await fs.stat(payload)).size).toBe(107);
 		expect(await resumed.stage("alice", first)).toMatchObject({ nextOffset: BLOB_RANGE_BYTES, complete: false });
 		expect(await fs.readFile(payload)).toEqual(data.subarray(0, BLOB_RANGE_BYTES));
-		await resumed.remove("alice", "late-upload");
-		await expect(resumed.stage("alice", { ...first, uploadId: "late-upload" })).rejects.toThrow("removed");
+		// An OS crash can tear already acknowledged bytes; the final hash rejects them once, not on every retry.
+		const torn = Buffer.from(data.subarray(0, BLOB_RANGE_BYTES));
+		torn[5] ^= 0xff;
+		await fs.writeFile(payload, torn);
+		const last = {
+			...attachment,
+			offset: BLOB_RANGE_BYTES,
+			contentBase64: data.subarray(BLOB_RANGE_BYTES).toString("base64"),
+		};
+		await expect(resumed.stage("alice", last)).rejects.toMatchObject({ code: "source_unavailable" });
+		expect(await fs.readdir(root)).toEqual([]);
+		expect(await fs.readdir(blobs.liveDir)).toEqual([]);
+		expect(records.rows.size).toBe(0);
+		await expect(resumed.stage("alice", last)).rejects.toThrow("offset zero");
+		expect(await resumed.stage("alice", first)).toMatchObject({ nextOffset: BLOB_RANGE_BYTES, complete: false });
 		await resumed.remove("alice", "upload-a");
-		expect(await fs.readdir(path.join(root, dir!))).toEqual(["manifest.json", "removed"]);
-		// Removing one owner's id cannot fence another owner's upload with the same id.
-		expect(await resumed.stage("bob", first)).toMatchObject({ complete: false, nextOffset: BLOB_RANGE_BYTES });
+		expect(await fs.readdir(root)).toEqual([]);
+	});
+
+	it("sweeps only pending uploads idle for a day", async () => {
+		using temp = TempDir.createSync("@omp-attachment-sweep-");
+		const root = path.join(temp.path(), "uploads");
+		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
+		const uploads = uploadsAt(root, blobs);
+		const data = Buffer.from("ab");
+		for (const uploadId of ["stale", "fresh"])
+			await uploads.stage("alice", { ...identity(data, uploadId), offset: 0, contentBase64: "YQ==" });
+		const stale = attachmentUploadKey("alice", "stale").key;
+		const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+		await fs.utimes(path.join(root, stale, "payload.bin"), old, old);
+		await uploads.sweepAbandoned();
+		expect(await fs.readdir(root)).toEqual([attachmentUploadKey("alice", "fresh").key]);
 	});
 
 	it("rejects invalid bytes, paths, changed identity and linked storage, without publishing failed content", async () => {
 		using temp = TempDir.createSync("@omp-attachment-");
 		const root = path.join(temp.path(), "uploads");
 		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
-		const uploads = new EngineAttachmentUploads(root, blobs);
+		const uploads = uploadsAt(root, blobs);
 		const data = Buffer.from("file content");
 		const attachment = identity(data);
 		const request = { ...attachment, offset: 0, contentBase64: data.toString("base64") };
@@ -291,7 +384,7 @@ describe("Engine attachment admission", () => {
 		await expect(uploads.stage("alice", { ...request, name: "../secret" })).rejects.toThrow("filename");
 		await expect(uploads.stage("alice", { ...request, contentBase64: "invalid!" })).rejects.toThrow("canonical");
 		await expect(uploads.stage("alice", { ...request, contentHash: `sha256:${"0".repeat(64)}` })).rejects.toThrow(
-			"hash",
+			"upload the file again",
 		);
 		expect(await fs.readdir(blobs.liveDir).catch(() => [])).toEqual([]);
 		await uploads.remove("alice", attachment.uploadId);
@@ -303,7 +396,7 @@ describe("Engine attachment admission", () => {
 		const linked = path.join(temp.path(), "linked");
 		await fs.symlink(root, linked, process.platform === "win32" ? "junction" : "dir");
 		try {
-			await expect(new EngineAttachmentUploads(linked, blobs).stage("alice", request)).rejects.toThrow("unsafe");
+			await expect(uploadsAt(linked, blobs).stage("alice", request)).rejects.toThrow("unsafe");
 		} finally {
 			await fs.unlink(linked);
 		}
@@ -318,7 +411,7 @@ describe("Engine attachment admission", () => {
 	it("rejects an oversized file and a 129th file of one message before staging a byte", async () => {
 		using temp = TempDir.createSync("@omp-attachment-limits-");
 		const root = path.join(temp.path(), "uploads");
-		const uploads = new EngineAttachmentUploads(root, new BlobStore(path.join(temp.path(), "blobs")));
+		const uploads = uploadsAt(root, new BlobStore(path.join(temp.path(), "blobs")));
 		const chunk = Buffer.from("a");
 		const request = (uploadId: string) => ({
 			...identity(Buffer.from("ab"), uploadId),

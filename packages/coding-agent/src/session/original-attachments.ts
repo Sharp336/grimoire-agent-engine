@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, prompt, TempDir } from "@oh-my-pi/pi-utils";
 import originalAttachmentsPrompt from "../prompts/system/original-attachments.md" with { type: "text" };
-import { BLOB_RANGE_BYTES, BlobStore } from "./blob-store";
+import { BlobStore } from "./blob-store";
 import { copyOriginalAttachments, type SessionEntry, type SessionMessageIdentity } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -88,24 +88,23 @@ export async function withOriginalAttachment<T>(
 	using temp = TempDir.createSync("@omp-original-read-");
 	const filePath = path.join(temp.path(), `original${/^\.[a-z0-9]{1,16}$/.test(suffix) ? suffix : ".bin"}`);
 	const output = await fs.open(filePath, "wx");
-	const blobs = new BlobStore(getBlobsDir());
-	const digest = new Bun.SHA256();
+	let present: boolean;
 	try {
-		let offset = 0;
-		do {
-			signal?.throwIfAborted();
-			const range = await blobs.getRange(attachment.contentHash.slice(7), offset, BLOB_RANGE_BYTES);
-			if (!range || range.totalBytes !== attachment.bytes || (offset < attachment.bytes && !range.data.length))
-				throw new Error("Original attachment bytes changed or are unavailable");
-			await output.writeFile(range.data);
-			digest.update(range.data);
-			offset += range.data.length;
-		} while (offset < attachment.bytes);
+		present = await new BlobStore(getBlobsDir()).readVerified(
+			attachment.contentHash.slice(7),
+			attachment.bytes,
+			async chunk => {
+				await output.writeFile(chunk);
+			},
+			signal,
+		);
+	} catch (error) {
+		signal?.throwIfAborted();
+		throw new Error("Original attachment size or SHA-256 does not match its retained identity", { cause: error });
 	} finally {
 		await output.close();
 	}
-	if (`sha256:${digest.digest("hex")}` !== attachment.contentHash)
-		throw new Error("Original attachment SHA-256 does not match its retained identity");
+	if (!present) throw new Error("Original attachment bytes are unavailable");
 	signal?.throwIfAborted();
 	const current = find();
 	if (

@@ -956,13 +956,19 @@ export class TurnRecovery {
 
 	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage, droppedEntryId: string | undefined): void {
 		if (!isEmptyErrorTurn(assistantMessage)) {
-			if (droppedEntryId && this.#host.sessionManager.getEntry(droppedEntryId)) {
+			// Native rewind trims the dropped entry out of the working set, and a
+			// working-set miss must not demand full history: re-append it with its
+			// Engine identity instead.
+			if (
+				droppedEntryId &&
+				this.#host.sessionManager.getWorkingEntries().some(entry => entry.id === droppedEntryId)
+			) {
 				this.#host.withBashBranchTransition(() => {
 					this.#host.sessionManager.branch(droppedEntryId);
 					this.#host.sessionManager.appendCustomEntry("recovery-rollback");
 				});
 			} else {
-				this.#host.sessionManager.appendMessage(assistantMessage);
+				this.#host.appendSessionMessage(assistantMessage);
 			}
 		}
 		const lastMessage = this.#host.agent.state.messages.at(-1);

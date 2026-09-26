@@ -23,23 +23,49 @@ export interface BlobPutOptions {
 
 export interface BlobPutResult {
 	hash: string;
-	/** Current physical content-addressed path. */
+	/** Canonical content-addressed path, always `<dir>/<sha256-hex>`. */
 	path: string;
 	/** Path with the requested extension when supplied, otherwise the canonical path. */
 	displayPath: string;
 	get ref(): string;
 }
 
+/** A completed upload file to publish without copying: its declared identity is verified before linking. */
+export interface BlobFileSource {
+	file: string;
+	hash: string;
+	bytes: number;
+}
+
+/**
+ * One managed body in `.managed/live`, pinned by this producer's intent until the owner record decides.
+ * Both methods are idempotent, settle the pin exactly once and never throw: a pin that cannot be
+ * removed stays until this process exits, when the storage owner treats it as a dead producer.
+ */
+export interface BlobPublication {
+	readonly hash: string;
+	/** `.managed/live/<hash>`. */
+	readonly path: string;
+	/** Typed sidecar hardlink for image openers, otherwise {@link path}. */
+	readonly displayPath: string;
+	/** The owner record naming this body is applied: drop the pin. */
+	release(): Promise<void>;
+	/** The owner record will not be written, or its outcome is unknown: let the storage owner decide. */
+	abandon(): Promise<void>;
+}
+
+/** A published file does not have the size or SHA-256 its caller declared (for example a torn upload). */
+export class BlobSourceMismatchError extends Error {}
+
 /**
  * Content-addressed blob store for externalizing large binary data (images) from session JSONL files.
  *
- * New files are stored at `<dir>/.managed/live/<sha256-hex>`; old flat files
- * remain readable while the storage owner migrates them. Callers may request
- * a typed sidecar path for `file://` links and OS
- * image viewers; blob refs and reads still address the extensionless hash path.
+ * Interactive sessions keep the upstream flat layout, `<dir>/<sha256-hex>` plus an optional typed
+ * sidecar `<dir>/<sha256-hex>.<ext>` for `file://` links and OS image viewers ({@link BlobStore.put}).
+ * A storage contour root is owned by its Rust storage worker: the Engine writes there only through
+ * {@link BlobStore.publish}, which follows the managed C2/C3 protocol (`.managed/intents`, `staging`,
+ * `locks`, `live`). Reads look in `.managed/live` first, then in the flat root.
  * The SHA-256 hash is computed over the raw binary data (not base64).
- * Content-addressing makes writes idempotent and provides automatic deduplication
- * across sessions.
  */
 
 const IMAGE_EXTENSION_BY_MIME: Record<string, string> = {
@@ -59,34 +85,49 @@ function normalizeBlobExtension(extension: string | undefined): string | undefin
 	return normalized.toLowerCase();
 }
 
-const PROCESS_STARTED_AT_MS = Math.round(Date.now() - process.uptime() * 1000);
-const LOCK_PAUSE = new Int32Array(new SharedArrayBuffer(4));
-const LOCK_ATTEMPTS = 500;
-const LOCK_RETRY_MS = 10;
-
-interface BlobIntent {
-	id: string;
-	hash: string;
-	extension?: string;
-	temporary: string;
-	done: string;
+async function ensureDisplayPath(blobPath: string, displayPath: string, data: Buffer): Promise<void> {
+	if (displayPath === blobPath) return;
+	try {
+		await fsp.link(blobPath, displayPath);
+		return;
+	} catch (err) {
+		if (isExists(err)) return;
+		logger.debug("Blob display hardlink failed; falling back to copy", {
+			blobPath,
+			displayPath,
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+	await Bun.write(displayPath, data);
 }
+
+function ensureDisplayPathSync(blobPath: string, displayPath: string, data: Buffer): void {
+	if (displayPath === blobPath) return;
+	try {
+		fs.linkSync(blobPath, displayPath);
+		return;
+	} catch (err) {
+		if (isExists(err)) return;
+		logger.debug("Blob display hardlink failed; falling back to copy", {
+			blobPath,
+			displayPath,
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+	fs.writeFileSync(displayPath, data);
+}
+
+const PROCESS_STARTED_AT_MS = Math.round(Date.now() - process.uptime() * 1000);
+/** Lock and breaker content shared with the Rust owner: `<pid>\n<startMs>\n`. */
+const OWNER_STAMP = `${process.pid}\n${PROCESS_STARTED_AT_MS}\n`;
+const LOCK_WAIT_MS = 5_000;
+const LOCK_RETRY_MS = 10;
 
 function isExists(error: unknown): boolean {
 	return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
 
-function syncDirectory(directory: string): void {
-	if (process.platform === "win32") return;
-	const fd = fs.openSync(directory, "r");
-	try {
-		fs.fsyncSync(fd);
-	} finally {
-		fs.closeSync(fd);
-	}
-}
-
-async function syncDirectoryAsync(directory: string): Promise<void> {
+async function syncDirectory(directory: string): Promise<void> {
 	if (process.platform === "win32") return;
 	const handle = await fsp.open(directory, "r");
 	try {
@@ -96,17 +137,7 @@ async function syncDirectoryAsync(directory: string): Promise<void> {
 	}
 }
 
-function writeExclusiveAndSync(file: string, contents: Buffer | string): void {
-	const fd = fs.openSync(file, "wx");
-	try {
-		fs.writeFileSync(fd, contents);
-		fs.fsyncSync(fd);
-	} finally {
-		fs.closeSync(fd);
-	}
-}
-
-async function writeExclusiveAndSyncAsync(file: string, contents: Buffer | string): Promise<void> {
+async function writeExclusiveAndSync(file: string, contents: Buffer | string): Promise<void> {
 	const handle = await fsp.open(file, "wx");
 	try {
 		await handle.writeFile(contents);
@@ -116,90 +147,66 @@ async function writeExclusiveAndSyncAsync(file: string, contents: Buffer | strin
 	}
 }
 
-function unlinkIfPresent(file: string): void {
+async function createExclusive(file: string, contents: string): Promise<boolean> {
 	try {
-		fs.unlinkSync(file);
+		await writeExclusiveAndSync(file, contents);
+		return true;
 	} catch (error) {
-		if (!isEnoent(error)) throw error;
+		if (isExists(error)) return false;
+		throw error;
 	}
 }
 
-async function unlinkIfPresentAsync(file: string): Promise<void> {
+async function unlinkIfPresent(file: string): Promise<void> {
 	await fsp.unlink(file).catch(error => {
 		if (!isEnoent(error)) throw error;
 	});
 }
 
-function sameFileBytesSync(file: string, data: Buffer): boolean {
-	const before = fs.lstatSync(file);
-	if (!before.isFile() || before.isSymbolicLink() || before.size !== data.length) return false;
-	const fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+function processIsLive(pid: number, startedAtMs: number): boolean {
+	// The start time of another process is not visible here; only our own identity is exact.
+	if (pid === process.pid) return startedAtMs === PROCESS_STARTED_AT_MS;
 	try {
-		const opened = fs.fstatSync(fd);
-		if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false;
-		const chunk = Buffer.alloc(Math.min(BLOB_RANGE_BYTES, data.length));
-		for (let offset = 0; offset < data.length; ) {
-			const read = fs.readSync(fd, chunk, 0, Math.min(chunk.length, data.length - offset), offset);
-			if (!read || !chunk.subarray(0, read).equals(data.subarray(offset, offset + read))) return false;
-			offset += read;
-		}
-		const after = fs.fstatSync(fd);
-		return after.size === opened.size && after.mtimeMs === opened.mtimeMs && after.ctimeMs === opened.ctimeMs;
-	} finally {
-		fs.closeSync(fd);
+		process.kill(pid, 0);
+		return true;
+	} catch (probe) {
+		return !probe || typeof probe !== "object" || !("code" in probe) || probe.code !== "ESRCH";
 	}
 }
 
-async function sameFileBytesAsync(
-	file: string,
-	data: Buffer,
-	signal?: AbortSignal,
-	afterFirstChunk?: () => void | Promise<void>,
-): Promise<boolean> {
-	const before = await fsp.lstat(file);
-	if (!before.isFile() || before.isSymbolicLink() || before.size !== data.length) return false;
-	const handle = await fsp.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+/** Remove a lock or breaker whose owner process is gone, unless it changed while we looked. */
+async function removeStale(file: string): Promise<boolean> {
+	let content: string;
 	try {
-		const opened = await handle.stat();
-		if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false;
-		const chunk = Buffer.alloc(Math.min(BLOB_RANGE_BYTES, data.length));
-		for (let offset = 0; offset < data.length; ) {
-			signal?.throwIfAborted();
-			const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, data.length - offset), offset);
-			if (!bytesRead || !chunk.subarray(0, bytesRead).equals(data.subarray(offset, offset + bytesRead)))
-				return false;
-			if (offset === 0) await afterFirstChunk?.();
-			offset += bytesRead;
-		}
-		const after = await handle.stat();
-		return after.size === opened.size && after.mtimeMs === opened.mtimeMs && after.ctimeMs === opened.ctimeMs;
-	} finally {
-		await handle.close();
-	}
-}
-
-function linkOrVerifySync(source: string, destination: string, data: Buffer): void {
-	try {
-		fs.linkSync(source, destination);
+		content = await fsp.readFile(file, "utf8");
 	} catch (error) {
-		if (!isExists(error) || !sameFileBytesSync(destination, data))
-			throw new Error(`Existing blob conflicts with publication: ${destination}`, { cause: error });
+		if (isEnoent(error)) return false;
+		throw error;
 	}
+	const [pid, startedAtMs] = content.split("\n", 2).map(Number);
+	if (!Number.isSafeInteger(pid) || pid <= 0 || processIsLive(pid, startedAtMs)) return false;
+	try {
+		if ((await fsp.readFile(file, "utf8")) !== content) return false;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+	await unlinkIfPresent(file);
+	return true;
 }
 
-async function linkOrVerifyAsync(
-	source: string,
-	destination: string,
-	data: Buffer,
-	signal?: AbortSignal,
-	afterFirstChunk?: () => void | Promise<void>,
-): Promise<void> {
+/** Existing regular body with exactly the expected size; a different size is a conflict, never replaced. */
+async function hasBody(file: string, bytes: number): Promise<boolean> {
+	let stat: fs.Stats;
 	try {
-		await fsp.link(source, destination);
+		stat = await fsp.lstat(file);
 	} catch (error) {
-		if (!isExists(error) || !(await sameFileBytesAsync(destination, data, signal, afterFirstChunk)))
-			throw new Error(`Existing blob conflicts with publication: ${destination}`, { cause: error });
+		if (isEnoent(error)) return false;
+		throw error;
 	}
+	if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== bytes)
+		throw new Error(`Existing blob conflicts with publication: ${file}`);
+	return true;
 }
 
 export function blobExtensionForImageMimeType(mimeType: string | undefined): string | undefined {
@@ -213,41 +220,19 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 }
 
 export class BlobStore {
-	readonly #checkpoint?: (
-		stage: "intent" | "publication_lock" | "canonical" | "complete" | "compare" | "lock_wait",
-		hash: string,
-	) => void | Promise<void>;
-	/** Fault-injection seam for isolated publication crash tests. */
+	/** Absolute: Windows lifts MAX_PATH only for absolute paths, and `.abandoned` intent names run long. */
+	readonly dir: string;
+	readonly #checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "lock_wait", hash: string) => void;
+	/** `checkpoint` is a fault-injection seam for isolated publication crash tests. */
 	constructor(
-		readonly dir: string,
-		checkpoint?: (
-			stage: "intent" | "publication_lock" | "canonical" | "complete" | "compare" | "lock_wait",
-			hash: string,
-		) => void | Promise<void>,
+		dir: string,
+		checkpoint?: (stage: "intent" | "publication_lock" | "canonical" | "lock_wait", hash: string) => void,
 	) {
+		this.dir = path.resolve(dir);
 		this.#checkpoint = checkpoint;
-	}
-	#assertSafeRoot(): void {
-		try {
-			const stat = fs.lstatSync(this.dir);
-			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Blob directory is unsafe");
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-	}
-	async #assertSafeRootAsync(): Promise<void> {
-		try {
-			const stat = await fsp.lstat(this.dir);
-			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Blob directory is unsafe");
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
 	}
 	get liveDir(): string {
 		return path.join(this.dir, ".managed", "live");
-	}
-	get legacyDir(): string {
-		return path.join(this.dir, ".managed", "legacy");
 	}
 	get stagingDir(): string {
 		return path.join(this.dir, ".managed", "staging");
@@ -255,197 +240,247 @@ export class BlobStore {
 	get intentsDir(): string {
 		return path.join(this.dir, ".managed", "intents");
 	}
-	get completedDir(): string {
-		return path.join(this.dir, ".managed", "completed");
-	}
 	get locksDir(): string {
 		return path.join(this.dir, ".managed", "locks");
 	}
-	#withPublicationLock<T>(hash: string, work: () => T, publishing = false): T {
-		fs.mkdirSync(this.locksDir, { recursive: true });
-		const directory = fs.lstatSync(this.locksDir);
-		if (!directory.isDirectory() || directory.isSymbolicLink())
-			throw new Error("Blob publication lock directory is unsafe");
-		const lock = path.join(this.locksDir, `${hash}.lock`);
-		let acquired = false;
-		for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
-			try {
-				writeExclusiveAndSync(lock, `${process.pid}\n${PROCESS_STARTED_AT_MS}\n`);
-				acquired = true;
-				break;
-			} catch (error) {
-				if (!isExists(error)) throw error;
-				let before: string;
-				try {
-					before = fs.readFileSync(lock, "utf8");
-				} catch (readError) {
-					if (isEnoent(readError)) continue;
-					throw readError;
-				}
-				const pid = Number(before.split("\n", 1)[0]);
-				let live = true;
-				if (Number.isSafeInteger(pid) && pid > 0) {
-					try {
-						process.kill(pid, 0);
-					} catch (probe) {
-						live = !probe || typeof probe !== "object" || !("code" in probe) || probe.code !== "ESRCH";
-					}
-				}
-				if (!live) {
-					try {
-						if (fs.readFileSync(lock, "utf8") === before) unlinkIfPresent(lock);
-					} catch (readError) {
-						if (!isEnoent(readError)) throw readError;
-					}
-					continue;
-				}
-				Atomics.wait(LOCK_PAUSE, 0, 0, LOCK_RETRY_MS);
-			}
-		}
-		if (!acquired) throw new Error("Blob publication lock is busy");
-		try {
-			if (publishing) this.#checkpoint?.("publication_lock", hash);
-			return work();
-		} finally {
-			unlinkIfPresent(lock);
-		}
-	}
-	async #withPublicationLockAsync<T>(
-		hash: string,
-		work: () => Promise<T>,
-		publishing = false,
-		signal?: AbortSignal,
-	): Promise<T> {
-		await fsp.mkdir(this.locksDir, { recursive: true });
-		const directory = await fsp.lstat(this.locksDir);
-		if (!directory.isDirectory() || directory.isSymbolicLink())
-			throw new Error("Blob publication lock directory is unsafe");
-		const lock = path.join(this.locksDir, `${hash}.lock`);
-		let acquired = false;
-		const deadline = performance.now() + LOCK_ATTEMPTS * LOCK_RETRY_MS;
-		for (let attempt = 0; attempt < LOCK_ATTEMPTS && performance.now() < deadline; attempt++) {
-			signal?.throwIfAborted();
-			try {
-				await writeExclusiveAndSyncAsync(lock, `${process.pid}\n${PROCESS_STARTED_AT_MS}\n`);
-				acquired = true;
-				break;
-			} catch (error) {
-				if (!isExists(error)) throw error;
-				let before: string;
-				try {
-					before = await fsp.readFile(lock, "utf8");
-				} catch (readError) {
-					if (isEnoent(readError)) continue;
-					throw readError;
-				}
-				const pid = Number(before.split("\n", 1)[0]);
-				let live = true;
-				if (Number.isSafeInteger(pid) && pid > 0) {
-					try {
-						process.kill(pid, 0);
-					} catch (probe) {
-						live = !probe || typeof probe !== "object" || !("code" in probe) || probe.code !== "ESRCH";
-					}
-				}
-				if (!live) {
-					try {
-						if ((await fsp.readFile(lock, "utf8")) === before) await unlinkIfPresentAsync(lock);
-					} catch (readError) {
-						if (!isEnoent(readError)) throw readError;
-					}
-					continue;
-				}
-				await this.#checkpoint?.("lock_wait", hash);
-				await Bun.sleep(LOCK_RETRY_MS);
-			}
-		}
-		if (!acquired) throw new Error("Blob publication lock is busy");
-		try {
-			signal?.throwIfAborted();
-			if (publishing) await this.#checkpoint?.("publication_lock", hash);
-			return await work();
-		} finally {
-			await unlinkIfPresentAsync(lock);
-		}
-	}
-	#beginIntent(hash: string, extension?: string): BlobIntent {
-		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
-		this.#assertSafeRoot();
-		const id = crypto.randomUUID();
-		const hashDir = path.join(this.intentsDir, hash);
-		const name = `${process.pid}.${PROCESS_STARTED_AT_MS}.${id}${extension ? `.${extension}` : ""}`;
-		this.#withPublicationLock(hash, () => {
-			for (const directory of [this.liveDir, this.stagingDir, this.completedDir, hashDir]) {
-				fs.mkdirSync(directory, { recursive: true });
-				const stat = fs.lstatSync(directory);
-				if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Blob publication directory is unsafe");
-			}
-			writeExclusiveAndSync(path.join(hashDir, name), "");
-			syncDirectory(hashDir);
-		});
-		this.#checkpoint?.("intent", hash);
-		return {
-			id,
-			hash,
-			extension,
-			temporary: path.join(this.stagingDir, `${id}.blob-tmp`),
-			done: path.join(this.completedDir, `${id}.done`),
-		};
-	}
-	async #beginIntentAsync(hash: string, extension?: string, signal?: AbortSignal): Promise<BlobIntent> {
-		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
-		await this.#assertSafeRootAsync();
-		const id = crypto.randomUUID();
-		const hashDir = path.join(this.intentsDir, hash);
-		const name = `${process.pid}.${PROCESS_STARTED_AT_MS}.${id}${extension ? `.${extension}` : ""}`;
-		await this.#withPublicationLockAsync(
-			hash,
-			async () => {
-				for (const directory of [this.liveDir, this.stagingDir, this.completedDir, hashDir]) {
-					await fsp.mkdir(directory, { recursive: true });
-					const stat = await fsp.lstat(directory);
-					if (!stat.isDirectory() || stat.isSymbolicLink())
-						throw new Error("Blob publication directory is unsafe");
-				}
-				await writeExclusiveAndSyncAsync(path.join(hashDir, name), "");
-				await syncDirectoryAsync(hashDir);
-			},
-			false,
-			signal,
-		);
-		await this.#checkpoint?.("intent", hash);
-		return {
-			id,
-			hash,
-			extension,
-			temporary: path.join(this.stagingDir, `${id}.blob-tmp`),
-			done: path.join(this.completedDir, `${id}.done`),
-		};
-	}
-	#completeIntent(intent: BlobIntent): void {
-		writeExclusiveAndSync(intent.done, "");
-		syncDirectory(this.completedDir);
-		this.#checkpoint?.("complete", intent.hash);
-	}
-	async #completeIntentAsync(intent: BlobIntent): Promise<void> {
-		await writeExclusiveAndSyncAsync(intent.done, "");
-		await syncDirectoryAsync(this.completedDir);
-		await this.#checkpoint?.("complete", intent.hash);
-	}
-	#paths(name: string): string[] {
-		return [path.join(this.liveDir, name), path.join(this.dir, name), path.join(this.legacyDir, name)];
+
+	async #safeDirectory(directory: string, create: boolean): Promise<void> {
+		if (create) await fsp.mkdir(directory, { recursive: true });
+		const stat = await fsp.lstat(directory);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Blob directory is unsafe: ${directory}`);
 	}
 
-	/** Resolve an existing immutable body across the current and legacy layout. */
-	async existingPath(hash: string): Promise<string | null> {
-		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
-		this.#assertSafeRoot();
-		for (const candidate of this.#paths(hash)) {
+	/** Hold `.managed/locks/<hash>.lock`; a dead holder's lock is broken only through its `.break` gate (C3). */
+	async #withLock<T>(hash: string, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		const lock = path.join(this.locksDir, `${hash}.lock`);
+		const deadline = performance.now() + LOCK_WAIT_MS;
+		for (;;) {
+			signal?.throwIfAborted();
+			if (await createExclusive(lock, OWNER_STAMP)) break;
+			if (await this.#breakStaleLock(lock)) continue;
+			if (performance.now() >= deadline) throw new Error("Blob publication lock is busy");
+			this.#checkpoint?.("lock_wait", hash);
+			await Bun.sleep(LOCK_RETRY_MS);
+		}
+		try {
+			return await work();
+		} finally {
+			await unlinkIfPresent(lock);
+		}
+	}
+
+	async #breakStaleLock(lock: string): Promise<boolean> {
+		const gate = `${lock}.break`;
+		if (
+			!(await createExclusive(gate, OWNER_STAMP)) &&
+			!((await removeStale(gate)) && (await createExclusive(gate, OWNER_STAMP)))
+		)
+			return false;
+		try {
+			return await removeStale(lock);
+		} finally {
+			await unlinkIfPresent(gate);
+		}
+	}
+
+	/** Pin `hash` before any body work: `.managed/intents/<hash>/<pid>.<startMs>.<uuid>`. */
+	async #createIntent(hash: string, id: string): Promise<string> {
+		const directory = path.join(this.intentsDir, hash);
+		const intent = path.join(directory, `${process.pid}.${PROCESS_STARTED_AT_MS}.${id}`);
+		for (let attempt = 0; ; attempt++) {
+			await this.#safeDirectory(directory, true);
 			try {
-				const parent = await fsp.lstat(path.dirname(candidate));
+				await writeExclusiveAndSync(intent, "");
+				break;
+			} catch (error) {
+				// The owner removes an empty hash directory under its lock; recreate it once more.
+				if (!isEnoent(error) || attempt >= 2) throw error;
+			}
+		}
+		await syncDirectory(directory);
+		return intent;
+	}
+
+	/**
+	 * Publish one managed body under C3: intent → staging (skipped when the body is already live) →
+	 * under the per-hash lock reuse by size or link staging into `.managed/live` → drop staging.
+	 * The returned intent pin holds until the caller releases it after the owner record is applied,
+	 * or abandons it. A file source is linked, not copied (copied only across volumes), and its
+	 * declared size and SHA-256 are verified in one streaming pass first.
+	 */
+	async publish(
+		source: Buffer | BlobFileSource,
+		options?: { extension?: string; signal?: AbortSignal },
+	): Promise<BlobPublication> {
+		const signal = options?.signal;
+		signal?.throwIfAborted();
+		const data = Buffer.isBuffer(source) ? source : undefined;
+		const hash = data ? new Bun.SHA256().update(data).digest("hex") : (source as BlobFileSource).hash;
+		const bytes = data ? data.length : (source as BlobFileSource).bytes;
+		if (!BLOB_HASH_RE.test(hash) || !Number.isSafeInteger(bytes) || bytes < 0)
+			throw new Error("Invalid blob publication identity");
+		const extension = normalizeBlobExtension(options?.extension);
+		// Managed sidecars are limited to the fixed image set the storage owner deletes with the body (C2).
+		const sidecar = extension && Object.values(IMAGE_EXTENSION_BY_MIME).includes(extension) ? extension : undefined;
+		await this.#safeDirectory(this.dir, true);
+		for (const directory of [this.liveDir, this.stagingDir, this.intentsDir, this.locksDir])
+			await this.#safeDirectory(directory, true);
+		const id = crypto.randomUUID();
+		const intent = await this.#createIntent(hash, id);
+		this.#checkpoint?.("intent", hash);
+		const staging = path.join(this.stagingDir, `${id}.tmp`);
+		const destination = path.join(this.liveDir, hash);
+		const displayPath = sidecar ? `${destination}.${sidecar}` : destination;
+		let settled = false;
+		const settle = async (action: "release" | "abandon"): Promise<void> => {
+			if (settled) return;
+			settled = true;
+			try {
+				if (action === "release") await unlinkIfPresent(intent);
+				else {
+					await unlinkIfPresent(staging);
+					await fsp.rename(intent, `${intent}.abandoned`);
+				}
+			} catch (error) {
+				if (isEnoent(error)) return;
+				logger.warn("Blob publication pin was not settled; it expires with this process", {
+					hash,
+					action,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
+		try {
+			let staged = false;
+			const stage = async () => {
+				if (data) await writeExclusiveAndSync(staging, data);
+				else await this.#stageFile(source as BlobFileSource, staging, signal);
+				staged = true;
+			};
+			if (!data || !(await hasBody(destination, bytes))) await stage();
+			signal?.throwIfAborted();
+			await this.#withLock(
+				hash,
+				async () => {
+					this.#checkpoint?.("publication_lock", hash);
+					if (!(await hasBody(destination, bytes))) {
+						// The owner reclaimed the body between the pre-check and this lock.
+						if (!staged) await stage();
+						await fsp.link(staging, destination);
+					}
+					if (sidecar) await this.#linkSidecar(destination, displayPath);
+					await syncDirectory(this.liveDir);
+				},
+				signal,
+			);
+			this.#checkpoint?.("canonical", hash);
+			if (staged) await unlinkIfPresent(staging);
+		} catch (error) {
+			await settle("abandon");
+			throw error;
+		}
+		return {
+			hash,
+			path: destination,
+			displayPath,
+			release: () => settle("release"),
+			abandon: () => settle("abandon"),
+		};
+	}
+
+	/**
+	 * Link (or, across volumes, copy) a completed file into staging, verify it in one streaming pass and
+	 * make its bytes durable once; the producer writes its chunks without per-chunk fsync.
+	 */
+	async #stageFile(source: BlobFileSource, staging: string, signal?: AbortSignal): Promise<void> {
+		const before = await fsp.lstat(source.file);
+		if (!before.isFile() || before.isSymbolicLink()) throw new Error("Blob publication source is unsafe");
+		try {
+			await fsp.link(source.file, staging);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException | undefined)?.code !== "EXDEV") throw error;
+			await fsp.copyFile(source.file, staging, fs.constants.COPYFILE_EXCL);
+		}
+		// Read-write: Windows flushes file buffers only through a writable handle.
+		const handle = await fsp.open(staging, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW ?? 0));
+		try {
+			const digest = new Bun.SHA256();
+			let total = 0;
+			const buffer = Buffer.allocUnsafe(BLOB_RANGE_BYTES);
+			for (;;) {
+				signal?.throwIfAborted();
+				const { bytesRead } = await handle.read(buffer, 0, buffer.length, total);
+				if (!bytesRead) break;
+				digest.update(buffer.subarray(0, bytesRead));
+				total += bytesRead;
+				if (total > source.bytes) break;
+			}
+			if (total !== source.bytes || digest.digest("hex") !== source.hash)
+				throw new BlobSourceMismatchError("Published file does not match its declared size and SHA-256 hash");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	async #linkSidecar(destination: string, sidecar: string): Promise<void> {
+		try {
+			await fsp.link(destination, sidecar);
+		} catch (error) {
+			if (!isExists(error)) throw error;
+			const [body, existing] = await Promise.all([fsp.lstat(destination), fsp.lstat(sidecar)]);
+			if (existing.isSymbolicLink() || existing.dev !== body.dev || existing.ino !== body.ino)
+				throw new Error(`Existing blob sidecar conflicts with publication: ${sidecar}`, { cause: error });
+		}
+	}
+
+	#paths(hash: string): string[] {
+		return [path.join(this.liveDir, hash), path.join(this.dir, hash)];
+	}
+
+	/** Read-path candidates for a validated hash, refusing a linked or non-directory root instead of following it. */
+	async #candidates(hash: string): Promise<string[]> {
+		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
+		try {
+			const root = await fsp.lstat(this.dir);
+			if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("Blob directory is unsafe");
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return this.#paths(hash);
+	}
+
+	/** Open the first present body through one descriptor, refusing links and swapped files. */
+	async #open(hash: string): Promise<{ handle: fsp.FileHandle; size: number } | null> {
+		for (const blobPath of await this.#candidates(hash)) {
+			let before: fs.Stats;
+			try {
+				before = await fsp.lstat(blobPath);
+			} catch (error) {
+				if (isEnoent(error)) continue;
+				throw error;
+			}
+			if (!before.isFile() || before.isSymbolicLink()) throw new Error("Blob path is unsafe");
+			const handle = await fsp.open(blobPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+			try {
+				const opened = await handle.stat();
+				if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
+					throw new Error("Blob identity changed");
+				return { handle, size: opened.size };
+			} catch (error) {
+				await handle.close();
+				throw error;
+			}
+		}
+		return null;
+	}
+
+	/** Resolve an existing immutable body in `.managed/live`, then in the flat root. */
+	async existingPath(hash: string): Promise<string | null> {
+		for (const candidate of await this.#candidates(hash)) {
+			try {
 				const body = await fsp.lstat(candidate);
-				if (!parent.isDirectory() || parent.isSymbolicLink() || !body.isFile() || body.isSymbolicLink())
-					throw new Error("Blob path is unsafe");
+				if (!body.isFile() || body.isSymbolicLink()) throw new Error("Blob path is unsafe");
 				return candidate;
 			} catch (error) {
 				if (isEnoent(error)) continue;
@@ -455,170 +490,13 @@ export class BlobStore {
 		return null;
 	}
 
-	/** Import a completed upload without buffering it or exposing a partial canonical blob.
-	 * The caller owns admission/ACL for sourcePath; a blob hash alone is not authorization.
-	 */
-	async importFile(
-		sourcePath: string,
-		expected: { hash: string; bytes: number },
-		signal?: AbortSignal,
-	): Promise<BlobPutResult> {
-		if (!BLOB_HASH_RE.test(expected.hash) || !Number.isSafeInteger(expected.bytes) || expected.bytes < 0)
-			throw new Error("Invalid upload blob identity");
-		signal?.throwIfAborted();
-		const sourceStat = await fsp.lstat(sourcePath);
-		if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size !== expected.bytes)
-			throw new Error("Upload source is unsafe or its size changed");
-		const source = await fsp.open(sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-		let intent: BlobIntent;
-		try {
-			intent = await this.#beginIntentAsync(expected.hash, undefined, signal);
-		} catch (error) {
-			await source.close();
-			throw error;
-		}
-		const destination = path.join(this.liveDir, expected.hash);
-		const temporary = intent.temporary;
-		let ownsTemporary = false;
-		try {
-			const opened = await source.stat();
-			if (
-				!opened.isFile() ||
-				opened.dev !== sourceStat.dev ||
-				opened.ino !== sourceStat.ino ||
-				opened.size !== expected.bytes
-			)
-				throw new Error("Upload source changed before capture");
-			const output = await fsp.open(temporary, "wx");
-			ownsTemporary = true;
-			try {
-				const hash = new Bun.SHA256();
-				const buffer = Buffer.alloc(BLOB_RANGE_BYTES);
-				let offset = 0;
-				while (offset < expected.bytes) {
-					signal?.throwIfAborted();
-					const { bytesRead } = await source.read(
-						buffer,
-						0,
-						Math.min(buffer.length, expected.bytes - offset),
-						offset,
-					);
-					if (!bytesRead) throw new Error("Upload source ended before its declared size");
-					const chunk = buffer.subarray(0, bytesRead);
-					hash.update(chunk);
-					await output.writeFile(chunk);
-					offset += bytesRead;
-				}
-				const after = await source.stat();
-				if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
-					throw new Error("Upload source changed during capture");
-				if (hash.digest("hex") !== expected.hash) throw new Error("Upload blob hash does not match");
-				await output.sync();
-			} finally {
-				await output.close();
-			}
-			signal?.throwIfAborted();
-			let existing = false;
-			await this.#withPublicationLockAsync(
-				expected.hash,
-				async () => {
-					try {
-						await fsp.link(temporary, destination);
-					} catch (error) {
-						if (!isExists(error)) throw error;
-						existing = true;
-					}
-					await syncDirectoryAsync(this.liveDir);
-				},
-				true,
-				signal,
-			);
-			signal?.throwIfAborted();
-			await this.#checkpoint?.("canonical", expected.hash);
-			if (existing) {
-				const hash = new Bun.SHA256();
-				let offset = 0;
-				for (;;) {
-					signal?.throwIfAborted();
-					const range = await this.getRange(expected.hash, offset, BLOB_RANGE_BYTES);
-					if (!range || range.totalBytes !== expected.bytes)
-						throw new Error("Existing blob conflicts with upload");
-					hash.update(range.data);
-					if (range.nextOffset === null) break;
-					offset = range.nextOffset;
-				}
-				if (hash.digest("hex") !== expected.hash) throw new Error("Existing blob conflicts with upload");
-			}
-			return {
-				hash: expected.hash,
-				path: destination,
-				displayPath: destination,
-				get ref() {
-					return `${BLOB_PREFIX}${expected.hash}`;
-				},
-			};
-		} finally {
-			try {
-				await source.close();
-			} finally {
-				await this.#completeIntentAsync(intent);
-				if (ownsTemporary)
-					await fsp.unlink(temporary).catch(error => {
-						if (!isEnoent(error)) throw error;
-					});
-			}
-		}
-	}
-
-	async restore(hash: string, data: Buffer, extension?: string, signal?: AbortSignal): Promise<void> {
-		signal?.throwIfAborted();
-		if (!BLOB_HASH_RE.test(hash) || new Bun.SHA256().update(data).digest("hex") !== hash)
-			throw new Error("Archived blob hash does not match");
-		const normalizedExtension = normalizeBlobExtension(extension);
-		const intent = await this.#beginIntentAsync(hash, normalizedExtension, signal);
-		const destination = path.join(this.liveDir, hash);
-		const temporary = intent.temporary;
-		try {
-			signal?.throwIfAborted();
-			const handle = await fsp.open(temporary, "wx");
-			try {
-				await handle.writeFile(data);
-				await handle.sync();
-			} finally {
-				await handle.close();
-			}
-			signal?.throwIfAborted();
-			await this.#withPublicationLockAsync(
-				hash,
-				async () => {
-					if (normalizedExtension)
-						await linkOrVerifyAsync(temporary, `${destination}.${normalizedExtension}`, data, signal, () =>
-							this.#checkpoint?.("compare", hash),
-						);
-					await linkOrVerifyAsync(temporary, destination, data, signal, () => this.#checkpoint?.("compare", hash));
-					await syncDirectoryAsync(this.liveDir);
-				},
-				true,
-				signal,
-			);
-			signal?.throwIfAborted();
-			await this.#checkpoint?.("canonical", hash);
-		} finally {
-			await this.#completeIntentAsync(intent);
-			await fsp.unlink(temporary).catch(error => {
-				if (!isEnoent(error)) throw error;
-			});
-		}
-	}
-
 	/**
-	 * Write binary data to the blob store.
+	 * Write binary data to the flat interactive store (upstream layout, no managed protocol).
 	 * @returns SHA-256 hex hash of the data
 	 */
-	async put(data: Buffer, options?: BlobPutOptions, signal?: AbortSignal): Promise<BlobPutResult> {
-		signal?.throwIfAborted();
+	async put(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
 		const hash = new Bun.SHA256().update(data).digest("hex");
-		const blobPath = path.join(this.liveDir, hash);
+		const blobPath = path.join(this.dir, hash);
 		const extension = normalizeBlobExtension(options?.extension);
 		const displayPath = extension ? `${blobPath}.${extension}` : blobPath;
 		const result = {
@@ -630,7 +508,8 @@ export class BlobStore {
 			},
 		};
 
-		await this.restore(hash, data, extension, signal);
+		await Bun.write(blobPath, data);
+		await ensureDisplayPath(blobPath, displayPath, data);
 		return result;
 	}
 
@@ -641,7 +520,7 @@ export class BlobStore {
 	 */
 	putSync(data: Buffer, options?: BlobPutOptions): BlobPutResult {
 		const hash = new Bun.SHA256().update(data).digest("hex");
-		const blobPath = path.join(this.liveDir, hash);
+		const blobPath = path.join(this.dir, hash);
 		const extension = normalizeBlobExtension(options?.extension);
 		const displayPath = extension ? `${blobPath}.${extension}` : blobPath;
 		const result = {
@@ -652,29 +531,14 @@ export class BlobStore {
 				return `${BLOB_PREFIX}${hash}`;
 			},
 		};
-		const intent = this.#beginIntent(hash, extension);
-		try {
-			writeExclusiveAndSync(intent.temporary, data);
-			this.#withPublicationLock(
-				hash,
-				() => {
-					if (extension) linkOrVerifySync(intent.temporary, displayPath, data);
-					linkOrVerifySync(intent.temporary, blobPath, data);
-					syncDirectory(this.liveDir);
-				},
-				true,
-			);
-			this.#checkpoint?.("canonical", hash);
-		} finally {
-			this.#completeIntent(intent);
-			unlinkIfPresent(intent.temporary);
-		}
+		fs.mkdirSync(this.dir, { recursive: true });
+		fs.writeFileSync(blobPath, data);
+		ensureDisplayPathSync(blobPath, displayPath, data);
 		return result;
 	}
 
 	/** Read blob by hash, returns Buffer or null if not found. */
 	async get(hash: string): Promise<Buffer | null> {
-		this.#assertSafeRoot();
 		for (const blobPath of this.#paths(hash)) {
 			try {
 				const file = Bun.file(blobPath);
@@ -690,7 +554,6 @@ export class BlobStore {
 
 	/** Synchronous variant of {@link get}. */
 	getSync(hash: string): Buffer | null {
-		this.#assertSafeRoot();
 		for (const blobPath of this.#paths(hash)) {
 			try {
 				return fs.readFileSync(blobPath);
@@ -713,46 +576,61 @@ export class BlobStore {
 			limit > BLOB_RANGE_BYTES
 		)
 			throw new Error("Invalid blob byte range");
-		this.#assertSafeRoot();
-		for (const blobPath of this.#paths(hash)) {
-			try {
-				const directory = await fsp.lstat(path.dirname(blobPath));
-				const before = await fsp.lstat(blobPath);
-				if (!directory.isDirectory() || directory.isSymbolicLink() || !before.isFile() || before.isSymbolicLink())
-					throw new Error("Blob path is unsafe");
-				const handle = await fsp.open(blobPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
-				try {
-					const opened = await handle.stat();
-					if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
-						throw new Error("Blob identity changed");
-					if (!Number.isSafeInteger(opened.size) || offset > opened.size)
-						throw new Error("Blob range starts after EOF");
-					const data = Buffer.alloc(Math.min(limit, opened.size - offset));
-					let read = 0;
-					while (read < data.length) {
-						const { bytesRead } = await handle.read(data, read, data.length - read, offset + read);
-						if (!bytesRead) throw new Error("Blob changed during read");
-						read += bytesRead;
-					}
-					const after = await handle.stat();
-					if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
-						throw new Error("Blob changed during read");
-					const end = offset + data.length;
-					return { data, totalBytes: opened.size, nextOffset: end < opened.size ? end : null };
-				} finally {
-					await handle.close();
-				}
-			} catch (error) {
-				if (isEnoent(error)) continue;
-				throw error;
+		const opened = await this.#open(hash);
+		if (!opened) return null;
+		const { handle, size } = opened;
+		try {
+			if (offset > size) throw new Error("Blob range starts after EOF");
+			const data = Buffer.alloc(Math.min(limit, size - offset));
+			let read = 0;
+			while (read < data.length) {
+				const { bytesRead } = await handle.read(data, read, data.length - read, offset + read);
+				if (!bytesRead) throw new Error("Blob changed during read");
+				read += bytesRead;
 			}
+			const end = offset + data.length;
+			return { data, totalBytes: size, nextOffset: end < size ? end : null };
+		} finally {
+			await handle.close();
 		}
-		return null;
+	}
+
+	/**
+	 * Stream a whole body through one descriptor into `sink`, verifying its exact size and SHA-256.
+	 * `sink` must consume each chunk before it resolves: the buffer is reused. Returns false when absent;
+	 * throws when the body has another size or digest (the sink may already have seen its bytes).
+	 */
+	async readVerified(
+		hash: string,
+		bytes: number,
+		sink: (chunk: Buffer) => void | Promise<void>,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const opened = await this.#open(hash);
+		if (!opened) return false;
+		const { handle, size } = opened;
+		try {
+			if (size !== bytes) throw new Error(`Blob ${hash} size or SHA-256 does not match its identity`);
+			const digest = new Bun.SHA256();
+			const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(BLOB_RANGE_BYTES, bytes)));
+			for (let offset = 0; offset < bytes; ) {
+				signal?.throwIfAborted();
+				const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, bytes - offset), offset);
+				if (!bytesRead) throw new Error(`Blob ${hash} changed during read`);
+				const chunk = buffer.subarray(0, bytesRead);
+				digest.update(chunk);
+				await sink(chunk);
+				offset += bytesRead;
+			}
+			if (digest.digest("hex") !== hash) throw new Error(`Blob ${hash} size or SHA-256 does not match its identity`);
+			return true;
+		} finally {
+			await handle.close();
+		}
 	}
 
 	/** Check if a blob exists. */
 	async has(hash: string): Promise<boolean> {
-		this.#assertSafeRoot();
 		for (const blobPath of this.#paths(hash)) {
 			try {
 				await fsp.access(blobPath);

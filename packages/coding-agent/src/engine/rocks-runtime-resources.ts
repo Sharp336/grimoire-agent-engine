@@ -4,7 +4,14 @@ import { copyOriginalAttachments } from "../session/session-entries";
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
 import { EngineTargetError } from "./contracts";
 import { nativeEntry } from "./rocks-runtime-history";
-import { type ProjectedEvent, projectionId, type RocksProjection } from "./rocks-runtime-projection";
+import {
+	INPUT_PART_BYTES,
+	inputBodyPrefix,
+	inputPartId,
+	type ProjectedEvent,
+	projectionId,
+	type RocksProjection,
+} from "./rocks-runtime-projection";
 import type { RocksInbox } from "./rocks-runtime-rows";
 import { queryWork, type RocksEngineStore } from "./rocks-runtime-store";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
@@ -43,12 +50,15 @@ export async function runtimeResource(
 			throw new EngineTargetError("stale_target", "Message resource changed identity or version");
 		if (offset > Number(resource.bytes))
 			throw new EngineTargetError("invalid_request", "Message range starts after EOF");
+		// Chunks are at most one live change long, so the chunk holding `offset` starts at or after `lowest`.
+		// The owner orders unsigned integers only: "after" excludes (lowest - 1, any event) instead of (lowest, -1).
+		const lowest = offset - runtimeLimits.liveChangeBytes;
 		const rows = await store.records.query(
 			"event_message" as StorageRuntimeIndex,
 			[String(resource.contentId)],
 			undefined,
 			runtimeLimits.httpPageRecords,
-			[Math.max(-1, offset - runtimeLimits.liveChangeBytes), -1],
+			lowest > 0 ? [lowest - 1, Number.MAX_SAFE_INTEGER] : undefined,
 		);
 		work.rows(rows.records.length);
 		work.value.materializedBytes += Buffer.byteLength(JSON.stringify(rows));
@@ -107,6 +117,45 @@ export async function runtimeResource(
 			row.value.revision !== resource.revision
 		)
 			throw new EngineTargetError("stale_target", "Input resource changed identity or revision");
+		if (row.parts) {
+			const { hash, bytes: questionBytes } = row.parts;
+			const prefix = inputBodyPrefix(row.body);
+			const total = prefix.length + questionBytes + 1;
+			if (total !== resource.bytes || offset > total)
+				throw new EngineTargetError("stale_target", "Resource size or byte range changed");
+			const end = Math.min(total, offset + limit);
+			// The range within the questions JSON, then the parts that hold it.
+			const from = Math.max(offset, prefix.length) - prefix.length;
+			const to = Math.min(end, total - 1) - prefix.length;
+			const first = Math.floor(from / INPUT_PART_BYTES);
+			const count = from < to ? Math.floor((to - 1) / INPUT_PART_BYTES) - first + 1 : 0;
+			const parts = await store.records.getMany(
+				Array.from({ length: count }, (_, n) => ({
+					kind: "projection" as const,
+					id: inputPartId(String(resource.attemptId), hash, first + n),
+				})),
+			);
+			work.rows(parts.length);
+			work.value.materializedBytes += Buffer.byteLength(JSON.stringify(parts));
+			work.check();
+			const chunks = [prefix.subarray(offset, end)];
+			for (const [n, raw] of parts.entries()) {
+				const part = (raw.value as RocksProjection | null)?.part;
+				if (!part) throw new EngineTargetError("history_expired", "Input part is unavailable");
+				const start = (first + n) * INPUT_PART_BYTES;
+				chunks.push(Buffer.from(part, "base64").subarray(Math.max(from - start, 0), to - start));
+			}
+			if (end === total) chunks.push(Buffer.from("}"));
+			const result = {
+				resource,
+				offset,
+				nextOffset: end < total ? end : null,
+				contentBase64: Buffer.concat(chunks).toString("base64"),
+			};
+			work.finish(result, 1);
+			validateRuntimeValue("httpRange", result);
+			return result;
+		}
 		bytes = Buffer.from(JSON.stringify(row.body));
 	} else if (["history_entry", "history_image", "history_attachment"].includes(String(resource.kind))) {
 		const { entry } = await nativeEntry(

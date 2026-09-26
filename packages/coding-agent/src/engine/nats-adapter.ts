@@ -124,7 +124,7 @@ export interface NatsEngineAdapterOptions {
 	authorizeMessage: (message: AgentMessageEnvelope) => void | Promise<void>;
 	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	onError?: (error: Error) => void;
-	/** Deliveries of a failing command before it settles as a terminal failed receipt. */
+	/** Deliveries of a failing command (or peer message) before it ends terminally; a command settles as a failed receipt. */
 	commandAttempts?: number;
 }
 
@@ -161,6 +161,8 @@ export class NatsEngineAdapter {
 	#disposed = false;
 	/** Failed deliveries per command in this Engine generation; a restart settles leftovers as interrupted. */
 	readonly #commandFailures = new Map<string, number>();
+	/** Claims this adapter gave up whose durable release failed: the row still names this generation, but no handler owns it. */
+	readonly #orphanedClaims = new Set<string>();
 
 	private constructor(
 		options: NatsEngineAdapterOptions,
@@ -494,12 +496,16 @@ export class NatsEngineAdapter {
 			// Admission is durable before dispatch. A busy event sink must not hold
 			// command application behind the entire device's unrelated event backlog.
 			this.wakeEvents();
+			// Any admission answer ends an orphan entry: replay and a fresh claim make it moot (a release whose
+			// outcome was unknown may have landed). In progress is real only while a live handler owns the claim;
+			// this adapter's orphaned claim is taken back once and counts as the next attempt in #failCommand.
+			const orphaned = this.#orphanedClaims.delete(command.commandId);
 			if (admission.status === "replay") {
 				this.#commandFailures.delete(command.commandId);
 				message.ack();
 				return;
 			}
-			if (admission.status === "in_progress") {
+			if (admission.status === "in_progress" && !orphaned) {
 				message.nak(250);
 				return;
 			}
@@ -544,11 +550,7 @@ export class NatsEngineAdapter {
 				return;
 			}
 			if (error instanceof EngineTargetError && error.code === "agent_busy" && !command?.browserPayloadHash) {
-				if (claimed && identity) {
-					await this.runtime.store
-						.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
-						.catch(reportError => this.#report(reportError));
-				}
+				if (claimed && identity) await this.#releaseClaim(identity);
 				message.nak(1_000);
 				return;
 			}
@@ -642,13 +644,23 @@ export class NatsEngineAdapter {
 			}
 		}
 		if (commandId) this.#commandFailures.set(commandId, attempt);
-		if (claimed && identity) {
-			await this.runtime.store
-				.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
-				.catch(reportError => this.#report(reportError));
-		}
+		if (claimed && identity) await this.#releaseClaim(identity);
 		message.nak(Math.min(1_000 * 2 ** (attempt - 1), 30_000));
 		this.#report(error);
+	}
+
+	async #releaseClaim(identity: EngineCommandIdentity): Promise<void> {
+		try {
+			await this.runtime.store.releaseCommand(
+				identity.commandId,
+				identity.canonicalHash,
+				this.runtime.engineGeneration,
+			);
+		} catch (error) {
+			// Without this the next delivery would see its own dead claim as in progress until an Engine restart.
+			this.#orphanedClaims.add(identity.commandId);
+			this.#report(error);
+		}
 	}
 
 	async #dispatchCommand(command: EngineCommandEnvelope): Promise<unknown> {
@@ -702,17 +714,24 @@ export class NatsEngineAdapter {
 					sentAt: envelope.sentAt,
 					replyToMessageId: envelope.replyToMessageId,
 				});
-				if (receipt.outcome === "failed") message.nak(1_000);
+				if (receipt.outcome === "failed") this.#retryMessage(message, receipt.error ?? "delivery failed");
 				else message.ack();
 			} catch (error) {
 				if (error instanceof PoisonMessageError || error instanceof EngineTargetError) {
 					message.term(error.message.slice(0, 128));
 				} else {
-					message.nak(1_000);
+					this.#retryMessage(message, error instanceof Error ? error.message : String(error));
 					this.#report(error);
 				}
 			}
 		}
+	}
+
+	/** A peer message that keeps failing ends after the same bounded delivery budget as a command. */
+	#retryMessage(message: JsMsg, reason: string): void {
+		const deliveries = message.info.deliveryCount;
+		if (deliveries < (this.#options.commandAttempts ?? 5)) message.nak(1_000);
+		else message.term(`Delivery failed after ${deliveries} attempts: ${reason}`.slice(0, 128));
 	}
 
 	#parseMessage(message: JsMsg, recipientId: string): AgentMessageEnvelope {
