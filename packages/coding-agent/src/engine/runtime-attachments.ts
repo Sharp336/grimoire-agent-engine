@@ -115,23 +115,15 @@ export function attachmentIdentity(value: EngineAttachment): EngineAttachment {
  */
 export class EngineAttachmentUploads {
 	#lanes = new Map<string, Promise<void>>();
-	readonly #records?: RuntimeRecords;
 	#sweptAt = 0;
 	constructor(
 		readonly root: string,
 		readonly blobs: BlobStore,
-		records?: RuntimeRecords,
-	) {
-		this.#records = records;
-	}
-
-	#ledger(): RuntimeRecords {
-		if (!this.#records) invalid("Attachments require native storage");
-		return this.#records;
-	}
+		readonly records: RuntimeRecords,
+	) {}
 
 	async #ready(key: string, ownerHash: string): Promise<ReadyUpload | undefined> {
-		const row = (await this.#ledger().get("metadata", `blob-upload:${key}`, true)).value as ReadyUpload | null;
+		const row = (await this.records.get("metadata", `blob-upload:${key}`, true)).value as ReadyUpload | null;
 		if (!row) return undefined;
 		if (row.subtype !== "blob_upload" || row.state !== "ready" || row.owner_hash !== ownerHash)
 			throw new EngineTargetError("stale_target", "Attachment identity changed or was removed");
@@ -291,7 +283,7 @@ export class EngineAttachmentUploads {
 		}
 		try {
 			await this.#discard(dir);
-			await this.#ledger().mutate(`blob-upload:${key}`, async tx => {
+			await this.records.mutate(`blob-upload:${key}`, async tx => {
 				if (await tx.get("metadata", `blob-upload:${key}`))
 					throw new EngineTargetError("stale_target", "Attachment upload was already completed");
 				const ready: ReadyUpload = {
@@ -342,7 +334,6 @@ export class EngineAttachmentUploads {
 		)
 			invalid("Attachment chunk is not a canonical bounded range");
 		const offset = request.offset;
-		this.#ledger();
 		if (Date.now() - this.#sweptAt >= PENDING_SWEEP_INTERVAL_MS)
 			void this.sweepAbandoned().catch(error => {
 				logger.warn("Abandoned attachment upload sweep failed", { error: String(error) });
@@ -505,7 +496,6 @@ export class EngineAttachmentUploads {
 	/** Remove a draft: its pending bytes or its `ready` row. A body the row owned is left to the storage owner. */
 	async remove(principalId: string, uploadId: string): Promise<{ removed: true }> {
 		const { key } = this.#key(principalId, uploadId);
-		const records = this.#ledger();
 		return this.#lane(key, async () => {
 			await this.#discard(path.join(this.root, key));
 			// A pending upload does not record its message, so free its admission slot in every open message.
@@ -524,7 +514,7 @@ export class EngineAttachmentUploads {
 				);
 			}
 			// The key already binds the owner, so a row at this key is this owner's draft.
-			await records.mutate(`blob-upload:${key}`, async tx => {
+			await this.records.mutate(`blob-upload:${key}`, async tx => {
 				if (await tx.get("metadata", `blob-upload:${key}`)) await tx.delete("metadata", `blob-upload:${key}`);
 			});
 			return { removed: true };

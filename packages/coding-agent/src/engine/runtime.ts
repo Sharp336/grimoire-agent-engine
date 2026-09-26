@@ -1,8 +1,6 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { pipeline } from "node:stream/promises";
-import { createGunzip } from "node:zlib";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
@@ -12,14 +10,7 @@ import {
 	StreamAdmissionError,
 	type StreamAdmissionLimits,
 } from "@oh-my-pi/pi-ai/utils/stream-admission";
-import {
-	getBlobsDir,
-	isEnoent,
-	logger,
-	SUPPORTED_IMAGE_MIME_TYPES,
-	stableStringifyJson,
-	withTimeout,
-} from "@oh-my-pi/pi-utils";
+import { getBlobsDir, logger, SUPPORTED_IMAGE_MIME_TYPES, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	attachLatencyPersistence,
 	createLatencyAudit,
@@ -53,30 +44,21 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
-import { BLOB_HASH_RE, BlobStore } from "../session/blob-store";
+import { BlobStore } from "../session/blob-store";
 import { NativeSessionWriteRejectedError } from "../session/native-session-storage";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
-import {
-	copyOriginalAttachments,
-	type SessionEntry,
-	type SessionHeader,
-	type SessionLaunchSnapshot,
-	type SessionMessageIdentity,
+import type {
+	SessionEntry,
+	SessionHeader,
+	SessionLaunchSnapshot,
+	SessionMessageIdentity,
 } from "../session/session-entries";
-import {
-	collectPersistedBlobHashes,
-	loadSessionFile,
-	loadSessionMessagesReadOnly,
-	parseSessionContent,
-	resolveBlobRefsInEntries,
-} from "../session/session-loader";
 import {
 	type NativeHistoryForkResult,
 	type SessionDurabilityCheckpoint,
 	SessionManager,
 } from "../session/session-manager";
-import { migrateToCurrentVersion } from "../session/session-migrations";
 import { readStorageBinding, StorageClient, StorageClientError } from "../session/storage-client";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
@@ -118,7 +100,6 @@ import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { readNativeHeader } from "./rocks-runtime-history";
 import { RocksEngineStore } from "./rocks-runtime-store";
-import { RocksEngineMutations } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -136,18 +117,14 @@ import { validateStartFence } from "./start-fence";
 import {
 	EngineAttemptConflictError,
 	type EngineAttemptTargetRecord,
-	type EngineHistoryArchive,
 	EngineInboxConflictError,
 	type EngineModelEffectInput,
-	type EngineStorageReclaimResult,
-	EngineStore,
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
 } from "./store";
 import { waitForEngineWake } from "./wake";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
-export type EngineRuntimeStore = EngineStore | RocksEngineStore;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
@@ -162,60 +139,11 @@ const ASSISTANT_DELTA_WINDOW_MS = 100;
 const ASSISTANT_DELTA_WINDOW_BYTES = 8 * 1024;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
-const MAX_NATIVE_RESTORE_BYTES = 128 * 1024 * 1024;
-const MAX_NATIVE_RESTORE_CHUNK_BYTES = 24_000;
 // Provider bursts are chunked into bounded durable writes below. Keep the
 // transport admission window large enough for one bounded 3 MiB response
 // while leaving the shared AI admission defaults unchanged.
 const ENGINE_STREAM_ADMISSION_MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const ENGINE_STREAM_ADMISSION_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
-
-interface NativeRestoreStageMetadata {
-	schema: "grimoire.engine.native_session_restore_stage.v1";
-	restoreId: string;
-	agentInstanceId: string;
-	agentInstanceRef: string;
-	authorityGeneration: number;
-	contentHash: string;
-	totalBytes: number;
-	replaceBinding?: {
-		bindingId: string;
-		bindingGeneration: number;
-		authorityGeneration: number;
-		executionId: string;
-		attemptId: string;
-		sessionFile: string;
-	};
-}
-
-interface NativeSessionArchiveMetadata {
-	schema: "grimoire.engine.native_session_archive_snapshot.v1";
-	agentInstanceId: string;
-	sessionId: string;
-	contentHash: string;
-	byteLength: number;
-}
-
-interface NativeSessionCheckpoint {
-	schema: "grimoire.engine.native_session_checkpoint.v1";
-	sessionId: string;
-	sessionJsonlHash: string;
-	sessionJsonlBase64: string;
-	artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }>;
-	blobs?: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }>;
-}
-
-interface EngineArchiveVerification {
-	schema: "grimoire.engine.session_archive_verification.v1";
-	agentInstanceId: string;
-	sessionId: string;
-	contentHash: string;
-	byteLength: number;
-	/** Logical content bytes, not reclaimed SQLite pages or filesystem allocation. */
-	sourceBytes: number;
-	sourceRetired: false;
-	freedBytes: 0;
-}
 
 export interface EngineRestoreHistoryTarget {
 	agentInstanceRef: string;
@@ -431,11 +359,6 @@ interface PreparedHistoryStart {
 	result: NonNullable<EngineStartResult["historyEdit"]>;
 }
 
-interface PreparedRestoreStart {
-	sessionManager: SessionManager;
-	stageDir: string;
-}
-
 export interface EngineResolvedSessionProfile {
 	options: Partial<CreateAgentSessionOptions>;
 	childProfiles?: EngineChildProfile[];
@@ -512,13 +435,18 @@ type PendingStartResolution = {
 	controller: AbortController;
 };
 
+/** Session archive, restore staging and child-history expiry are deferred for native storage. */
+export function nativeArchiveUnsupported(): EngineTargetError {
+	return new EngineTargetError("invalid_request", "This archive operation is not supported by native storage");
+}
+
 export class EngineRuntime {
 	readonly agentRegistry = new AgentRegistry();
 	readonly agentLifecycle = new AgentLifecycleManager(this.agentRegistry);
 	readonly asyncJobManager = new AsyncJobManager({ requireAttemptId: true });
 	readonly ircBus = new IrcBus(this.agentRegistry, this.agentLifecycle);
 	readonly engineGeneration: number;
-	readonly store: EngineRuntimeStore;
+	readonly store: RocksEngineStore;
 	readonly attachmentUploads: EngineAttachmentUploads;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #mcpServer: EngineRuntimeOptions["mcpServer"];
@@ -532,9 +460,7 @@ export class EngineRuntime {
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
-	readonly #childHistoryTtlMinutes: number;
 	readonly #childHistoryRetention: "local" | "off" | "grimoire";
-	readonly #archiveChildHistory: EngineRuntimeOptions["archiveChildHistory"];
 	readonly #streamAdmissionLimits: EngineRuntimeOptions["streamAdmissionLimits"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
@@ -550,10 +476,8 @@ export class EngineRuntime {
 	#disposed = false;
 	#storageFailure?: Error;
 	#storageFailureUnsubscribe?: () => void;
-	#storageMaintenance?: Promise<EngineStorageReclaimResult>;
-	#activeControlQueries = 0;
 
-	private constructor(store: EngineRuntimeStore, engineGeneration: number, options: EngineRuntimeOptions) {
+	private constructor(store: RocksEngineStore, engineGeneration: number, options: EngineRuntimeOptions) {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
@@ -576,70 +500,46 @@ export class EngineRuntime {
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
-		this.#childHistoryTtlMinutes = options.childHistoryTtlMinutes ?? 60;
-		if (!Number.isSafeInteger(this.#childHistoryTtlMinutes) || this.#childHistoryTtlMinutes < 1) {
+		const childHistoryTtlMinutes = options.childHistoryTtlMinutes ?? 60;
+		if (!Number.isSafeInteger(childHistoryTtlMinutes) || childHistoryTtlMinutes < 1) {
 			throw new Error("childHistoryTtlMinutes must be a positive integer");
 		}
 		this.#childHistoryRetention = options.childHistoryRetention ?? "local";
-		this.#archiveChildHistory = options.archiveChildHistory;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 		this.attachmentUploads = new EngineAttachmentUploads(
 			path.join(path.dirname(this.#sessionRoot), "engine-uploads"),
 			options.attachmentBlobStore ?? new BlobStore(getBlobsDir()),
-			store instanceof RocksEngineStore ? store.records : undefined,
+			store.records,
 		);
 	}
 
 	static async create(options: EngineRuntimeOptions): Promise<EngineRuntime> {
 		const binding = readStorageBinding();
-		const store = binding
-			? new RocksEngineStore(new StorageClient(binding))
-			: await EngineStore.open(options.databasePath);
+		if (!binding) throw new Error("Engine requires the ClientHost storage binding (GRIMOIRE_STORAGE_BINDING)");
+		const store = new RocksEngineStore(new StorageClient(binding));
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
-		if (store instanceof RocksEngineStore) {
-			await runtime.attachmentUploads.sweepAbandoned();
-			runtime.#nativeDeleteRun = store.reconcilePendingNativeDeletes().catch(error => {
-				logger.warn("Native generation deletion recovery failed", { error: String(error) });
-			});
-		}
+		await runtime.attachmentUploads.sweepAbandoned();
+		runtime.#nativeDeleteRun = store.reconcilePendingNativeDeletes().catch(error => {
+			logger.warn("Native generation deletion recovery failed", { error: String(error) });
+		});
 		runtime.#attachStorageFailure();
 		await runtime.#reconcileLostAttempts();
 		runtime.#inboxWakeRun = runtime.#runInboxWakeLoop();
 		return runtime;
 	}
 
-	get storageMode(): "native" | "legacy" {
-		return this.store instanceof RocksEngineStore ? "native" : "legacy";
-	}
-
-	#legacyStore(): EngineStore {
-		if (this.store instanceof RocksEngineStore) {
-			throw new EngineTargetError("invalid_request", "This archive operation is not supported by native storage");
-		}
-		return this.store;
-	}
-
 	#nativeSessionStorage(locator: string): RocksNativeSessionStorage {
-		if (!(this.store instanceof RocksEngineStore)) throw new Error("Native storage is not configured");
 		const { familyId, generationId } = parseNativeSessionLocator(locator);
 		return new RocksNativeSessionStorage(this.store.storageClient, familyId, generationId);
 	}
 
 	async #sessionHeader(locator: string): Promise<SessionHeader | undefined> {
-		if (this.store instanceof RocksEngineStore) {
-			return (await readNativeHeader(this.store.storageClient, parseNativeSessionLocator(locator))).header;
-		}
-		const loaded = await loadSessionFile(locator, this.#legacyStore().sessionStorage);
-		return loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
+		return (await readNativeHeader(this.store.storageClient, parseNativeSessionLocator(locator))).header;
 	}
 
 	async #readSessionMessages(locator: string) {
-		if (!(this.store instanceof RocksEngineStore)) {
-			return loadSessionMessagesReadOnly(locator, this.#legacyStore().sessionStorage);
-		}
 		const manager = await SessionManager.openNative(this.#nativeSessionStorage(locator));
-		await resolveBlobRefsInEntries(manager.getWorkingEntries(), new BlobStore(getBlobsDir()));
 		return manager.buildSessionContext({ transcript: true, collapseCompactedHistory: true }).messages;
 	}
 
@@ -1276,7 +1176,7 @@ export class EngineRuntime {
 				outcome: "rejected" as const,
 				detail: { code: command.code, message: command.message },
 			};
-			if (command.operation === "start" && settleCommand && this.store instanceof RocksEngineStore) {
+			if (command.operation === "start" && settleCommand) {
 				const event = await this.store.commitUnboundStartRejection(
 					target,
 					{ kind: "rejected", payload, causationCommandId: command.commandId },
@@ -1368,8 +1268,6 @@ export class EngineRuntime {
 		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
-			if (source.attachments && !(this.store instanceof RocksEngineStore))
-				await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const queued = await this.store.enqueueInboxItem(retained, source);
 			if (queued.created) {
 				this.#signalInboxWake();
@@ -1403,8 +1301,6 @@ export class EngineRuntime {
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
 		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(agentInstanceId, async () => {
-			if (source.attachments && !(this.store instanceof RocksEngineStore))
-				await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const result = await this.store.enqueueInboxItem(
 				await this.#agentInboxTarget(agentInstanceId),
 				source,
@@ -1550,84 +1446,6 @@ export class EngineRuntime {
 		});
 	}
 
-	async sessionHistory(
-		agentInstanceId: string,
-		restore?: EngineRestoreHistoryTarget,
-	): Promise<{
-		sessionId: string;
-		leafEntryId: string | null;
-		sessionLeafEntryId?: string | null;
-		entries: Array<{
-			entryId: string;
-			parentEntryId: string | null;
-			role: "user" | "assistant";
-			text: string;
-			createdAt: string;
-			textTruncated: boolean;
-			sourceCommandId?: string;
-			clientMessageId?: string;
-			assistantMessageId?: string;
-			launchSnapshot?: SessionLaunchSnapshot;
-			stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
-			blocks?: EngineHistoryActivityBlock[];
-			images?: EngineHistoryImage[];
-		}>;
-		activityCompleteness: "complete" | "legacy_messages_only";
-	}> {
-		return await this.#inLane(agentInstanceId, async () => {
-			this.#throwIfDisposed();
-			this.#legacyStore(); // Full JSONL history is the legacy API; native callers use sessionHistoryPage.
-			const archive = await this.store.getHistoryArchive(agentInstanceId);
-			if (!restore && archive && archive.state !== "restored") {
-				throw new EngineTargetError(
-					"history_expired",
-					"This history is archived; restore it before opening the live session",
-				);
-			}
-			const live = this.#bindings.get(agentInstanceId);
-			let sessionId: string;
-			let branch: SessionEntry[];
-			if (restore) {
-				const { checkpoint } = await this.#readRestoreCheckpoint({ agentInstanceId, ...restore });
-				const loaded = parseSessionContent(
-					new TextDecoder("utf-8", { fatal: true }).decode(
-						decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL"),
-					),
-				);
-				migrateToCurrentVersion(loaded.entries);
-				sessionId = checkpoint.sessionId;
-				branch = activeSessionBranch(
-					loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
-				);
-			} else if (live) {
-				sessionId = live.session.sessionId;
-				branch = live.session.sessionManager.getBranch();
-			} else {
-				const binding = await this.store.getBinding(agentInstanceId);
-				if (!binding) {
-					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
-				}
-				if (!binding.sessionFile) {
-					const attempt = await this.store.getAttempt(binding.attemptId);
-					if (attempt?.transcript_session_id && attempt.transcript_path && attempt.transcript_revision > 0) {
-						throw new EngineTargetError("history_expired", `OMP session history expired for ${agentInstanceId}`);
-					}
-					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
-				}
-				const loaded = await loadSessionFile(binding.sessionFile, this.#legacyStore().sessionStorage);
-				if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
-					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
-				}
-				migrateToCurrentVersion(loaded.entries);
-				sessionId = loaded.entries[0].id;
-				branch = activeSessionBranch(
-					loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
-				);
-			}
-			return projectHistoryEntries(sessionId, branch);
-		});
-	}
-
 	async sessionHistoryPage(
 		agentInstanceId: string,
 		agentInstanceRef: string,
@@ -1671,8 +1489,6 @@ export class EngineRuntime {
 		expectedRevision?: number,
 	) {
 		const store = this.store;
-		if (!(store instanceof RocksEngineStore))
-			throw new EngineTargetError("invalid_request", "Native chat maintenance is unavailable");
 		const agentInstanceId = await store.chatIdentityId(agentInstanceRef, principalId);
 		return this.#inLane(agentInstanceId, async () => {
 			if (action === "status") return store.chatLifecycleStatus(agentInstanceId, principalId);
@@ -1686,825 +1502,10 @@ export class EngineRuntime {
 	}
 
 	async archivedChats(principalId: string, cursor?: string) {
-		if (!(this.store instanceof RocksEngineStore))
-			throw new EngineTargetError("invalid_request", "Native chat maintenance is unavailable");
 		return this.store.archivedChats(principalId, cursor);
 	}
 
-	async sessionArchive(
-		agentInstanceId: string,
-		expectedContentHash?: string,
-		offset = 0,
-		limit = 24_000,
-	): Promise<{
-		schema: "grimoire.engine.session_archive.v1";
-		agentInstanceId: string;
-		sessionId: string;
-		payloadSchema: "grimoire.engine.native_session_checkpoint.v1";
-		contentHash: string;
-		byteLength: number;
-		offset: number;
-		nextOffset: number | null;
-		contentBase64: string;
-	}> {
-		return await this.#inLane(agentInstanceId, async () => {
-			const binding = await this.#idleArchiveBinding(agentInstanceId);
-			const snapshot =
-				expectedContentHash === undefined
-					? await this.#createSessionArchiveSnapshot(agentInstanceId, binding.sessionFile)
-					: await this.#sessionArchiveSnapshot(agentInstanceId, expectedContentHash);
-			if (!Number.isSafeInteger(offset) || offset < 0 || offset > snapshot.byteLength) {
-				throw new EngineTargetError("invalid_request", "Native session archive offset is outside the payload");
-			}
-			if (!Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
-				throw new EngineTargetError(
-					"invalid_request",
-					"Native session archive limit is outside the accepted range",
-				);
-			}
-			const end = Math.min(snapshot.byteLength, offset + limit);
-			const content = Buffer.alloc(end - offset);
-			const handle = await fs.open(snapshot.payloadPath, "r");
-			try {
-				const { bytesRead } = await handle.read(content, 0, content.byteLength, offset);
-				if (bytesRead !== content.byteLength) {
-					throw new EngineTargetError("history_expired", "Native session archive snapshot is incomplete");
-				}
-			} finally {
-				await handle.close();
-			}
-			return {
-				schema: "grimoire.engine.session_archive.v1",
-				agentInstanceId,
-				sessionId: snapshot.sessionId,
-				payloadSchema: "grimoire.engine.native_session_checkpoint.v1",
-				contentHash: snapshot.contentHash,
-				byteLength: snapshot.byteLength,
-				offset,
-				nextOffset: end < snapshot.byteLength ? end : null,
-				contentBase64: content.toString("base64"),
-			};
-		});
-	}
-
-	async #idleArchiveBinding(agentInstanceId: string): Promise<EngineBindingSnapshot & { sessionFile: string }> {
-		this.#legacyStore();
-		this.#throwIfDisposed();
-		const live = this.#bindings.get(agentInstanceId);
-		if (
-			live &&
-			(live.state !== "idle" ||
-				!TERMINAL_ATTEMPT_STATES.has(live.attemptState) ||
-				live.session.isStreaming ||
-				live.pendingInput !== undefined)
-		) {
-			throw new EngineTargetError("agent_busy", `AgentInstance ${agentInstanceId} is not idle for archival`);
-		}
-		const binding = live ? this.#snapshot(live) : await this.store.getBinding(agentInstanceId);
-		if (!binding?.sessionFile) {
-			throw new EngineTargetError("history_expired", `Native session archive is unavailable for ${agentInstanceId}`);
-		}
-		const attempt = await this.store.getAttempt(binding.attemptId);
-		if (
-			binding.state === "running" ||
-			!attempt ||
-			!this.#attemptMatchesTarget(attempt, binding) ||
-			!TERMINAL_ATTEMPT_STATES.has(attempt.state)
-		) {
-			throw new EngineTargetError("agent_busy", `AgentInstance ${agentInstanceId} is not durably idle for archival`);
-		}
-		if (live) {
-			await live.traceWriteTail;
-			await live.session.sessionManager.flushAndCheckpoint();
-		}
-		return { ...binding, sessionFile: binding.sessionFile };
-	}
-
-	/** Point-in-time preflight, not a deletion lease. Retirement must repeat this check in its own lane. */
-	async sessionArchiveVerify(target: EngineTarget, contentHash: string): Promise<EngineArchiveVerification> {
-		return await this.#inLane(target.agentInstanceId, () => this.#verifyArchiveSource(target, contentHash));
-	}
-
-	async #verifyArchiveSource(target: EngineTarget, contentHash: string): Promise<EngineArchiveVerification> {
-		const retained = await this.#requireSessionTarget(target);
-		const binding = await this.#idleArchiveBinding(target.agentInstanceId);
-		if ((await this.store.listInboxItems(retained.sessionId)).length > 0) {
-			throw new EngineTargetError("agent_busy", "Pending inbox messages must be resolved before archival");
-		}
-		const snapshot = await this.#sessionArchiveSnapshot(target.agentInstanceId, contentHash);
-		await verifyNativeArchiveFile(snapshot.payloadPath, snapshot.byteLength, contentHash);
-		const checkpoint = parseNativeSessionCheckpoint(await fs.readFile(snapshot.payloadPath));
-		let content: string;
-		try {
-			content = await this.#legacyStore().sessionStorage.readText(binding.sessionFile);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			throw new EngineTargetError("history_expired", "Native archive source history is unavailable");
-		}
-		if (
-			checkpoint.sessionId !== retained.sessionId ||
-			checkpoint.sessionId !== snapshot.sessionId ||
-			`sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}` !== checkpoint.sessionJsonlHash
-		) {
-			throw new EngineTargetError("stale_target", "Native session changed after the archive snapshot");
-		}
-		if (!binding.sessionFile.endsWith(".jsonl")) {
-			throw new EngineTargetError("history_expired", "Native session artifact path is invalid");
-		}
-		const artifactsDir = binding.sessionFile.slice(0, -".jsonl".length);
-		let names: string[] = [];
-		try {
-			const stat = await fs.lstat(artifactsDir);
-			if (!stat.isDirectory() || stat.isSymbolicLink()) {
-				throw new EngineTargetError("history_expired", "Native session artifact directory is unsafe");
-			}
-			const files = await fs.readdir(artifactsDir, { withFileTypes: true });
-			if (files.some(file => !file.isFile() || file.isSymbolicLink())) {
-				throw new EngineTargetError("history_expired", "Native session artifact directory is unsafe");
-			}
-			names = files.map(file => file.name).sort();
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-		if (stableStringifyJson(names) !== stableStringifyJson(checkpoint.artifacts.map(file => file.name).sort())) {
-			throw new EngineTargetError("stale_target", "Native session attachments changed after the archive snapshot");
-		}
-		let sourceBytes = Buffer.byteLength(content, "utf8");
-		for (const artifact of checkpoint.artifacts) {
-			const handle = await fs.open(path.join(artifactsDir, artifact.name), "r");
-			try {
-				if (
-					(await handle.stat()).size !== artifact.byteLength ||
-					(await hashNativeArchiveFile(handle)) !== artifact.contentHash
-				) {
-					throw new EngineTargetError(
-						"stale_target",
-						"Native session attachment changed after the archive snapshot",
-					);
-				}
-			} finally {
-				await handle.close();
-			}
-			sourceBytes += artifact.byteLength;
-		}
-		return {
-			schema: "grimoire.engine.session_archive_verification.v1",
-			agentInstanceId: target.agentInstanceId,
-			sessionId: checkpoint.sessionId,
-			contentHash,
-			byteLength: snapshot.byteLength,
-			sourceBytes,
-			sourceRetired: false,
-			freedBytes: 0,
-		};
-	}
-
-	async sessionArchiveRetire(
-		target: EngineTarget,
-		contentHash: string,
-		archivePath: string,
-		operationId: string,
-	): Promise<Record<string, unknown>> {
-		this.#legacyStore();
-		return await this.#inLane(target.agentInstanceId, async () => {
-			this.#throwIfDisposed();
-			if (!/^[A-Za-z0-9_-]{8,128}$/.test(operationId))
-				throw new EngineTargetError("invalid_request", "Archive operationId is invalid");
-			let journal = await this.store.getHistoryArchive(target.agentInstanceId);
-			if (journal?.state === "restored" && journal.operationId === operationId) {
-				throw new EngineTargetError("stale_target", "This archive operation has already been restored");
-			}
-			const compressed = await readCompressedNativeArchive(archivePath, contentHash);
-			if (journal && journal.state !== "restored") {
-				if (journal.operationId !== operationId)
-					throw new EngineTargetError("stale_target", "Another archive operation owns this history");
-				this.#assertArchiveRequest(journal, target, contentHash, archivePath);
-				if (journal.state === "restoring")
-					throw new EngineTargetError("stale_target", "Archive restoration is in progress");
-				if (journal.state === "retired") {
-					await this.#discardRetiredCheckpoint(journal);
-					return this.#archiveResult(journal);
-				}
-			} else {
-				await this.#verifyArchiveSource(target, contentHash);
-				const live = this.#bindings.get(target.agentInstanceId);
-				if (live) await this.#terminateBinding(live, "requested");
-				await this.#verifyArchiveSource(target, contentHash);
-				const binding = await this.#idleArchiveBinding(target.agentInstanceId);
-				const candidate: EngineHistoryArchive = {
-					schema: "grimoire.engine.history_archive_journal.v1",
-					state: "retiring",
-					operationId,
-					binding,
-					sessionId: compressed.checkpoint.sessionId,
-					contentHash,
-					nativeBytes: compressed.nativeBytes,
-					archivePath: path.resolve(archivePath),
-					archiveHash: compressed.archiveHash,
-					archiveBytes: compressed.archiveBytes,
-				};
-				await this.#archiveSourceFiles(candidate, compressed.checkpoint);
-				await this.#legacyStore().putHistoryArchive(candidate, journal);
-				journal = candidate;
-			}
-			if (compressed.archiveHash !== journal.archiveHash || compressed.nativeBytes !== journal.nativeBytes) {
-				throw new EngineTargetError("stale_target", "Compressed archive proof changed");
-			}
-			const files = await this.#archiveSourceFiles(journal, compressed.checkpoint);
-			for (const file of files) await fs.unlink(file);
-			const artifactsDir = journal.binding.sessionFile.slice(0, -".jsonl".length);
-			try {
-				await fs.rmdir(artifactsDir);
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-			try {
-				await this.#legacyStore().sessionStorage.unlink(journal.binding.sessionFile);
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-			await this.#legacyStore().sessionStorage.drain();
-			await this.#legacyStore().clearBindingSession(
-				target.agentInstanceId,
-				target.attemptId,
-				journal.binding.sessionFile,
-			);
-			// Keep the Engine checkpoint until the compressed copy is independently readable after retirement.
-			await readCompressedNativeArchive(journal.archivePath, journal.contentHash);
-			const complete: EngineHistoryArchive = { ...journal, state: "retired" };
-			await this.#legacyStore().putHistoryArchive(complete, journal);
-			await this.#discardRetiredCheckpoint(complete);
-			return this.#archiveResult(complete);
-		});
-	}
-
-	async sessionArchiveRestore(
-		target: EngineTarget,
-		contentHash: string,
-		operationId: string,
-	): Promise<Record<string, unknown>> {
-		this.#legacyStore();
-		return await this.#inLane(target.agentInstanceId, async () => {
-			this.#throwIfDisposed();
-			let journal = await this.store.getHistoryArchive(target.agentInstanceId);
-			if (!journal)
-				throw new EngineTargetError("history_expired", "No local archive journal for this AgentInstance");
-			if (journal.operationId !== operationId)
-				throw new EngineTargetError("stale_target", "Archive operation changed");
-			this.#assertArchiveRequest(journal, target, contentHash, journal.archivePath);
-			if (journal.state === "restored") return this.#archiveResult(journal);
-			const compressed = await readCompressedNativeArchive(journal.archivePath, journal.contentHash);
-			if (compressed.archiveHash !== journal.archiveHash)
-				throw new EngineTargetError("stale_target", "Compressed archive proof changed");
-			const existing = await this.#archiveSourceFiles(journal, compressed.checkpoint);
-			if (journal.state !== "restoring") {
-				const restoring: EngineHistoryArchive = { ...journal, state: "restoring" };
-				await this.#legacyStore().putHistoryArchive(restoring, journal);
-				journal = restoring;
-			}
-			const artifactsDir = journal.binding.sessionFile.slice(0, -".jsonl".length);
-			const restoreTempDir = this.#sessionArchiveSnapshotDir(target.agentInstanceId);
-			await restoreCheckpointBlobs(compressed.checkpoint);
-			await fs.mkdir(restoreTempDir, { recursive: true });
-			if ((await fs.lstat(restoreTempDir)).isSymbolicLink())
-				throw new EngineTargetError("invalid_request", "Archive staging directory is unsafe");
-			for (const entry of await fs.readdir(restoreTempDir, { withFileTypes: true })) {
-				if (
-					entry.isFile() &&
-					entry.name.startsWith(`${journal.operationId}-`) &&
-					entry.name.endsWith(".restore-tmp")
-				) {
-					await fs.unlink(path.join(restoreTempDir, entry.name));
-				}
-			}
-			if (compressed.checkpoint.artifacts.length) await fs.mkdir(artifactsDir, { recursive: true });
-			for (const artifact of compressed.checkpoint.artifacts) {
-				const destination = path.join(artifactsDir, artifact.name);
-				if (existing.includes(destination)) continue;
-				const temporary = path.join(restoreTempDir, `${journal.operationId}-${crypto.randomUUID()}.restore-tmp`);
-				const handle = await fs.open(temporary, "wx");
-				try {
-					await handle.writeFile(decodeCanonicalBase64(artifact.contentBase64, "Archive attachment"));
-					await handle.sync();
-					await handle.close();
-					await fs.link(temporary, destination);
-				} finally {
-					await handle.close();
-					await fs.unlink(temporary);
-				}
-			}
-			await this.#legacyStore().sessionStorage.writeTextAtomic(
-				journal.binding.sessionFile,
-				new TextDecoder("utf-8", { fatal: true }).decode(
-					decodeCanonicalBase64(compressed.checkpoint.sessionJsonlBase64, "Archive session"),
-				),
-			);
-			await this.#legacyStore().sessionStorage.drain();
-			const current = await this.store.getBinding(target.agentInstanceId);
-			if (!current) throw new EngineTargetError("stale_target", "Archive binding disappeared");
-			this.#assertArchiveRequest(journal, current, contentHash, journal.archivePath);
-			await this.store.putBinding({ ...current, sessionFile: journal.binding.sessionFile, state: "released" });
-			const restored: EngineHistoryArchive = { ...journal, state: "restored" };
-			await this.#legacyStore().putHistoryArchive(restored, journal);
-			return this.#archiveResult(restored);
-		});
-	}
-
-	#assertArchiveRequest(
-		journal: EngineHistoryArchive,
-		target: EngineTarget,
-		contentHash: string,
-		archivePath: string,
-	): void {
-		for (const field of [
-			"agentInstanceId",
-			"bindingId",
-			"executionId",
-			"attemptId",
-			"authorityGeneration",
-			"bindingGeneration",
-			"engineGeneration",
-		] as const) {
-			if (journal.binding[field] !== target[field])
-				throw new EngineTargetError("stale_target", "Archive target generation changed");
-		}
-		if (journal.contentHash !== contentHash || journal.archivePath !== path.resolve(archivePath)) {
-			throw new EngineTargetError("stale_target", "Archive operation identity changed");
-		}
-	}
-
-	#archiveResult(journal: EngineHistoryArchive): Record<string, unknown> {
-		return {
-			schema: "grimoire.engine.history_archive_result.v1",
-			operationId: journal.operationId,
-			agentInstanceId: journal.binding.agentInstanceId,
-			sessionId: journal.sessionId,
-			contentHash: journal.contentHash,
-			state: journal.state,
-			sourceRetired: journal.state === "retired",
-			archiveBytes: journal.archiveBytes,
-			// Removing SQL content is not proof that SQLite returned pages to the filesystem.
-			freedBytes: 0,
-		};
-	}
-
-	async #discardRetiredCheckpoint(journal: EngineHistoryArchive): Promise<void> {
-		const snapshot = path.join(
-			this.#sessionArchiveSnapshotDir(journal.binding.agentInstanceId),
-			`${journal.contentHash.slice(7)}.bin`,
-		);
-		try {
-			await fs.unlink(snapshot);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-	}
-
-	async #archiveSourceFiles(journal: EngineHistoryArchive, checkpoint: NativeSessionCheckpoint): Promise<string[]> {
-		if (!(await this.store.isCurrentEngineGeneration(this.engineGeneration))) {
-			throw new EngineTargetError("stale_target", "A newer Engine owns this history store");
-		}
-		const source = journal.binding.sessionFile;
-		const sessionDir = path.join(this.#sessionRoot, engineRouteToken(journal.binding.agentInstanceId));
-		if (
-			!source.endsWith(".jsonl") ||
-			path.dirname(path.resolve(source)) !== path.resolve(sessionDir) ||
-			path.resolve(journal.archivePath).startsWith(`${path.resolve(sessionDir)}${path.sep}`)
-		) {
-			throw new EngineTargetError("invalid_request", "Archive source is outside the owned session directory");
-		}
-		const current = await this.store.getBinding(journal.binding.agentInstanceId);
-		if (!current) throw new EngineTargetError("stale_target", "Archive binding disappeared");
-		this.#assertArchiveRequest(journal, current, journal.contentHash, journal.archivePath);
-		if (
-			current.state === "running" ||
-			this.#bindings.has(current.agentInstanceId) ||
-			(current.sessionFile !== undefined && current.sessionFile !== source) ||
-			(await this.#legacyStore().hasOtherSessionBinding(current.agentInstanceId, source)) ||
-			(await this.store.listInboxItems(journal.sessionId)).length > 0
-		) {
-			throw new EngineTargetError("agent_busy", "Archive source is still in use");
-		}
-		const attempt = await this.store.getAttempt(current.attemptId);
-		if (!attempt || !TERMINAL_ATTEMPT_STATES.has(attempt.state))
-			throw new EngineTargetError("agent_busy", "Archive Attempt is not terminal");
-		try {
-			const text = await this.#legacyStore().sessionStorage.readText(source);
-			if (`sha256:${sha256(text)}` !== checkpoint.sessionJsonlHash)
-				throw new EngineTargetError("stale_target", "Archive source history changed");
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-		const artifactsDir = source.slice(0, -".jsonl".length);
-		for (const directory of [this.#sessionRoot, sessionDir, artifactsDir]) {
-			try {
-				const stat = await fs.lstat(directory);
-				if (!stat.isDirectory() || stat.isSymbolicLink())
-					throw new EngineTargetError("invalid_request", "Archive source directory is unsafe");
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-		}
-		const result: string[] = [];
-		try {
-			for (const file of await fs.readdir(artifactsDir, { withFileTypes: true })) {
-				const expected = checkpoint.artifacts.find(artifact => artifact.name === file.name);
-				if (!expected || !file.isFile() || file.isSymbolicLink())
-					throw new EngineTargetError("stale_target", "Unexpected archive source attachment");
-				const filename = path.join(artifactsDir, file.name);
-				await verifyNativeArchiveFile(filename, expected.byteLength, expected.contentHash);
-				result.push(filename);
-			}
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-		return result;
-	}
-
-	async #createSessionArchiveSnapshot(
-		agentInstanceId: string,
-		sessionFile: string,
-	): Promise<NativeSessionArchiveMetadata & { payloadPath: string }> {
-		let content: string;
-		try {
-			content = await this.#legacyStore().sessionStorage.readText(sessionFile);
-		} catch (error) {
-			if (isEnoent(error)) {
-				throw new EngineTargetError(
-					"history_expired",
-					`Native session archive is unavailable for ${agentInstanceId}`,
-				);
-			}
-			throw error;
-		}
-		if (Math.ceil(Buffer.byteLength(content, "utf8") / 3) * 4 > MAX_NATIVE_RESTORE_BYTES) {
-			throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
-		}
-		const loaded = await loadSessionFile(sessionFile, this.#legacyStore().sessionStorage);
-		const header = loaded.entries[0];
-		if (header?.type !== "session") {
-			throw new EngineTargetError("history_expired", `Native session archive is invalid for ${agentInstanceId}`);
-		}
-		const blobStore = new BlobStore(getBlobsDir());
-		const blobFiles = await Promise.all(
-			collectPersistedBlobHashes(loaded.entries).map(async hash => {
-				const existing = await blobStore.existingPath(hash);
-				if (!existing) throw new EngineTargetError("history_expired", "Native image blob is unavailable");
-				return existing;
-			}),
-		);
-		if (blobFiles.length && (await fs.lstat(getBlobsDir())).isSymbolicLink())
-			throw new EngineTargetError("history_expired", "Native image blob directory is unsafe");
-		const artifactsDir = sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : "";
-		let artifactFiles: string[] = [];
-		if (artifactsDir) {
-			try {
-				const children = await fs.readdir(artifactsDir, { withFileTypes: true });
-				if (children.some(child => !child.isFile() || child.isSymbolicLink())) {
-					throw new EngineTargetError("history_expired", "Native session artifact directory is unsafe");
-				}
-				artifactFiles = children.map(child => path.join(artifactsDir, child.name)).sort();
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-		}
-		for (const artifactFile of artifactFiles) {
-			const name = path.basename(artifactFile);
-			if (
-				!/^[A-Za-z0-9_.-]+$/.test(name) ||
-				path.dirname(path.resolve(artifactFile)) !== path.resolve(artifactsDir)
-			) {
-				throw new EngineTargetError("history_expired", "Native session artifact path is invalid");
-			}
-		}
-		const snapshotDir = this.#sessionArchiveSnapshotDir(agentInstanceId);
-		await fs.mkdir(snapshotDir, { recursive: true });
-		const temporaryPath = path.join(snapshotDir, `${crypto.randomUUID()}.tmp`);
-		const output = await fs.open(temporaryPath, "wx");
-		const digest = crypto.createHash("sha256");
-		let byteLength = 0;
-		let contentHash: string;
-		let payloadPath: string;
-		const write = async (text: string) => {
-			const bytes = Buffer.from(text, "utf8");
-			if (byteLength + bytes.byteLength > MAX_NATIVE_RESTORE_BYTES) {
-				throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
-			}
-			await output.writeFile(bytes);
-			digest.update(bytes);
-			byteLength += bytes.byteLength;
-		};
-		try {
-			await write(
-				`{"schema":"grimoire.engine.native_session_checkpoint.v1","sessionId":${JSON.stringify(header.id)},` +
-					`"sessionJsonlHash":"sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}","sessionJsonlBase64":"`,
-			);
-			const sessionBytes = Buffer.from(content, "utf8");
-			const chunkBytes = 48 * 1024;
-			for (let offset = 0; offset < sessionBytes.byteLength; offset += chunkBytes) {
-				await write(sessionBytes.subarray(offset, offset + chunkBytes).toString("base64"));
-			}
-			await write('"');
-			for (const [kind, files] of [
-				["artifacts", artifactFiles],
-				["blobs", blobFiles],
-			] as const) {
-				await write(`,"${kind}":[`);
-				for (const [index, artifactFile] of files.entries()) {
-					const fileStat = await fs.lstat(artifactFile);
-					if (!fileStat.isFile() || fileStat.isSymbolicLink())
-						throw new EngineTargetError("history_expired", "Native archive file is unsafe");
-					const artifact = await fs.open(artifactFile, "r");
-					try {
-						const stat = await artifact.stat();
-						if (!stat.isFile() || Math.ceil(stat.size / 3) * 4 > MAX_NATIVE_RESTORE_BYTES - byteLength) {
-							throw new EngineTargetError(
-								"history_expired",
-								"Native session artifact exceeds the accepted range",
-							);
-						}
-						const expectedHash = await hashNativeArchiveFile(artifact);
-						if (kind === "blobs" && expectedHash !== `sha256:${path.basename(artifactFile)}`)
-							throw new EngineTargetError("history_expired", "Native image blob hash does not match");
-						await write(
-							`${index ? "," : ""}{"name":${JSON.stringify(path.basename(artifactFile))},` +
-								`"contentHash":"${expectedHash}","byteLength":${stat.size},"contentBase64":"`,
-						);
-						const actualHash = crypto.createHash("sha256");
-						const buffer = Buffer.alloc(chunkBytes);
-						for (let offset = 0; offset < stat.size; offset += chunkBytes) {
-							const length = Math.min(chunkBytes, stat.size - offset);
-							const { bytesRead } = await artifact.read(buffer, 0, length, offset);
-							if (bytesRead !== length) {
-								throw new EngineTargetError("stale_target", "Native session artifact changed during archival");
-							}
-							const chunk = buffer.subarray(0, bytesRead);
-							actualHash.update(chunk);
-							await write(chunk.toString("base64"));
-						}
-						if (
-							(await artifact.stat()).size !== stat.size ||
-							`sha256:${actualHash.digest("hex")}` !== expectedHash
-						) {
-							throw new EngineTargetError("stale_target", "Native session artifact changed during archival");
-						}
-						await write('"}');
-					} finally {
-						await artifact.close();
-					}
-				}
-				await write("]");
-			}
-			await write("}\n");
-			await output.sync();
-			await output.close();
-			contentHash = `sha256:${digest.digest("hex")}`;
-			payloadPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.bin`);
-			await verifyNativeArchiveFile(temporaryPath, byteLength, contentHash);
-			try {
-				await fs.link(temporaryPath, payloadPath);
-			} catch (error) {
-				if (!isEexist(error)) throw error;
-				await verifyNativeArchiveFile(payloadPath, byteLength, contentHash);
-			}
-		} finally {
-			await output.close();
-			await fs.unlink(temporaryPath);
-		}
-		const metadataPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.json`);
-		const metadata: NativeSessionArchiveMetadata = {
-			schema: "grimoire.engine.native_session_archive_snapshot.v1",
-			agentInstanceId,
-			sessionId: header.id,
-			contentHash,
-			byteLength,
-		};
-		const metadataFile = await fs.open(temporaryPath, "wx");
-		try {
-			await metadataFile.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
-			await metadataFile.sync();
-			await metadataFile.close();
-			try {
-				await fs.link(temporaryPath, metadataPath);
-			} catch (error) {
-				if (!isEexist(error)) throw error;
-				const existing = JSON.parse(await fs.readFile(metadataPath, "utf8")) as NativeSessionArchiveMetadata;
-				if (stableStringifyJson(existing) !== stableStringifyJson(metadata)) {
-					throw new EngineTargetError("history_expired", "Native session archive metadata is corrupt");
-				}
-			}
-		} finally {
-			await metadataFile.close();
-			await fs.unlink(temporaryPath);
-		}
-		return { ...metadata, payloadPath };
-	}
-
-	async #sessionArchiveSnapshot(
-		agentInstanceId: string,
-		contentHash: string,
-	): Promise<NativeSessionArchiveMetadata & { payloadPath: string }> {
-		if (!/^sha256:[0-9a-f]{64}$/.test(contentHash)) {
-			throw new EngineTargetError("invalid_request", "Native session archive content hash is invalid");
-		}
-		const snapshotDir = this.#sessionArchiveSnapshotDir(agentInstanceId);
-		const digest = contentHash.slice("sha256:".length);
-		const payloadPath = path.join(snapshotDir, `${digest}.bin`);
-		let metadata: NativeSessionArchiveMetadata;
-		try {
-			metadata = JSON.parse(await fs.readFile(path.join(snapshotDir, `${digest}.json`), "utf8"));
-			const stat = await fs.stat(payloadPath);
-			if (
-				metadata.schema !== "grimoire.engine.native_session_archive_snapshot.v1" ||
-				metadata.agentInstanceId !== agentInstanceId ||
-				metadata.contentHash !== contentHash ||
-				!Number.isSafeInteger(metadata.byteLength) ||
-				metadata.byteLength < 1 ||
-				metadata.byteLength > MAX_NATIVE_RESTORE_BYTES ||
-				stat.size !== metadata.byteLength
-			) {
-				throw new Error("invalid archive snapshot");
-			}
-		} catch (error) {
-			if (isEnoent(error))
-				throw new EngineTargetError("stale_target", "Native session archive snapshot is unavailable");
-			throw new EngineTargetError("history_expired", "Native session archive snapshot is invalid");
-		}
-		return { ...metadata, payloadPath };
-	}
-
-	async sessionRestoreStage(request: {
-		agentInstanceId: string;
-		agentInstanceRef: string;
-		authorityGeneration: number;
-		contentHash: string;
-		totalBytes: number;
-		offset: number;
-		contentBase64: string;
-		replaceRetainedBinding?: boolean;
-	}): Promise<{ restoreId: string; contentHash: string; totalBytes: number; nextOffset: number; complete: boolean }> {
-		this.#legacyStore();
-		return await this.#inLane(request.agentInstanceId, async () => {
-			this.#throwIfDisposed();
-			if (!request.agentInstanceId.trim() || !request.agentInstanceRef.trim()) {
-				throw new EngineTargetError("invalid_request", "Restore target identity must be non-empty");
-			}
-			if (request.agentInstanceId !== engineAgentInstanceId(request.agentInstanceRef)) {
-				throw new EngineTargetError("invalid_request", "Restore AgentInstance id does not match its durable ref");
-			}
-			if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
-				throw new EngineTargetError("invalid_request", "Restore authorityGeneration must be non-negative");
-			}
-			if (!/^sha256:[0-9a-f]{64}$/.test(request.contentHash)) {
-				throw new EngineTargetError("invalid_request", "Restore contentHash must be a SHA-256 digest");
-			}
-			if (
-				!Number.isSafeInteger(request.totalBytes) ||
-				request.totalBytes < 1 ||
-				request.totalBytes > MAX_NATIVE_RESTORE_BYTES
-			) {
-				throw new EngineTargetError("invalid_request", "Restore totalBytes is outside the accepted range");
-			}
-			if (!Number.isSafeInteger(request.offset) || request.offset < 0 || request.offset > request.totalBytes) {
-				throw new EngineTargetError("invalid_request", "Restore offset is outside the payload");
-			}
-			if (
-				typeof request.contentBase64 !== "string" ||
-				request.contentBase64.length > Math.ceil(MAX_NATIVE_RESTORE_CHUNK_BYTES / 3) * 4
-			) {
-				throw new EngineTargetError("invalid_request", "Restore chunk is outside the accepted range");
-			}
-			const chunk = decodeCanonicalBase64(request.contentBase64, "Restore chunk");
-			if (chunk.byteLength < 1 || chunk.byteLength > MAX_NATIVE_RESTORE_CHUNK_BYTES) {
-				throw new EngineTargetError("invalid_request", "Restore chunk is outside the accepted range");
-			}
-			if (request.offset + chunk.byteLength > request.totalBytes) {
-				throw new EngineTargetError("invalid_request", "Restore chunk exceeds totalBytes");
-			}
-			const prior = await this.store.getBinding(request.agentInstanceId);
-			let replaceBinding: NativeRestoreStageMetadata["replaceBinding"];
-			if (request.replaceRetainedBinding) {
-				if (!prior?.sessionFile || (prior.state !== "idle" && prior.state !== "released")) {
-					throw new EngineTargetError("stale_target", "Restore target has no terminal retained native session");
-				}
-				const live = this.#bindings.get(request.agentInstanceId);
-				if (
-					live &&
-					(live.bindingId !== prior.bindingId ||
-						live.bindingGeneration !== prior.bindingGeneration ||
-						live.attemptId !== prior.attemptId ||
-						live.executionId !== prior.executionId ||
-						live.authorityGeneration !== prior.authorityGeneration ||
-						live.sessionFile !== prior.sessionFile ||
-						live.state !== "idle" ||
-						live.session.isStreaming)
-				) {
-					throw new EngineTargetError("agent_busy", "Restore target binding is not durably idle");
-				}
-				replaceBinding = {
-					bindingId: prior.bindingId,
-					bindingGeneration: prior.bindingGeneration,
-					authorityGeneration: prior.authorityGeneration,
-					executionId: prior.executionId,
-					attemptId: prior.attemptId,
-					sessionFile: prior.sessionFile,
-				};
-			} else if (prior?.sessionFile) {
-				throw new EngineTargetError("stale_target", "Restore target already has a native session");
-			}
-
-			const restoreId = crypto
-				.createHash("sha256")
-				.update(
-					`${request.agentInstanceId}\0${request.agentInstanceRef}\0${request.authorityGeneration}\0${request.contentHash}\0${stableStringifyJson(replaceBinding ?? null)}`,
-				)
-				.digest("hex");
-			const stageDir = this.#restoreStageDir(restoreId);
-			const metadata: NativeRestoreStageMetadata = {
-				schema: "grimoire.engine.native_session_restore_stage.v1",
-				restoreId,
-				agentInstanceId: request.agentInstanceId,
-				agentInstanceRef: request.agentInstanceRef,
-				authorityGeneration: request.authorityGeneration,
-				contentHash: request.contentHash,
-				totalBytes: request.totalBytes,
-				...(replaceBinding ? { replaceBinding } : {}),
-			};
-			await fs.mkdir(stageDir, { recursive: true });
-			const metadataPath = path.join(stageDir, "metadata.json");
-			try {
-				await fs.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", flag: "wx" });
-			} catch (error) {
-				if (!isEexist(error)) throw error;
-				const existing = JSON.parse(await fs.readFile(metadataPath, "utf8")) as NativeRestoreStageMetadata;
-				if (stableStringifyJson(existing) !== stableStringifyJson(metadata)) {
-					throw new EngineTargetError("stale_target", "Restore stage identity changed");
-				}
-			}
-			const payloadPath = path.join(stageDir, "checkpoint.bin");
-			let currentBytes = 0;
-			try {
-				currentBytes = (await fs.stat(payloadPath)).size;
-			} catch (error) {
-				if (!isEnoent(error)) throw error;
-			}
-			if (request.offset > currentBytes) {
-				throw new EngineTargetError("stale_target", `Restore expects offset ${currentBytes}`);
-			}
-			if (request.offset < currentBytes) {
-				const replayEnd = request.offset + chunk.byteLength;
-				if (replayEnd > currentBytes) {
-					throw new EngineTargetError("stale_target", "Restore chunk conflicts with staged bytes");
-				}
-				const replay = Buffer.alloc(chunk.byteLength);
-				const handle = await fs.open(payloadPath, "r");
-				try {
-					const { bytesRead } = await handle.read(replay, 0, replay.byteLength, request.offset);
-					if (bytesRead !== replay.byteLength || !replay.equals(chunk)) {
-						throw new EngineTargetError("stale_target", "Restore chunk conflicts with staged bytes");
-					}
-				} finally {
-					await handle.close();
-				}
-			} else {
-				await fs.appendFile(payloadPath, chunk);
-				currentBytes += chunk.byteLength;
-			}
-			if (currentBytes > request.totalBytes) {
-				throw new EngineTargetError("stale_target", "Restore stage exceeds totalBytes");
-			}
-			const complete = currentBytes === request.totalBytes;
-			if (complete) {
-				const current = await fs.readFile(payloadPath);
-				const hash = `sha256:${crypto.createHash("sha256").update(current).digest("hex")}`;
-				if (hash !== request.contentHash) {
-					await fs.rm(payloadPath, { force: true });
-					await fs.rm(path.join(stageDir, "ready"), { force: true });
-					throw new EngineTargetError("invalid_request", "Restore checkpoint hash does not match");
-				}
-				try {
-					parseNativeSessionCheckpoint(current);
-				} catch (error) {
-					await fs.rm(payloadPath, { force: true });
-					await fs.rm(path.join(stageDir, "ready"), { force: true });
-					throw error;
-				}
-				await fs.writeFile(path.join(stageDir, "ready"), `${request.contentHash}\n`, {
-					encoding: "utf8",
-					flag: "w",
-				});
-			}
-			return {
-				restoreId,
-				contentHash: request.contentHash,
-				totalBytes: request.totalBytes,
-				nextOffset: currentBytes,
-				complete,
-			};
-		});
-	}
-
-	async sweepExpiredChildHistory(now = Date.now()): Promise<{
+	async sweepExpiredChildHistory(): Promise<{
 		expired: number;
 		archived: number;
 		deleted: number;
@@ -2514,73 +1515,7 @@ export class EngineRuntime {
 		if (this.#childHistoryRetention === "local") {
 			return { expired: 0, archived: 0, deleted: 0, retained: 0 };
 		}
-		this.#legacyStore();
-		const cutoff = now - this.#childHistoryTtlMinutes * 60_000;
-		const candidates = await this.#legacyStore().listExpiredChildHistory(cutoff);
-		let archived = 0;
-		let deleted = 0;
-		let retained = 0;
-		for (const candidate of candidates) {
-			await this.#inLane(candidate.agentInstanceId, async () => {
-				const archive = await this.store.getHistoryArchive(candidate.agentInstanceId);
-				if (archive && archive.state !== "restored") {
-					retained++;
-					return;
-				}
-				let localDeleted = false;
-				const binding = await this.store.getBinding(candidate.agentInstanceId);
-				const attempt = await this.store.getAttempt(candidate.attemptId);
-				if (
-					binding?.attemptId !== candidate.attemptId ||
-					binding.sessionFile !== candidate.sessionFile ||
-					!attempt ||
-					attempt.updated_at > cutoff ||
-					!["completed", "cancelled", "failed", "interrupted"].includes(attempt.state)
-				)
-					return;
-				try {
-					let content: string;
-					try {
-						content = await this.#legacyStore().sessionStorage.readText(candidate.sessionFile);
-					} catch (error) {
-						if (!isEnoent(error)) throw error;
-						await this.#legacyStore().clearBindingSession(
-							candidate.agentInstanceId,
-							candidate.attemptId,
-							candidate.sessionFile,
-						);
-						return;
-					}
-					if (this.#childHistoryRetention === "grimoire") {
-						if (!this.#archiveChildHistory) throw new Error("Grimoire child-history archive is unavailable");
-						await this.#archiveChildHistory({ ...candidate, content });
-						archived++;
-					}
-					const live = this.#bindings.get(candidate.agentInstanceId);
-					if (live) await this.#terminateBinding(live, "requested");
-					await this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(candidate.sessionFile);
-					localDeleted = true;
-					deleted++;
-					await this.#legacyStore().clearBindingSession(
-						candidate.agentInstanceId,
-						candidate.attemptId,
-						candidate.sessionFile,
-					);
-				} catch (error) {
-					if (!localDeleted) retained++;
-					logger.warn(
-						localDeleted
-							? "Expired child OMP history metadata cleanup will retry"
-							: "Expired child OMP history retained for retry",
-						{
-							agentInstanceId: candidate.agentInstanceId,
-							error: error instanceof Error ? error.message : String(error),
-						},
-					);
-				}
-			});
-		}
-		return { expired: candidates.length, archived, deleted, retained };
+		throw nativeArchiveUnsupported();
 	}
 
 	compact(target: EngineTarget, expectedIntentRevision?: number): Promise<Record<string, unknown>> {
@@ -2633,62 +1568,11 @@ export class EngineRuntime {
 	}
 
 	async runControlQuery<T>(work: () => Promise<T>): Promise<T> {
-		while (this.#storageMaintenance) await this.#storageMaintenance.catch(() => {});
 		this.#throwIfDisposed();
-		this.#activeControlQueries++;
-		try {
-			return await work();
-		} finally {
-			this.#activeControlQueries--;
-		}
-	}
-
-	reclaimStorage(): Promise<EngineStorageReclaimResult> {
-		this.#legacyStore();
-		this.#throwIfDisposed();
-		if (this.#storageMaintenance) return this.#storageMaintenance;
-		if (
-			this.#activeControlQueries ||
-			this.#lanes.size ||
-			this.#runs.size ||
-			this.#pendingStarts.size ||
-			[...this.#bindings.values()].some(
-				binding =>
-					binding.state !== "idle" ||
-					!TERMINAL_ATTEMPT_STATES.has(binding.attemptState) ||
-					binding.session.isStreaming ||
-					binding.pendingInput !== undefined,
-			)
-		) {
-			return Promise.resolve({
-				schema: "grimoire.engine.storage_reclaim.v1",
-				scope: "engine_database",
-				status: "deferred",
-				reason: "engine_busy",
-				freedBytes: 0,
-			});
-		}
-		// No active lanes at entry; later commands wait without interrupting agents or nesting lane locks.
-		const maintenance = Promise.resolve()
-			.then(async () => {
-				if (!(await this.store.isCurrentEngineGeneration(this.engineGeneration))) {
-					throw new EngineTargetError("stale_target", "Engine generation changed before storage maintenance");
-				}
-				for (const binding of this.#bindings.values()) {
-					await binding.traceWriteTail;
-					await binding.session.sessionManager.flushAndCheckpoint();
-				}
-				return await this.#legacyStore().reclaimStorage();
-			})
-			.finally(() => {
-				if (this.#storageMaintenance === maintenance) this.#storageMaintenance = undefined;
-			});
-		this.#storageMaintenance = maintenance;
-		return maintenance;
+		return await work();
 	}
 
 	async drain(): Promise<void> {
-		await this.#storageMaintenance;
 		await this.#nativeDeleteRun;
 		await Promise.all(this.#lanes.values());
 		await Promise.all(this.#runs);
@@ -2703,8 +1587,6 @@ export class EngineRuntime {
 		for (const pending of this.#pendingStarts)
 			pending.controller.abort(new EngineTargetError("cancelled", "Engine stopped during profile resolution"));
 		const errors: unknown[] = [];
-		const maintenance = this.#storageMaintenance;
-		if (maintenance) await collectFailure(errors, () => maintenance);
 		for (const result of await Promise.allSettled(this.#lanes.values())) {
 			if (result.status === "rejected") errors.push(result.reason);
 		}
@@ -2790,72 +1672,39 @@ export class EngineRuntime {
 					}
 				: {}),
 		};
-		let forked: NativeHistoryForkResult;
-		if (this.store instanceof RocksEngineStore) {
-			const nativeSource = this.#nativeSessionStorage(source.sessionFile);
-			const sourceContext = await nativeSource.readContext();
-			const mapped = await resolveRestoreWorkspace(
-				this.store,
-				edit.source.agentInstanceId,
-				source.sessionFile,
-				sourceContext.checkpoint.header,
-				sourceContext.position,
-			);
-			if (mapped && (await canonicalWorkspacePath(request.cwd)) !== (await canonicalWorkspacePath(mapped.cwd)))
-				throw new EngineTargetError("stale_target", "History branch cwd differs from restored workspace mapping");
-			const { familyId } = parseNativeSessionLocator(source.sessionFile);
-			const nativeTarget = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
-			const manager = await SessionManager.forkNativeContext(
-				nativeSource,
-				nativeTarget,
-				request.cwd,
-				sessionDir,
-				{
-					...forkOptions,
-					entryId: edit.entryId,
-				},
-				mapped?.additionalDirectories,
-			);
-			const selected = manager.getLeafEntry();
-			if (
-				selected?.type !== "message" ||
-				(selected.message.role !== "user" && selected.message.role !== "assistant")
-			)
-				throw new EngineTargetError("stale_target", "Native fork lost its selected message");
-			forked = {
-				sessionManager: manager,
-				selectedRole: selected.message.role,
-				selectedEntryId: edit.entryId,
-				...(edit.mode === "edit" ? { replacementEntryId: selected.id } : {}),
-			};
-		} else {
-			const loaded = await loadSessionFile(source.sessionFile, this.store.sessionStorage);
-			if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
-				throw new EngineTargetError("history_expired", "History source session is unavailable");
-			}
-			migrateToCurrentVersion(loaded.entries);
-			const branch = activeSessionBranch(
-				loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
-			);
-			if (sourceSessionId !== edit.sourceSessionId || branch.at(-1)?.id !== edit.expectedLeafEntryId) {
-				throw new EngineTargetError("stale_target", "History source session or leaf changed");
-			}
-			const selectedEntry = branch.find(entry => entry.id === edit.entryId);
-			if (
-				selectedEntry?.type !== "message" ||
-				(selectedEntry.message.role !== "user" && selectedEntry.message.role !== "assistant")
-			) {
-				throw new EngineTargetError("stale_target", "History entry is not an active user or assistant message");
-			}
-			forked = await SessionManager.forkNativeHistory(
-				source.sessionFile,
-				request.cwd,
-				edit.entryId,
-				sessionDir,
-				this.store.sessionStorage,
-				forkOptions,
-			);
-		}
+		const nativeSource = this.#nativeSessionStorage(source.sessionFile);
+		const sourceContext = await nativeSource.readContext();
+		const mapped = await resolveRestoreWorkspace(
+			this.store,
+			edit.source.agentInstanceId,
+			source.sessionFile,
+			sourceContext.checkpoint.header,
+			sourceContext.position,
+		);
+		if (mapped && (await canonicalWorkspacePath(request.cwd)) !== (await canonicalWorkspacePath(mapped.cwd)))
+			throw new EngineTargetError("stale_target", "History branch cwd differs from restored workspace mapping");
+		const { familyId } = parseNativeSessionLocator(source.sessionFile);
+		const nativeTarget = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
+		const manager = await SessionManager.forkNativeContext(
+			nativeSource,
+			nativeTarget,
+			request.cwd,
+			sessionDir,
+			{
+				...forkOptions,
+				entryId: edit.entryId,
+			},
+			mapped?.additionalDirectories,
+		);
+		const selected = manager.getLeafEntry();
+		if (selected?.type !== "message" || (selected.message.role !== "user" && selected.message.role !== "assistant"))
+			throw new EngineTargetError("stale_target", "Native fork lost its selected message");
+		const forked: NativeHistoryForkResult = {
+			sessionManager: manager,
+			selectedRole: selected.message.role,
+			selectedEntryId: edit.entryId,
+			...(edit.mode === "edit" ? { replacementEntryId: selected.id } : {}),
+		};
 
 		const branchInput = edit.mode === "branch" && request.input?.trim() ? request.input : undefined;
 		const dispatchKind: HistoryDispatchKind = branchInput
@@ -2878,131 +1727,6 @@ export class EngineRuntime {
 				sessionId: forked.sessionManager.getSessionId(),
 			},
 		};
-	}
-
-	async #readRestoreCheckpoint(request: EngineRestoreHistoryTarget & { agentInstanceId: string }) {
-		const restore = request.restoreCheckpoint;
-		const prior = await this.store.getBinding(request.agentInstanceId);
-		const stageDir = this.#restoreStageDir(restore.restoreId);
-		let metadata: NativeRestoreStageMetadata;
-		try {
-			metadata = JSON.parse(await fs.readFile(path.join(stageDir, "metadata.json"), "utf8"));
-			const ready = (await fs.readFile(path.join(stageDir, "ready"), "utf8")).trim();
-			if (ready !== restore.contentHash) throw new Error("ready hash mismatch");
-		} catch (error) {
-			if (isEnoent(error)) throw new EngineTargetError("history_expired", "Restore checkpoint is unavailable");
-			throw new EngineTargetError("invalid_request", "Restore checkpoint is not ready");
-		}
-		if (
-			metadata.restoreId !== restore.restoreId ||
-			metadata.agentInstanceId !== request.agentInstanceId ||
-			metadata.agentInstanceRef !== request.agentInstanceRef ||
-			metadata.authorityGeneration !== request.authorityGeneration ||
-			metadata.contentHash !== restore.contentHash
-		) {
-			throw new EngineTargetError("stale_target", "Restore checkpoint authority is stale");
-		}
-		if (metadata.replaceBinding) {
-			const expected = metadata.replaceBinding;
-			if (
-				!prior?.sessionFile ||
-				(prior.state !== "idle" && prior.state !== "released") ||
-				prior.bindingId !== expected.bindingId ||
-				prior.bindingGeneration !== expected.bindingGeneration ||
-				prior.authorityGeneration !== expected.authorityGeneration ||
-				prior.executionId !== expected.executionId ||
-				prior.attemptId !== expected.attemptId ||
-				prior.sessionFile !== expected.sessionFile
-			) {
-				throw new EngineTargetError("stale_target", "Restore target binding changed after staging");
-			}
-			const live = this.#bindings.get(request.agentInstanceId);
-			if (
-				live &&
-				(live.bindingId !== expected.bindingId ||
-					live.bindingGeneration !== expected.bindingGeneration ||
-					live.attemptId !== expected.attemptId ||
-					live.executionId !== expected.executionId ||
-					live.authorityGeneration !== expected.authorityGeneration ||
-					live.sessionFile !== expected.sessionFile ||
-					live.state !== "idle" ||
-					live.session.isStreaming)
-			) {
-				throw new EngineTargetError("stale_target", "Restore target live binding changed after staging");
-			}
-		} else if (prior?.sessionFile) {
-			throw new EngineTargetError("stale_target", "Restore target already has a native session");
-		}
-		const bytes = await fs.readFile(path.join(stageDir, "checkpoint.bin"));
-		if (bytes.byteLength !== metadata.totalBytes) {
-			throw new EngineTargetError("history_expired", "Restore checkpoint is incomplete");
-		}
-		const hash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
-		if (hash !== restore.contentHash) throw new EngineTargetError("history_expired", "Restore checkpoint changed");
-		const checkpoint = parseNativeSessionCheckpoint(bytes);
-		return { checkpoint, stageDir };
-	}
-
-	async #prepareRestoreStart(request: EngineStartRequest): Promise<PreparedRestoreStart | undefined> {
-		if (!request.restoreCheckpoint) return undefined;
-		this.#legacyStore();
-		if (!request.agentInstanceRef) {
-			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
-		}
-		const { checkpoint, stageDir } = await this.#readRestoreCheckpoint({
-			agentInstanceId: request.agentInstanceId,
-			agentInstanceRef: request.agentInstanceRef,
-			authorityGeneration: request.authorityGeneration,
-			restoreCheckpoint: request.restoreCheckpoint,
-		});
-		const materialized = path.join(stageDir, "source.jsonl");
-		await restoreCheckpointBlobs(checkpoint);
-		const artifactsDir = materialized.slice(0, -".jsonl".length);
-		await fs.rm(artifactsDir, { recursive: true, force: true });
-		await this.#legacyStore().sessionStorage.writeText(
-			materialized,
-			new TextDecoder("utf-8", { fatal: true }).decode(
-				decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL"),
-			),
-		);
-		let sessionManager: SessionManager;
-		try {
-			if (checkpoint.artifacts.length > 0) await fs.mkdir(artifactsDir, { recursive: true });
-			for (const artifact of checkpoint.artifacts) {
-				await fs.writeFile(
-					path.join(artifactsDir, artifact.name),
-					decodeCanonicalBase64(artifact.contentBase64, "Artifact"),
-				);
-			}
-			const loaded = await loadSessionFile(materialized, this.#legacyStore().sessionStorage);
-			if (loaded.entries[0]?.type !== "session" || loaded.entries[0].id !== checkpoint.sessionId) {
-				throw new EngineTargetError("history_expired", "Restore checkpoint native session is invalid");
-			}
-			const sessionDir = path.join(this.#sessionRoot, engineRouteToken(request.agentInstanceId));
-			sessionManager = await SessionManager.forkFrom(
-				materialized,
-				request.cwd,
-				sessionDir,
-				this.#legacyStore().sessionStorage,
-				{ copyArtifacts: true, suppressBreadcrumb: true },
-			);
-		} finally {
-			await this.#legacyStore()
-				.sessionStorage.unlink(materialized)
-				.catch(error => {
-					if (!isEnoent(error)) throw error;
-				});
-			await fs.rm(artifactsDir, { recursive: true, force: true });
-		}
-		return { sessionManager, stageDir };
-	}
-
-	#restoreStageDir(restoreId: string): string {
-		return path.join(this.#sessionRoot, ".restore", restoreId);
-	}
-
-	#sessionArchiveSnapshotDir(agentInstanceId: string): string {
-		return path.join(this.#sessionRoot, ".archive", engineRouteToken(agentInstanceId));
 	}
 
 	async #startInLane(
@@ -3094,7 +1818,7 @@ export class EngineRuntime {
 			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 		}
 		let restoreReceipt: RestoreWorkspaceReceipt | undefined;
-		if (this.store instanceof RocksEngineStore && !binding) {
+		if (!binding) {
 			const prior = await this.store.getBinding(request.agentInstanceId);
 			if (prior?.sessionFile?.startsWith("native:")) {
 				const storage = this.#nativeSessionStorage(prior.sessionFile);
@@ -3158,9 +1882,9 @@ export class EngineRuntime {
 			? await this.#continuationDigest(request, profile, restoreReceipt.originalCwd)
 			: undefined;
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
+		if (request.restoreCheckpoint) throw nativeArchiveUnsupported();
 		const preparedHistory = await this.#prepareHistoryStart(request);
-		const preparedRestore = await this.#prepareRestoreStart(request);
-		const preparedSession = preparedHistory?.sessionManager ?? preparedRestore?.sessionManager;
+		const preparedSession = preparedHistory?.sessionManager;
 		audit?.mark("binding_prepare");
 
 		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
@@ -3343,14 +2067,6 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
-		if (preparedRestore) {
-			await fs.rm(preparedRestore.stageDir, { recursive: true, force: true }).catch(error => {
-				logger.warn("Committed native restore stage cleanup failed", {
-					restoreId: request.restoreCheckpoint?.restoreId,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
-		}
 		if (references && !queuedItem?.attachments) binding.directUploads.set(request.clientMessageId!, references);
 		this.#trackRun(
 			this.#runPrompt(
@@ -3391,15 +2107,9 @@ export class EngineRuntime {
 		sessionManager.seal();
 		const errors: unknown[] = [];
 		await collectFailure(errors, () => sessionManager.close());
-		// The prepared fork was never bound: a native generation goes to reclaim, a legacy fork file is deleted.
-		if (sessionFile) {
-			const store = this.store;
-			await collectFailure(errors, () =>
-				store instanceof RocksEngineStore
-					? store.abandonNativeGeneration(agentInstanceId, sessionFile)
-					: this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(sessionFile),
-			);
-		}
+		// The prepared fork was never bound: its native generation goes to reclaim.
+		if (sessionFile)
+			await collectFailure(errors, () => this.store.abandonNativeGeneration(agentInstanceId, sessionFile));
 		throwCollectedFailures(errors, "Prepared session cleanup failed");
 	}
 
@@ -3483,7 +2193,7 @@ export class EngineRuntime {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager = preparedSessionManager;
-		let uncommittedForkSessionFile = preparedSessionManager?.getSessionFile();
+		const uncommittedForkSessionFile = preparedSessionManager?.getSessionFile();
 		const disposeResolved = resolved?.dispose;
 		let mcpManager: MCPManager | undefined;
 		try {
@@ -3507,12 +2217,7 @@ export class EngineRuntime {
 						prior.bindingId === restoreReceipt.oldBindingId)) &&
 				profile.continuationPolicy !== "fresh"
 			) {
-				sessionManager =
-					this.store instanceof RocksEngineStore
-						? await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir)
-						: await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
-								initialCwd: request.cwd,
-							});
+				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
 			} else if (!preparedSessionManager) {
 				previousInboxSessionId = prior?.sessionFile
 					? await this.#conversationCarrySource(
@@ -3527,37 +2232,19 @@ export class EngineRuntime {
 					// A profile/dependency change needs a fresh AgentSession so none of the old
 					// model, tools, settings, or admission policy survives. Fork only the durable
 					// conversation branch, then rebuild the runtime from the newly resolved profile.
-					if (this.store instanceof RocksEngineStore) {
-						const source = this.#nativeSessionStorage(prior.sessionFile);
-						const { familyId } = parseNativeSessionLocator(prior.sessionFile);
-						const target = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
-						sessionManager = await SessionManager.forkNativeContext(source, target, request.cwd, sessionDir);
-					} else {
-						sessionManager = await SessionManager.forkFrom(
-							prior.sessionFile,
-							request.cwd,
-							sessionDir,
-							this.store.sessionStorage,
-						);
-						uncommittedForkSessionFile = sessionManager.getSessionFile();
-						if (!uncommittedForkSessionFile) throw new Error("Carried AgentSession was not durably materialized");
-					}
+					const source = this.#nativeSessionStorage(prior.sessionFile);
+					const { familyId } = parseNativeSessionLocator(prior.sessionFile);
+					const target = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
+					sessionManager = await SessionManager.forkNativeContext(source, target, request.cwd, sessionDir);
 					// Workspace roots are executable authority, not conversation history. The
 					// new profile/settings snapshot repopulates its own roots during session setup.
 					await sessionManager.setAdditionalDirectories([]);
 				} else {
-					sessionManager =
-						this.store instanceof RocksEngineStore
-							? SessionManager.createNative(
-									request.cwd,
-									new RocksNativeSessionStorage(
-										this.store.storageClient,
-										request.agentInstanceId,
-										crypto.randomUUID(),
-									),
-									sessionDir,
-								)
-							: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
+					sessionManager = SessionManager.createNative(
+						request.cwd,
+						new RocksNativeSessionStorage(this.store.storageClient, request.agentInstanceId, crypto.randomUUID()),
+						sessionDir,
+					);
 				}
 			}
 			audit?.mark("binding_history_done");
@@ -3856,7 +2543,7 @@ export class EngineRuntime {
 									const uploads = entry.clientMessageId
 										? binding.directUploads.get(entry.clientMessageId)
 										: undefined;
-									if (durable && uploads && this.store instanceof RocksEngineStore) {
+									if (durable && uploads) {
 										binding.directUploads.delete(entry.clientMessageId!);
 										// The durable entry owns the bodies now; a row left behind only waits for its TTL.
 										await this.store.consumeUploads(uploads).catch(error =>
@@ -3992,16 +2679,11 @@ export class EngineRuntime {
 			}
 			const createdMcpManager = mcpManager;
 			if (createdMcpManager) await collectFailure(cleanupErrors, () => createdMcpManager.disconnectAll());
+			// Failed native generations are unbound immutable data; never delete their inherited source.
 			if (uncommittedForkSessionFile && sessionManager) {
 				const forkSessionManager = sessionManager;
-				const forkSessionFile = uncommittedForkSessionFile;
 				forkSessionManager.seal();
 				await collectFailure(cleanupErrors, () => forkSessionManager.close());
-				// Failed native generations are unbound immutable data; never delete their inherited source.
-				if (!(this.store instanceof RocksEngineStore))
-					await collectFailure(cleanupErrors, () =>
-						this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
-					);
 			}
 			if (disposeResolved) await collectFailure(cleanupErrors, disposeResolved);
 			if (cleanupErrors.length > 0) {
@@ -4028,9 +2710,6 @@ export class EngineRuntime {
 					if (archive && archive.state !== "restored" && archive.binding.sessionFile === sessionFile) {
 						throw new EngineTargetError("history_expired", "This history is archived; restore it before reading");
 					}
-					if (this.store instanceof EngineStore && !(await this.store.sessionStorage.exists(sessionFile))) {
-						throw new EngineTargetError("history_expired", "Retained Engine history is unavailable");
-					}
 					return await this.#readSessionMessages(sessionFile);
 				});
 			},
@@ -4049,19 +2728,16 @@ export class EngineRuntime {
 		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId)) {
 			if (taskRefFromAgentInstanceRef(child.agentInstanceRef) !== parentTaskRef) continue;
 			if (child.engineAgentId !== engineAgentId(child.agentInstanceId)) continue;
-			let mappedCwd: string | undefined;
-			if (this.store instanceof RocksEngineStore) {
-				const loaded = await this.#nativeSessionStorage(child.sessionFile).readContext();
-				mappedCwd = (
-					await resolveRestoreWorkspace(
-						this.store,
-						child.agentInstanceId,
-						child.sessionFile,
-						loaded.checkpoint.header,
-						loaded.position,
-					)
-				)?.cwd;
-			}
+			const loaded = await this.#nativeSessionStorage(child.sessionFile).readContext();
+			const mappedCwd = (
+				await resolveRestoreWorkspace(
+					this.store,
+					child.agentInstanceId,
+					child.sessionFile,
+					loaded.checkpoint.header,
+					loaded.position,
+				)
+			)?.cwd;
 			const header = await this.#sessionHeader(child.sessionFile);
 			if (header?.type !== "session" || typeof header.cwd !== "string") continue;
 			if ((await canonicalWorkspacePath(mappedCwd ?? header.cwd)) !== canonicalCwd) continue;
@@ -4304,10 +2980,7 @@ export class EngineRuntime {
 			binding.parkedEffectTools.add(call.toolCallId);
 			const event = await this.#admitEffect(
 				binding,
-				() =>
-					this.store instanceof RocksEngineMutations
-						? this.store.startToolEffect(record.target, this.#toolEffect(record), checkpoint)
-						: this.store.startToolEffect(record.target, this.#toolEffect(record)),
+				() => this.store.startToolEffect(record.target, this.#toolEffect(record), checkpoint),
 				signal,
 			).finally(() => binding.parkedEffectTools.delete(call.toolCallId));
 			this.#notifyEvents([event]);
@@ -4334,10 +3007,7 @@ export class EngineRuntime {
 			const checkpoint = await this.#effectCheckpoint(binding);
 			const event = await this.#admitEffect(
 				binding,
-				() =>
-					this.store instanceof RocksEngineMutations
-						? this.store.requestToolApproval(record.target, this.#toolEffect(record), checkpoint)
-						: this.store.requestToolApproval(record.target, this.#toolEffect(record)),
+				() => this.store.requestToolApproval(record.target, this.#toolEffect(record), checkpoint),
 				signal,
 			);
 			this.#notifyEvents([event]);
@@ -4371,7 +3041,6 @@ export class EngineRuntime {
 	}
 
 	#bindMessagePersistence(binding: LiveBinding): void {
-		if (!(this.store instanceof RocksEngineMutations)) return;
 		binding.session.setMessagePersistedHandler(async message => {
 			if (message.role !== "toolResult") return;
 			const record = [...this.#toolInvocations.values()].find(
@@ -4394,7 +3063,6 @@ export class EngineRuntime {
 	}
 
 	#attachStorageFailure(): void {
-		if (!(this.store instanceof RocksEngineMutations)) return;
 		this.#storageFailureUnsubscribe = this.store.storageClient.onFailure(error => {
 			this.#storageFailure = error;
 			for (const pending of this.#pendingStarts) pending.controller.abort(error);
@@ -4412,7 +3080,6 @@ export class EngineRuntime {
 	}
 
 	async #effectCheckpoint(binding: LiveBinding): Promise<SessionDurabilityCheckpoint | undefined> {
-		if (!(this.store instanceof RocksEngineMutations)) return undefined;
 		await binding.session.settleInFlightMessagePersistence();
 		return binding.session.sessionManager.flushAndCheckpoint();
 	}
@@ -4436,7 +3103,7 @@ export class EngineRuntime {
 				jobIds: jobs.map(job => job.id),
 			};
 			// Native completion is gated by the toolResult persistence callback.
-			if (!(this.store instanceof RocksEngineMutations) || record.checkpoint)
+			if (record.checkpoint)
 				await this.#completeToolInvocation(
 					record,
 					record.outcome.status,
@@ -4474,13 +3141,10 @@ export class EngineRuntime {
 		record.settled = true;
 		try {
 			const options = { ...(error ? { error: error.slice(0, 2_048) } : {}), ...(jobIds?.length ? { jobIds } : {}) };
-			const event =
-				this.store instanceof RocksEngineMutations
-					? await this.store.settleToolEffect(record.target, record.invocationId, status, {
-							...options,
-							checkpoint: record.checkpoint,
-						})
-					: await this.store.settleToolEffect(record.target, record.invocationId, status, options);
+			const event = await this.store.settleToolEffect(record.target, record.invocationId, status, {
+				...options,
+				checkpoint: record.checkpoint,
+			});
 			this.#notifyEvents([event]);
 			this.#toolInvocations.delete(record.invocationId);
 			record.resolveDone();
@@ -4733,9 +3397,7 @@ export class EngineRuntime {
 		try {
 			const admissionCheckpoint = await this.#effectCheckpoint(binding);
 			const started = await this.#admitEffect(binding, () =>
-				this.store instanceof RocksEngineMutations
-					? this.store.startModelEffect(this.#snapshot(binding), effect, admissionCheckpoint)
-					: this.store.startModelEffect(this.#snapshot(binding), effect),
+				this.store.startModelEffect(this.#snapshot(binding), effect, admissionCheckpoint),
 			);
 			this.#notifyEvents([started]);
 			audit?.mark("model_started", { eventId: started.eventId });
@@ -4762,29 +3424,24 @@ export class EngineRuntime {
 				audit?.mark("model_failed");
 				const message = error instanceof Error ? error.message : String(error);
 				const checkpoint = await this.#effectCheckpoint(binding);
-				const settled =
-					this.store instanceof RocksEngineMutations
-						? await this.store.settleModelEffect(
-								this.#snapshot(binding),
-								effect,
-								"failed",
-								message.slice(0, 2_048),
-								checkpoint,
-							)
-						: await this.store.settleModelEffect(
-								this.#snapshot(binding),
-								effect,
-								"failed",
-								message.slice(0, 2_048),
-							);
+				const settled = await this.store.settleModelEffect(
+					this.#snapshot(binding),
+					effect,
+					"failed",
+					message.slice(0, 2_048),
+					checkpoint,
+				);
 				this.#notifyEvents([settled]);
 				throw error;
 			}
 			const checkpoint = await this.#effectCheckpoint(binding);
-			const settled =
-				this.store instanceof RocksEngineMutations
-					? await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed", undefined, checkpoint)
-					: await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
+			const settled = await this.store.settleModelEffect(
+				this.#snapshot(binding),
+				effect,
+				"completed",
+				undefined,
+				checkpoint,
+			);
 			this.#notifyEvents([settled]);
 			audit?.mark("model_completed", { eventId: settled.eventId });
 			return dispatched;
@@ -5636,7 +4293,7 @@ export class EngineRuntime {
 		const uncommittedForkSessionFile = binding.uncommittedForkSessionFile;
 		if (uncommittedForkSessionFile) {
 			await collectFailure(errors, () =>
-				this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(uncommittedForkSessionFile),
+				this.store.abandonNativeGeneration(binding.agentInstanceId, uncommittedForkSessionFile),
 			);
 		}
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} admission cleanup failed`);
@@ -5797,9 +4454,7 @@ export class EngineRuntime {
 	}
 
 	async #reconcileLostAttempts(): Promise<void> {
-		if (this.store instanceof RocksEngineMutations)
-			await this.store.interruptGeneration(this.engineGeneration, events => this.#notifyEvents(events));
-		else this.#notifyEvents(await this.store.interruptGeneration(this.engineGeneration));
+		await this.store.interruptGeneration(this.engineGeneration, events => this.#notifyEvents(events));
 	}
 
 	async #emit(
@@ -5994,13 +4649,7 @@ export class EngineRuntime {
 
 	#inLane<T>(agentInstanceId: string, work: () => Promise<T>): Promise<T> {
 		const previous = this.#lanes.get(agentInstanceId) ?? Promise.resolve();
-		const maintenance = this.#storageMaintenance;
-		const current = previous
-			.catch(() => {})
-			.then(async () => {
-				await maintenance?.catch(() => {});
-				return work();
-			});
+		const current = previous.catch(() => {}).then(work);
 		const tail = current.then(
 			() => {},
 			() => {},
@@ -6033,19 +4682,6 @@ export class EngineRuntime {
 		if (this.#storageFailure) throw this.#storageFailure;
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
-}
-
-function activeSessionBranch(entries: SessionEntry[]): SessionEntry[] {
-	const byId = new Map(entries.map(entry => [entry.id, entry]));
-	const branch: SessionEntry[] = [];
-	const seen = new Set<string>();
-	let entry = entries.at(-1);
-	while (entry && !seen.has(entry.id)) {
-		seen.add(entry.id);
-		branch.push(entry);
-		entry = entry.parentId ? byId.get(entry.parentId) : undefined;
-	}
-	return branch.reverse();
 }
 
 function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): SessionLaunchSnapshot | undefined {
@@ -6466,255 +5102,8 @@ function optionalInputResultBoolean(
 	return { [key]: value };
 }
 
-async function hashNativeArchiveFile(file: fs.FileHandle): Promise<string> {
-	const digest = crypto.createHash("sha256");
-	const buffer = Buffer.alloc(48 * 1024);
-	const size = (await file.stat()).size;
-	if (size > MAX_NATIVE_RESTORE_BYTES) {
-		throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
-	}
-	let offset = 0;
-	while (offset < size) {
-		const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.byteLength, size - offset), offset);
-		if (!bytesRead) {
-			throw new EngineTargetError("stale_target", "Native session archive changed during verification");
-		}
-		digest.update(buffer.subarray(0, bytesRead));
-		offset += bytesRead;
-	}
-	if ((await file.stat()).size !== size) {
-		throw new EngineTargetError("stale_target", "Native session archive changed during verification");
-	}
-	return `sha256:${digest.digest("hex")}`;
-}
-
-async function readCompressedNativeArchive(
-	archivePath: string,
-	contentHash: string,
-): Promise<{
-	checkpoint: NativeSessionCheckpoint;
-	nativeBytes: number;
-	archiveHash: string;
-	archiveBytes: number;
-}> {
-	if (
-		!/^sha256:[0-9a-f]{64}$/.test(contentHash) ||
-		!path.isAbsolute(archivePath) ||
-		path.basename(archivePath) !== `${contentHash.slice(7)}.gz`
-	) {
-		throw new EngineTargetError("invalid_request", "Archive proof must name an absolute content-addressed gzip file");
-	}
-	const entry = await fs.lstat(archivePath);
-	if (!entry.isFile() || entry.isSymbolicLink() || entry.size > MAX_NATIVE_RESTORE_BYTES) {
-		throw new EngineTargetError("invalid_request", "Compressed archive proof is unsafe or too large");
-	}
-	const file = await fs.open(archivePath, "r");
-	try {
-		const archiveHash = await hashNativeArchiveFile(file);
-		const chunks: Buffer[] = [];
-		const hash = crypto.createHash("sha256");
-		let nativeBytes = 0;
-		await pipeline(file.createReadStream({ autoClose: false, start: 0 }), createGunzip(), async source => {
-			for await (const chunk of source) {
-				const bytes = Buffer.from(chunk);
-				nativeBytes += bytes.byteLength;
-				if (nativeBytes > MAX_NATIVE_RESTORE_BYTES)
-					throw new EngineTargetError("invalid_request", "Expanded archive exceeds the accepted range");
-				hash.update(bytes);
-				chunks.push(bytes);
-			}
-		});
-		if (`sha256:${hash.digest("hex")}` !== contentHash || (await hashNativeArchiveFile(file)) !== archiveHash) {
-			throw new EngineTargetError("stale_target", "Compressed archive hash does not match");
-		}
-		return {
-			checkpoint: parseNativeSessionCheckpoint(Buffer.concat(chunks)),
-			nativeBytes,
-			archiveHash,
-			archiveBytes: entry.size,
-		};
-	} finally {
-		await file.close();
-	}
-}
-
-async function verifyNativeArchiveFile(filePath: string, byteLength: number, contentHash: string): Promise<void> {
-	const file = await fs.open(filePath, "r");
-	try {
-		const stat = await file.stat();
-		if (!stat.isFile() || stat.size !== byteLength || (await hashNativeArchiveFile(file)) !== contentHash) {
-			throw new EngineTargetError("history_expired", "Native session archive snapshot is corrupt");
-		}
-	} finally {
-		await file.close();
-	}
-}
-
 function sha256(value: string | Uint8Array): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
-}
-
-function decodeCanonicalBase64(value: string, label: string): Buffer {
-	if (typeof value !== "string") {
-		throw new EngineTargetError("invalid_request", `${label} must be canonical base64`);
-	}
-	const bytes = Buffer.from(value, "base64");
-	if (bytes.toString("base64") !== value) {
-		throw new EngineTargetError("invalid_request", `${label} must be canonical base64`);
-	}
-	return bytes;
-}
-
-/** SQLite-mode archive restore: the JSONL session reads these bodies from the flat root. */
-async function restoreCheckpointBlobs(checkpoint: NativeSessionCheckpoint): Promise<void> {
-	const store = new BlobStore(getBlobsDir());
-	for (const blob of checkpoint.blobs ?? []) {
-		const data = decodeCanonicalBase64(blob.contentBase64, "Archive image");
-		if (new Bun.SHA256().update(data).digest("hex") !== blob.name)
-			throw new Error("Archived blob hash does not match");
-		await store.put(data);
-	}
-}
-
-function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
-	let value: unknown;
-	try {
-		value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-	} catch {
-		throw new EngineTargetError("invalid_request", "Restore checkpoint must be valid UTF-8 JSON");
-	}
-	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		throw new EngineTargetError("invalid_request", "Restore checkpoint must be an object");
-	}
-	const checkpoint = value as Partial<NativeSessionCheckpoint>;
-	if (
-		checkpoint.schema !== "grimoire.engine.native_session_checkpoint.v1" ||
-		typeof checkpoint.sessionId !== "string" ||
-		!checkpoint.sessionId ||
-		typeof checkpoint.sessionJsonlHash !== "string" ||
-		!/^sha256:[0-9a-f]{64}$/.test(checkpoint.sessionJsonlHash) ||
-		typeof checkpoint.sessionJsonlBase64 !== "string" ||
-		(checkpoint.blobs !== undefined && !Array.isArray(checkpoint.blobs)) ||
-		!Array.isArray(checkpoint.artifacts)
-	) {
-		throw new EngineTargetError("invalid_request", "Restore checkpoint shape is invalid");
-	}
-	if (checkpoint.sessionJsonlBase64.length > Math.ceil(MAX_NATIVE_RESTORE_BYTES / 3) * 4) {
-		throw new EngineTargetError("invalid_request", "Restore session JSONL is outside the accepted range");
-	}
-	const sessionBytes = decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL");
-	if (sessionBytes.byteLength < 1 || sessionBytes.byteLength > MAX_NATIVE_RESTORE_BYTES) {
-		throw new EngineTargetError("invalid_request", "Restore session JSONL is outside the accepted range");
-	}
-	if (`sha256:${crypto.createHash("sha256").update(sessionBytes).digest("hex")}` !== checkpoint.sessionJsonlHash) {
-		throw new EngineTargetError("invalid_request", "Restore session JSONL hash does not match");
-	}
-	let jsonl: string;
-	try {
-		jsonl = new TextDecoder("utf-8", { fatal: true }).decode(sessionBytes);
-	} catch {
-		throw new EngineTargetError("invalid_request", "Restore session JSONL must be valid UTF-8");
-	}
-	const entries = jsonl
-		.split("\n")
-		.filter(Boolean)
-		.map(line => {
-			try {
-				return JSON.parse(line) as Record<string, unknown>;
-			} catch {
-				throw new EngineTargetError("invalid_request", "Restore session JSONL contains invalid JSON");
-			}
-		});
-	const header = entries.find(entry => entry.type === "session");
-	if (header?.id !== checkpoint.sessionId) {
-		throw new EngineTargetError("invalid_request", "Restore session header identity does not match");
-	}
-	const portableNames = new Set<string>();
-	let artifactBytes = 0;
-	let blobHashes: Set<string>;
-	const originalSizes = new Map<string, number>();
-	try {
-		blobHashes = new Set(collectPersistedBlobHashes(entries));
-		for (const entry of entries) {
-			if (
-				entry.type !== "message" ||
-				!entry.message ||
-				typeof entry.message !== "object" ||
-				!("role" in entry.message) ||
-				entry.message.role !== "user" ||
-				entry.originalAttachments === undefined
-			)
-				continue;
-			for (const attachment of copyOriginalAttachments(entry.originalAttachments)) {
-				const hash = attachment.contentHash.slice(7);
-				if (originalSizes.has(hash) && originalSizes.get(hash) !== attachment.bytes)
-					throw new Error("Conflicting original attachment sizes");
-				originalSizes.set(hash, attachment.bytes);
-			}
-		}
-	} catch {
-		throw new EngineTargetError("invalid_request", "Restore history attachment descriptors are invalid");
-	}
-	for (const [kind, files] of [
-		["artifacts", checkpoint.artifacts],
-		["blobs", checkpoint.blobs ?? []],
-	] as const) {
-		portableNames.clear();
-		for (const artifactValue of files) {
-			if (!artifactValue || typeof artifactValue !== "object" || Array.isArray(artifactValue)) {
-				throw new EngineTargetError("invalid_request", "Restore artifact shape is invalid");
-			}
-			const artifact = artifactValue as NativeSessionCheckpoint["artifacts"][number];
-			const portableName = typeof artifact.name === "string" ? artifact.name.toLowerCase() : "";
-			const portableStem = portableName.split(".", 1)[0] ?? "";
-			if (
-				typeof artifact.name !== "string" ||
-				!/^[A-Za-z0-9_.-]+$/.test(artifact.name) ||
-				artifact.name === "." ||
-				artifact.name === ".." ||
-				artifact.name.endsWith(".") ||
-				/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(portableStem) ||
-				portableNames.has(portableName) ||
-				typeof artifact.contentHash !== "string" ||
-				!/^sha256:[0-9a-f]{64}$/.test(artifact.contentHash) ||
-				!Number.isSafeInteger(artifact.byteLength) ||
-				artifact.byteLength < 0 ||
-				typeof artifact.contentBase64 !== "string" ||
-				artifact.byteLength > MAX_NATIVE_RESTORE_BYTES - artifactBytes ||
-				artifact.contentBase64.length !== Math.ceil(artifact.byteLength / 3) * 4
-			) {
-				throw new EngineTargetError("invalid_request", "Restore artifact metadata is invalid");
-			}
-			if (
-				kind === "blobs" &&
-				(!BLOB_HASH_RE.test(artifact.name) ||
-					artifact.contentHash !== `sha256:${artifact.name}` ||
-					!blobHashes.delete(artifact.name))
-			)
-				throw new EngineTargetError("invalid_request", "Restore image blob does not match history");
-			if (
-				kind === "blobs" &&
-				originalSizes.has(artifact.name) &&
-				originalSizes.get(artifact.name) !== artifact.byteLength
-			)
-				throw new EngineTargetError("invalid_request", "Restore original attachment size does not match its bytes");
-			portableNames.add(portableName);
-			const content = decodeCanonicalBase64(artifact.contentBase64, `Artifact ${artifact.name}`);
-			artifactBytes += content.byteLength;
-			if (content.byteLength !== artifact.byteLength) {
-				throw new EngineTargetError("invalid_request", "Restore artifact byte length is invalid");
-			}
-			if (`sha256:${crypto.createHash("sha256").update(content).digest("hex")}` !== artifact.contentHash) {
-				throw new EngineTargetError("invalid_request", `Restore artifact ${artifact.name} hash does not match`);
-			}
-		}
-	}
-	if (blobHashes.size) throw new EngineTargetError("invalid_request", "Restore checkpoint is missing image blobs");
-	return checkpoint as NativeSessionCheckpoint;
-}
-
-function isEexist(error: unknown): boolean {
-	return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
 /** The storage owner rejected the transcript write itself; retrying the same prefix cannot make it durable. Only a

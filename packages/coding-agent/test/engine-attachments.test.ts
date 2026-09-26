@@ -357,7 +357,7 @@ describe("Engine attachment admission", () => {
 		expect(await fs.readdir(root)).toEqual([]);
 	});
 
-	it("sweeps only pending uploads idle for a day, and refuses uploads without the native ledger", async () => {
+	it("sweeps only pending uploads idle for a day", async () => {
 		using temp = TempDir.createSync("@omp-attachment-sweep-");
 		const root = path.join(temp.path(), "uploads");
 		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
@@ -370,13 +370,6 @@ describe("Engine attachment admission", () => {
 		await fs.utimes(path.join(root, stale, "payload.bin"), old, old);
 		await uploads.sweepAbandoned();
 		expect(await fs.readdir(root)).toEqual([attachmentUploadKey("alice", "fresh").key]);
-		await expect(
-			new EngineAttachmentUploads(root, blobs).stage("alice", {
-				...identity(data),
-				offset: 0,
-				contentBase64: "YQ==",
-			}),
-		).rejects.toThrow("native storage");
 	});
 
 	it("rejects invalid bytes, paths, changed identity and linked storage, without publishing failed content", async () => {
