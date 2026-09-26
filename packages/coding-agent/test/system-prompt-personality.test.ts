@@ -85,4 +85,10 @@ describe("PERSONALITY.md override", () => {
 		const rendered = await renderPrompt("default");
 		expect(rendered).toContain(DEFAULT_PRESET_MARKER);
 	});
+
+	it("falls back to the default preset for an unknown persisted personality", async () => {
+		const rendered = await renderPrompt("sidecar" as Personality);
+		expect(rendered).toContain("# Personality");
+		expect(rendered).toContain(DEFAULT_PRESET_MARKER);
+	});
 });

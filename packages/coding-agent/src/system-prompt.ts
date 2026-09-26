@@ -828,7 +828,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
-	const bundledPersonality = personality === "none" ? "" : PERSONALITY_SPECS[personality].trim();
+	const bundledPersonality = personality === "none" ? "" : (PERSONALITY_SPECS[personality] ?? defaultPersonality).trim();
 	const personalityPromise: Promise<string> =
 		personality === "none"
 			? Promise.resolve("")
