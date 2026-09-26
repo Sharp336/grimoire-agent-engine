@@ -759,6 +759,7 @@ export class RocksEngineMutations {
 					return { status: "replay", receipt };
 				}
 			}
+			if (command.browserPayloadHash) await this.receiptEvent(tx, command.commandId);
 			if (command.engineGeneration < processorGeneration) {
 				return {
 					status: "replay",
@@ -998,28 +999,42 @@ export class RocksEngineMutations {
 			updated_at: Date.now(),
 		};
 		await tx.put("command", id, settled);
+		await this.receiptEvent(tx, id);
+	}
+	/**
+	 * Publishes a browser command's current receipt stage on its own agent and, when the browser froze another
+	 * source target (a branch launched from its parent), on that source agent of the same principal too.
+	 */
+	async receiptEvent(tx: RuntimeTransaction, id: string): Promise<void> {
+		const row = await tx.get<RocksCommand>("command", id);
+		if (!row) return;
+		const command = row.identity;
 		const identity = await tx.get<RocksIdentity>("identity", row.agent_instance_id);
-		const attempt = row.identity.attemptId
-			? await tx.get<RocksAttempt>("attempt", row.identity.attemptId)
-			: undefined;
-		const value = runtimeReceipt(settled, identity, attempt);
-		if (value) {
-			const command = row.identity;
-			await this.append(
-				tx,
-				{
-					commandId: id,
-					agentInstanceId: row.agent_instance_id,
-					executionId: command.executionId ?? "",
-					attemptId: command.attemptId ?? "",
-					bindingId: command.bindingId ?? "",
-					engineGeneration: command.engineGeneration,
-					bindingGeneration: command.bindingGeneration ?? 0,
-					authorityGeneration: command.authorityGeneration,
-				},
-				{ kind: "command_receipt", payload: { value } },
-			);
-		}
+		const attempt = command.attemptId ? await tx.get<RocksAttempt>("attempt", command.attemptId) : undefined;
+		const value = runtimeReceipt(row, identity, attempt);
+		if (!value) return;
+		await this.append(
+			tx,
+			{
+				commandId: id,
+				agentInstanceId: row.agent_instance_id,
+				executionId: command.executionId ?? "",
+				attemptId: command.attemptId ?? "",
+				bindingId: command.bindingId ?? "",
+				engineGeneration: command.engineGeneration,
+				bindingGeneration: command.bindingGeneration ?? 0,
+				authorityGeneration: command.authorityGeneration,
+			},
+			{ kind: "command_receipt", payload: { value } },
+		);
+		const source = (value.target as { agentInstanceRef: string }).agentInstanceRef;
+		if (source === command.agentInstanceRef) return;
+		const owner = (await tx.query<RocksIdentity>("identity_ref", [source])).find(
+			candidate => candidate.principal_id === (command.principalId ?? ""),
+		);
+		if (!owner)
+			throw new EngineTargetError("stale_target", "Receipt source identity is not owned by the command principal");
+		await this.identityEvent(tx, owner.agent_instance_id, id, "command_receipt", { value });
 	}
 
 	/** Starts an event: marks its counters and loads the rows its projection (and `fence`) read in one round trip. */
@@ -1404,6 +1419,9 @@ export class RocksEngineMutations {
 					);
 				if (options.settleCommandId)
 					await this.settle(tx, options.settleCommandId, options.settleCommandReceipt ?? { outcome: "applied" });
+				// A terminal Attempt moves its browser Start receipt to execution_terminal (settling it already did).
+				if (terminal.has(state) && options.settleCommandId !== binding.commandId)
+					await this.receiptEvent(tx, binding.commandId);
 				return committed;
 			},
 			this.checkpointDependencies(options.transcriptCheckpoint),

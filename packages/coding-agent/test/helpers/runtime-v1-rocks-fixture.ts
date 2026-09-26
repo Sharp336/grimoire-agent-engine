@@ -97,3 +97,35 @@ export async function active(store: RocksEngineStore, name = "root"): Promise<En
 	await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 	return target;
 }
+
+/**
+ * Write one durable native transcript entry in a fresh family and return its checkpoint. The owner settles a
+ * completed Attempt or effect only on such a checkpoint; reuse the returned value across settlements.
+ */
+export async function nativeCheckpoint(store: RocksEngineStore) {
+	const family = `family-${crypto.randomUUID()}`;
+	const client = store.storageClient;
+	await client.write({
+		operationId: `transcript-${family}`,
+		familyId: family,
+		generationId: "main",
+		firstSeq: 1,
+		entries: [
+			{
+				entryId: "leaf",
+				parentId: null,
+				kind: "message",
+				payload: { type: "message", message: { role: "assistant", content: "done" } },
+			},
+		],
+		durability: "required",
+		dependencies: [],
+	});
+	return {
+		sessionId: family,
+		sessionPath: `native:${family}/main`,
+		leafEntryId: "leaf",
+		byteBoundary: 0,
+		native: { familyId: family, generationId: "main", throughSeq: 1, incarnation: client.incarnation },
+	};
+}

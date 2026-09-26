@@ -68,6 +68,8 @@ export function eventReadKeys(
 			{ kind: "projection", id: projectionId("ownership", agent, message) },
 		);
 	}
+	if (event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string")
+		keys.push({ kind: "projection", id: projectionId("ownership", agent, event.payload.assistantMessageId) });
 	if (summaryEvents.has(event.kind))
 		keys.push(
 			{ kind: "metadata", id: "engine" },
@@ -216,6 +218,26 @@ export function boundedReceipt(receipt: EngineCommandReceipt): EngineCommandRece
 		: receipt;
 }
 
+/** The public retained receipt: queue items keep only public fields and an oversized result is a bounded marker. */
+export function projectedReceipt(row: RocksCommand): EngineCommandReceipt | null {
+	const command = row.identity;
+	const receipt = row.receipt ? structuredClone(row.receipt) : null;
+	if (
+		receipt?.outcome === "applied" &&
+		receipt.detail &&
+		command.agentInstanceRef &&
+		(row.operation.startsWith("queue_") || row.operation === "enqueue")
+	) {
+		const detail = receipt.detail;
+		const item = (detail.item ?? (detail.queueId ? detail : undefined)) as Record<string, unknown> | undefined;
+		if (item?.queueId && typeof item.partial !== "boolean") {
+			const projected = publicRuntimeQueueItem(command.agentInstanceRef, item as unknown as EngineInboxItem);
+			receipt.detail = detail.item ? { ...detail, item: projected } : { item: projected };
+		} else if (Array.isArray(detail.items)) receipt.detail = { reordered: detail.items.length };
+	}
+	return receipt && boundedReceipt(receipt);
+}
+
 export function runtimeReceipt(
 	row: RocksCommand,
 	identity: RocksIdentity | undefined,
@@ -233,21 +255,7 @@ export function runtimeReceipt(
 				: row.operation === "start" && attempt && terminal.has(attempt.state)
 					? "execution_terminal"
 					: "applied";
-	let receipt = row.receipt ? structuredClone(row.receipt) : null;
-	if (
-		receipt?.outcome === "applied" &&
-		receipt.detail &&
-		command.agentInstanceRef &&
-		(row.operation.startsWith("queue_") || row.operation === "enqueue")
-	) {
-		const detail = receipt.detail;
-		const item = (detail.item ?? (detail.queueId ? detail : undefined)) as Record<string, unknown> | undefined;
-		if (item?.queueId && typeof item.partial !== "boolean") {
-			const projected = publicRuntimeQueueItem(command.agentInstanceRef, item as unknown as EngineInboxItem);
-			receipt.detail = detail.item ? { ...detail, item: projected } : { item: projected };
-		} else if (Array.isArray(detail.items)) receipt.detail = { reordered: detail.items.length };
-	}
-	if (receipt) receipt = boundedReceipt(receipt);
+	const receipt = projectedReceipt(row);
 	const canonical: RuntimeReceiptRow = {
 		command_id: row.command_id,
 		operation: row.operation,
@@ -595,10 +603,15 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			"command",
 			String(event.payload?.commandId ?? event.causationCommandId),
 		);
+		// A copy routed to the browser's source agent still reports the command agent's own revision.
+		const owner =
+			command && command.agent_instance_id !== event.agentInstanceId
+				? await tx.get<RocksIdentity>("identity", command.agent_instance_id)
+				: identity;
 		const value = command
 			? runtimeReceipt(
 					command,
-					identity,
+					owner,
 					command.identity.attemptId
 						? await tx.get<RocksAttempt>("attempt", command.identity.attemptId)
 						: undefined,
@@ -606,6 +619,12 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			: undefined;
 		if (value)
 			changes.push(projectionChange("receipt", identity.agent_instance_ref, event.eventId, event.eventId, value));
+	}
+	if (event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string") {
+		// Empty failures and tool-only responses stream no text: their snapshot alone anchors the native entry.
+		const ownerId = projectionId("ownership", event.agentInstanceId, event.payload.assistantMessageId);
+		if (!(await tx.get("projection", ownerId)))
+			await putProjection(tx, event, "ownership", ownerId, { messageId: event.payload.assistantMessageId });
 	}
 	if (event.kind === "message_updated") {
 		const value = event.payload ?? {};

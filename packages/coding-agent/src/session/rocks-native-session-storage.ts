@@ -35,7 +35,7 @@ function markerFor(hash: string, bytes: number): NativeEntryBlobMarker {
 	return { schema: NATIVE_ENTRY_BLOB_SCHEMA, ref: `blob:sha256:${hash}`, bytes };
 }
 
-function nativeEntryBlobMarker(payload: StoragePayload): NativeEntryBlobMarker | undefined {
+export function nativeEntryBlobMarker(payload: StoragePayload): NativeEntryBlobMarker | undefined {
 	if (payload.schema !== NATIVE_ENTRY_BLOB_SCHEMA) return undefined;
 	if (
 		typeof payload.ref !== "string" ||
@@ -128,7 +128,8 @@ export function parseNativeSessionLocator(locator: string): { familyId: string; 
 	return { familyId, generationId };
 }
 
-async function decodeEntry(entry: StorageEntry, blobs: BlobStore): Promise<SessionEntry> {
+/** One native entry from its storage envelope: an entry-blob marker is replaced by its verified body. */
+export async function decodeNativeEntry(entry: StorageEntry, blobs: BlobStore): Promise<SessionEntry> {
 	const marker = nativeEntryBlobMarker(entry.payload);
 	let value: StoragePayload = entry.payload;
 	if (marker) {
@@ -486,7 +487,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			for (const entry of page.events) bytes += nativeEntryBlobMarker(entry.payload)?.bytes ?? 0;
 			if (entries.length + page.events.length > 4096 || bytes > 64 * 1024 * 1024)
 				throw new Error("Native history working context exceeds its read bound");
-			for (const entry of page.events) entries.push(await decodeEntry(entry, this.#blobs));
+			for (const entry of page.events) entries.push(await decodeNativeEntry(entry, this.#blobs));
 			if (page.nextCursor && page.nextCursor === cursor) throw new Error("Native history cursor did not advance");
 			cursor = page.nextCursor ?? undefined;
 		} while (cursor);
@@ -537,7 +538,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			});
 			this.#validatePage(page, position.throughSeq);
 			for (const entry of page.events) {
-				const child = await decodeEntry(entry, this.#blobs);
+				const child = await decodeNativeEntry(entry, this.#blobs);
 				if (child.parentId !== parentId) throw new Error("Native children page returned a different parent");
 				// One content child selects the native preserve-subtree branch; no need to read its siblings.
 				if (child.type !== "service_tier_change") return [child];
@@ -606,7 +607,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			for (const entry of page.events) {
 				if (seen.has(entry.entryId)) throw new Error("Native read repeated an entry");
 				seen.add(entry.entryId);
-				entries.push(await decodeEntry(entry, this.#blobs));
+				entries.push(await decodeNativeEntry(entry, this.#blobs));
 			}
 			if (page.nextCursor && page.nextCursor === cursor) throw new Error("Native read cursor did not advance");
 			cursor = page.nextCursor ?? undefined;
