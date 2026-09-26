@@ -246,6 +246,90 @@ describe("Rocks runtime atomic public projections", () => {
 		});
 		expect(event?.payload).not.toHaveProperty("receipt");
 	});
+	test("a terminally rejected unbound Start leaves no pending target and an explicit Start becomes current", async () => {
+		const rows = fixture();
+		rows.seed("attempt", "attempt", { ...(await rows.get("attempt", "attempt")).value, state: "completed" });
+		const store = storeWith(rows);
+		spyOn(store.records, "mutate").mockImplementation(async (_scope, work) => {
+			const tx = new RuntimeTransaction(rows);
+			const result = await work(tx);
+			const { puts, deletes } = tx.mutation();
+			for (const put of puts) rows.seed(put.kind, put.id, put.value);
+			for (const row of deletes) rows.values.delete(`${row.kind}:${row.id}`);
+			return result;
+		});
+		const start = (name: string): EngineCommandIdentity => ({
+			commandId: `start-${name}`,
+			operation: "start",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			agentInstanceId: "a",
+			agentInstanceRef: ref,
+			executionId: `execution-${name}`,
+			attemptId: `attempt-${name}`,
+			authorityGeneration: 1,
+			principalId: "p",
+			payloadHash: name,
+			canonicalHash: name,
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		});
+		const summary = async () =>
+			(await store.runtimeSummary({ principalId: "p", agentInstanceRef: ref })).summary as Record<string, unknown>;
+		const detail = { code: "attachment_requires_read", message: 'File "notes.txt" cannot be sent' };
+		// A queue wake Start without a browser receipt is claimed, then refused before any Attempt exists.
+		const wake = start("wake");
+		expect(await store.admitCommand(wake, 1)).toEqual({ status: "claimed" });
+		await store.commitUnboundStartRejection(
+			{
+				...target,
+				commandId: wake.commandId,
+				executionId: wake.executionId!,
+				attemptId: wake.attemptId!,
+				bindingId: "",
+				bindingGeneration: 0,
+			},
+			{ kind: "rejected", payload: detail, causationCommandId: wake.commandId },
+			{ outcome: "rejected", detail },
+		);
+		expect(await summary()).toMatchObject({
+			state: "completed",
+			target: { attemptId: "attempt" },
+			pendingStart: null,
+		});
+		// A Start whose admission failed takes the same terminal path without a claimed processor.
+		await store.rejectUnadmittedCommand(start("unadmitted"), { outcome: "rejected", detail }, 1);
+		expect((await summary()).pendingStart).toBeNull();
+		const next = start("explicit");
+		expect(await store.admitCommand(next, 1)).toEqual({ status: "claimed" });
+		await store.commitAttemptTransition(
+			{
+				commandId: next.commandId,
+				agentInstanceId: "a",
+				executionId: next.executionId!,
+				attemptId: next.attemptId!,
+				bindingId: "binding-explicit",
+				engineAgentId: "native-a",
+				profileDigest: "read-profile",
+				state: "running",
+				engineGeneration: 1,
+				bindingGeneration: 2,
+				authorityGeneration: 1,
+			},
+			"running",
+			[{ kind: "accepted" }, { kind: "running" }],
+			{
+				requireNew: true,
+				settleCommandId: next.commandId,
+				startIntent: { expectedRevision: 0, explicitContinue: true },
+			},
+		);
+		expect(await summary()).toMatchObject({
+			state: "running",
+			target: { attemptId: next.attemptId },
+			pendingStart: null,
+		});
+	});
 	test("new input and its attention/detail appear in the same mutation; resolution removes pending input", async () => {
 		const tx = new RuntimeTransaction(fixture());
 		await append(tx, "input_requested", {

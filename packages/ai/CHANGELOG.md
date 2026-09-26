@@ -5,6 +5,7 @@
 ### Fixed
 
 - OpenAI-compatible streams now enforce bounded ingress and provider-event budgets during SSE parsing.
+- A stream admission overflow no longer throws into the provider that pushed the event; the stream fails and the admission signal aborts out of band, so no producer leaks an unhandled rejection.
 - Codex now honors an explicit reasoning-off selection instead of using the provider default.
 - Provider compatibility retries no longer lower or remove explicitly enabled reasoning, and learned effort mappings no longer override a later selection.
 - Included stream failure details in custom retry scheduling hooks instead of losing the original cause.

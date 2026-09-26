@@ -50,9 +50,13 @@ export function withOriginalAttachmentNotices(
 	return decorated ?? messages;
 }
 
-/** Expose a verified disposable copy only for the duration of a normal read-tool operation. */
+/**
+ * Expose a verified disposable copy only for the duration of a normal read-tool operation.
+ * Handles resolve within the active context branch, the same entries that carry their notices, so a
+ * resumed native session does not need its full archive.
+ */
 export async function withOriginalAttachment<T>(
-	manager: Pick<SessionManager, "getBranch">,
+	manager: Pick<SessionManager, "getContextBranch">,
 	uri: string,
 	read: (filePath: string) => Promise<T>,
 	signal?: AbortSignal,
@@ -65,7 +69,7 @@ export async function withOriginalAttachment<T>(
 	if (!Number.isSafeInteger(index)) throw new Error("Invalid original attachment index");
 	const find = () => {
 		const matches = manager
-			.getBranch()
+			.getContextBranch()
 			.filter(
 				entry =>
 					entry.type === "message" &&

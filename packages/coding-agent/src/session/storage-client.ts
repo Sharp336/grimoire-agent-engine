@@ -41,6 +41,16 @@ const defaults: StorageClientLimits = {
 	deadlineMs: 10_000,
 };
 
+/** The only write/barrier failures that prove the owner applied nothing: validation rejections and admission
+ * refusals. Any other failure (e.g. `storage_error` after `write_opt` when `flush_wal` fails) leaves the outcome unknown. */
+const NOT_APPLIED: Partial<Record<StorageErrorCode, true>> = {
+	conflict: true,
+	schema_error: true,
+	sequence_gap: true,
+	backpressure: true,
+	retryable: true,
+};
+
 export class StorageClientError extends Error {
 	constructor(
 		readonly code: StorageErrorCode,
@@ -139,7 +149,7 @@ export class StorageClient {
 		return this.#write(write, body).finally(release);
 	}
 
-	/** A barrier confirms durability of accepted writes: any unknown outcome leaves those writes unknown and fences. */
+	/** A barrier confirms durability of accepted writes: any failure but a proven non-application fences. */
 	barrier(input: Omit<StorageBarrier, "requestId" | "incarnation">): Promise<StorageBarrierSuccessResponse> {
 		return this.#request("control", "/v1/barrier", "barrier", "barrier", input, true).then(response => {
 			// An owner that answers but cannot confirm the prefix leaves accepted writes with unknown durability.
@@ -192,7 +202,8 @@ export class StorageClient {
 		);
 	}
 
-	/** Reads change nothing, so an unusable response is an ordinary retryable failure, never a fence. */
+	/** Reads change nothing, so an unusable response is an ordinary retryable failure, never a fence. A request that
+	 * confirms writes fences on every failure that does not prove the owner applied nothing. */
 	#request(
 		lane: Lane,
 		route: string,
@@ -206,10 +217,10 @@ export class StorageClient {
 		const release = this.#reserve(lane, Buffer.byteLength(body));
 		return this.#http(route, body, requestId, Date.now() + this.#limits.deadlineMs)
 			.catch(error => {
-				if (error instanceof StorageClientError && error.code === "outcome_unknown")
-					throw confirmsWrites
-						? this.#fence(error.code, error.message)
-						: new StorageClientError("retryable", error.message);
+				if (!(error instanceof StorageClientError)) throw error;
+				if (confirmsWrites) {
+					if (!NOT_APPLIED[error.code]) throw this.#fence(error.code, error.message);
+				} else if (error.code === "outcome_unknown") throw new StorageClientError("retryable", error.message);
 				throw error;
 			})
 			.finally(release);
@@ -227,7 +238,8 @@ export class StorageClient {
 				Date.now() + Math.floor(this.#limits.deadlineMs / 2),
 			);
 		} catch (error) {
-			if (!(error instanceof StorageClientError) || error.code !== "outcome_unknown") throw error;
+			// Anything but a proven non-application reconciles through the receipt, then fences.
+			if (!(error instanceof StorageClientError) || NOT_APPLIED[error.code]) throw error;
 		}
 		while (true) {
 			if (response && "receipt" in response) {
@@ -244,9 +256,11 @@ export class StorageClient {
 					receipt.outcome !== "outcome_unknown" &&
 					receipt.outcome !== "success"
 				) {
-					const code = receipt.error?.code ?? "storage_error";
-					if (code === "stale_incarnation") throw this.#fence(code, receipt.error?.message ?? receipt.outcome);
-					throw new StorageClientError(code, receipt.error?.message ?? receipt.outcome);
+					const code = receipt.error?.code ?? receipt.outcome;
+					const message = receipt.error?.message ?? receipt.outcome;
+					if (code === "stale_incarnation") throw this.#fence(code, message);
+					if (NOT_APPLIED[code]) throw new StorageClientError(code, message);
+					// Any other failure is unknown until the receipt applies or the deadline fences.
 				}
 				if (
 					receipt.appliedState === "applied" &&

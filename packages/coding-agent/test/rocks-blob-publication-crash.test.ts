@@ -2,18 +2,20 @@ import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BlobStore } from "../src/session/blob-store";
-import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
 const cuts = ["intent", "publication_lock", "canonical", "complete"] as const;
 
-it.skipIf(!(executable && runRoot))(
+// Blob body GC is intentionally disabled by S5.5 C1-доп (storage-runtime reports blobs=disabled);
+// S5.6 B1 re-enables it on the new ledger — restore this gate then.
+it.skip(
 	"recovers real writer crashes at every blob publication cut",
 	async () => {
 		const root = await fs.mkdtemp(path.join(runRoot!, "blob-crash-"));
 		console.log(`Blob crash fixture: ${root}`);
-		const blobsDir = path.join(root, "blobs");
+		const blobsDir = storageBlobsDir(root);
 		const store = new BlobStore(blobsDir);
 		const hashes: string[] = [];
 		for (const cut of cuts) {

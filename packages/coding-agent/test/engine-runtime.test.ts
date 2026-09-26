@@ -48,6 +48,7 @@ import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { withOriginalAttachment } from "@oh-my-pi/pi-coding-agent/session/original-attachments";
 import { loadSessionFile, loadSessionMessagesReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { StorageClientError } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import * as utils from "@oh-my-pi/pi-utils";
@@ -8949,7 +8950,8 @@ describe("EngineRuntime", () => {
 			flushCalls++;
 			if (flushCalls === 1) return originalFlush.call(this);
 			if (flushCalls === 3) failedTwice.resolve();
-			throw new Error("injected transcript flush failure");
+			// The owner may have applied the write before flush_wal failed, so this is not a rejection.
+			throw new StorageClientError("storage_error", "injected flush_wal failure after write_opt");
 		});
 		try {
 			const started = await runtime.start(
@@ -8979,6 +8981,66 @@ describe("EngineRuntime", () => {
 			flush.mockRestore();
 		}
 		await runtime.dispose();
+	}, 60000);
+
+	it("fails an Attempt terminally when the storage owner rejects its transcript write", async () => {
+		const { runtime, cwd } = await createRuntime();
+		let flushCalls = 0;
+		const originalFlush = SessionManager.prototype.flushAndCheckpoint;
+		const flush = spyOn(SessionManager.prototype, "flushAndCheckpoint").mockImplementation(async function (
+			this: SessionManager,
+		) {
+			if (++flushCalls === 1) return originalFlush.call(this);
+			throw new StorageClientError("sequence_gap", "write does not follow accepted prefix");
+		});
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "command-rejected-write",
+					agentInstanceId: "agent-rejected-write",
+					executionId: "execution-rejected-write",
+					attemptId: "attempt-rejected-write",
+					authorityGeneration: 1,
+					cwd,
+					input: "finish",
+				},
+				profile,
+			);
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("failed");
+			expect(
+				(await runtime.store.pendingEvents()).filter(
+					event => event.attemptId === started.attemptId && event.kind === "failed",
+				),
+			).toHaveLength(1);
+		} finally {
+			flush.mockRestore();
+		}
+	});
+
+	it("survives a late stream capacity rejection but still dies on any other unhandled rejection", async () => {
+		// A separate process: the contract is what the process-level rejection hook lets survive.
+		const service = path.join(import.meta.dir, "../src/engine/service.ts");
+		const run = async (reason: string) => {
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					`const { isLateStreamCapacityRejection } = await import(${JSON.stringify(service)});
+const { interceptUnhandledRejections } = await import("@oh-my-pi/pi-utils/postmortem");
+const { StreamAdmissionError } = await import("@oh-my-pi/pi-ai/utils/stream-admission");
+interceptUnhandledRejections(isLateStreamCapacityRejection);
+Promise.reject(${reason});
+await Bun.sleep(50);
+console.log("alive");`,
+				],
+				{ cwd: path.join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe" },
+			);
+			const out = await new Response(child.stdout).text();
+			return { code: await child.exited, out };
+		};
+		expect(await run('new StreamAdmissionError("maxEvents")')).toEqual({ code: 0, out: "alive\n" });
+		expect((await run('new Error("unrelated failure")')).code).not.toBe(0);
 	}, 60000);
 
 	it("preserves terminal child history by default and honors explicit expiry policies", async () => {

@@ -623,8 +623,9 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		let cursor: string | undefined;
 		let cutSeq: number | undefined;
 		let checkpoint: NativeSessionCheckpoint | undefined;
+		let confirmed = false;
 		const seen = new Set<string>();
-		do {
+		for (;;) {
 			const request = {
 				familyId: this.#familyId,
 				generationId: this.#generationId,
@@ -635,6 +636,18 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			};
 			const page = await (archive ? this.#client.readRange(request) : this.#client.readContext(request));
 			this.#validatePage(page, cutSeq);
+			// A writer that stopped without a barrier can leave applied writes past the durable default cut.
+			// The next write must follow that applied prefix, so make it durable once and read again from it.
+			if (cutSeq === undefined && !confirmed && page.liveThroughSeq > page.throughSeq) {
+				confirmed = true;
+				await this.#client.barrier({
+					familyId: this.#familyId,
+					generationId: this.#generationId,
+					throughSeq: page.liveThroughSeq,
+					dependencies: [],
+				});
+				continue;
+			}
 			const pageCheckpoint = checkpointFrom(page);
 			if (checkpoint && JSON.stringify(pageCheckpoint) !== JSON.stringify(checkpoint))
 				throw new Error("Native checkpoint changed inside a frozen read");
@@ -647,7 +660,8 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			}
 			if (page.nextCursor && page.nextCursor === cursor) throw new Error("Native read cursor did not advance");
 			cursor = page.nextCursor ?? undefined;
-		} while (cursor);
+			if (!cursor) break;
+		}
 		if (!checkpoint || cutSeq === undefined) throw new Error("Native read did not return a checkpoint");
 		if (!archive) {
 			if ((entries[0]?.id ?? null) !== checkpoint.leafId)

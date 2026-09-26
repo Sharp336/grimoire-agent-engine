@@ -8,6 +8,7 @@ interface TestRequest {
 	write: StorageWrite;
 	receipt: { requestId: string };
 	read: { requestId: string; familyId: string; generationId: string };
+	barrier: { requestId: string; familyId: string };
 	query: {
 		requestId: string;
 		selector: { type: "records"; keys: Array<{ kind: "metadata"; id: string }> };
@@ -319,6 +320,48 @@ it("keeps every failed read local and fences only an unknown write or barrier ou
 		expect(requests).toBe(before);
 	} finally {
 		hang.resolve();
+		await server.stop(true);
+	}
+});
+
+it("fences a write or barrier the owner may have applied, never one it provably refused", async () => {
+	let receipts = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as TestRequest;
+			if (body.operation === "receipt") {
+				receipts++;
+				return envelope(body.receipt.requestId, {
+					error: { code: "outcome_unknown", message: "no authoritative receipt", retryable: true },
+				});
+			}
+			// The family names the error the owner answers with.
+			const { requestId, familyId: code } = body.operation === "write" ? body.write : body.barrier;
+			return envelope(requestId, { error: { code, message: `owner answered ${code}`, retryable: false } });
+		},
+	});
+	const barrierInput = (familyId: string) => ({ familyId, generationId: "g", throughSeq: 1, dependencies: [] });
+	try {
+		// A validation rejection and an admission refusal both prove nothing was applied.
+		for (const code of ["conflict", "backpressure"]) {
+			const client = new StorageClient(binding(server.port!), { deadlineMs: 200 });
+			await expect(client.write({ ...input, familyId: code })).rejects.toMatchObject({ code });
+			await expect(client.barrier(barrierInput(code))).rejects.toMatchObject({ code });
+			expect(client.failure).toBeUndefined();
+		}
+		expect(receipts).toBe(0);
+
+		// storage_error can follow write_opt (a failed flush_wal): reconcile through the receipt, then fence.
+		const written = new StorageClient(binding(server.port!), { deadlineMs: 200 });
+		await expect(written.write({ ...input, familyId: "storage_error" })).rejects.toThrow("outcome is unknown");
+		expect(written.failure?.code).toBe("outcome_unknown");
+		expect(receipts).toBeGreaterThan(0);
+		const barrier = new StorageClient(binding(server.port!), { deadlineMs: 200 });
+		await expect(barrier.barrier(barrierInput("storage_error"))).rejects.toMatchObject({ code: "storage_error" });
+		expect(barrier.failure?.code).toBe("storage_error");
+	} finally {
 		await server.stop(true);
 	}
 });

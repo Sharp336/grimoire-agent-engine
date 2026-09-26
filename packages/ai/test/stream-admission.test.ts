@@ -52,7 +52,8 @@ test("aggregate admission includes yielded events and has an out-of-band failure
 	expect((await consumer.next()).value).toBe(1);
 	b.push(2);
 	expect(admission.metrics.events).toBe(2);
-	expect(() => b.push(3)).toThrow("maxEvents");
+	// A producer is never thrown into; the failure is out of band.
+	b.push(3);
 	expect(admission.signal.aborted).toBe(true);
 	await expect(a.result()).rejects.toThrow("maxEvents");
 	await expect(b.result()).rejects.toThrow("maxEvents");
@@ -73,7 +74,7 @@ test("byte overflow cannot resolve a terminal success; draining releases its cha
 	stream.push("a");
 	expect([...stream.drain()]).toEqual(["a"]);
 	expect(admission.metrics.bytes).toBe(0);
-	expect(() => stream.push("x".repeat(100))).toThrow("maxEventBytes");
+	stream.push("x".repeat(100));
 	stream.push("done");
 	await expect(stream.result()).rejects.toThrow("maxEventBytes");
 });
@@ -91,29 +92,25 @@ test.each([
 				event => event,
 			),
 	);
-	let produced = 0;
-	expect(() => {
-		for (let index = 0; index < 12; index++) {
-			const message = {
-				role: "assistant",
-				content: [
-					{
-						type: "toolCall",
-						id: `call${index}`,
-						name: "write",
-						arguments: { partial: String(index).padStart(8, "0") + "x".repeat(length) },
-					},
-				],
-			};
-			stream.push({
-				type: "message_update",
-				message,
-				assistantMessageEvent: { type: "toolcall_delta", delta: "x", partial: message },
-			});
-			produced++;
-		}
-	}).toThrow(limit);
-	expect(produced).toBe(admitted);
+	for (let index = 0; index < 12; index++) {
+		const message = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: `call${index}`,
+					name: "write",
+					arguments: { partial: String(index).padStart(8, "0") + "x".repeat(length) },
+				},
+			],
+		};
+		stream.push({
+			type: "message_update",
+			message,
+			assistantMessageEvent: { type: "toolcall_delta", delta: "x", partial: message },
+		});
+	}
+	expect(admission.metrics.peakEvents).toBe(admitted);
 	await expect(stream.result()).rejects.toThrow(limit);
 	expect(admission.metrics.peakBytes).toBeLessThanOrEqual(admission.limits.maxQueuedBytes);
 	expect(admission.metrics).toMatchObject({ events: 0, bytes: 0, aborted: limit });
@@ -164,14 +161,13 @@ test("only a typed assistant event's root partial is shared; callbacks and neste
 
 	const toolAdmission = new StreamAdmission();
 	const toolStream = runWithStreamAdmission(toolAdmission, () => new AssistantMessageEventStream());
-	expect(() =>
-		toolStream.push({
-			type: "toolcall_end",
-			contentIndex: 0,
-			partial,
-			toolCall: { type: "toolCall", id: "call", name: "write", arguments: { partial: "x".repeat(300_000) } },
-		}),
-	).toThrow("maxEventBytes");
+	toolStream.push({
+		type: "toolcall_end",
+		contentIndex: 0,
+		partial,
+		toolCall: { type: "toolCall", id: "call", name: "write", arguments: { partial: "x".repeat(300_000) } },
+	});
+	expect(toolAdmission.metrics.aborted).toBe("maxEventBytes");
 });
 
 test("normal terminal consumption releases all tickets and local work is finite", async () => {

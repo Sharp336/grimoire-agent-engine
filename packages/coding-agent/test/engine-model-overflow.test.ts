@@ -16,9 +16,8 @@ it("never records an aborted native model stream as a completed effect or retrie
 			new Response(child.stdout).text(),
 			new Response(child.stderr).text(),
 		]);
-		// The mock transport's rejected error event is a known independent fixture
-		// defect; the child must reach all durable assertions before this marker.
-		expect(code === 0 || (code === 1 && stderr.includes("[Unhandled Rejection] StreamAdmissionError:"))).toBe(true);
+		// No unhandled rejection may escape a capacity overflow: the child exits cleanly.
+		expect({ code, stderr }).toMatchObject({ code: 0 });
 		expect(stderr).not.toContain("AssertionError");
 		expect(stdout).toContain('"modelOutcome":"failed"');
 		expect(stdout).toContain('"calls":1');

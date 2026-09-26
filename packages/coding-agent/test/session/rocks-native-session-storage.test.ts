@@ -8,6 +8,7 @@ import {
 	type NativeSessionCheckpoint,
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
+import { withOriginalAttachment } from "../../src/session/original-attachments";
 import {
 	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
 	nativePayloadBlobHashes,
@@ -81,11 +82,17 @@ class DelayedStorageClient extends StorageClient {
 	}
 }
 
-/** In-memory owner for one family: frozen cuts, leaf walks to the context anchor and fork lineage. */
+/**
+ * In-memory owner for one family: frozen cuts, leaf walks to the context anchor and fork lineage.
+ * Buffered writes apply at once but become durable only by a required write or a barrier; the default
+ * read cut is durable, and a write must follow the applied prefix.
+ */
 class MemoryNativeClient extends StorageClient {
 	readonly writes: WriteInput[] = [];
+	readonly barriers: number[] = [];
 	readonly #entries = new Map<string, StorageReadEntry>();
 	readonly #heads = new Map<string, Array<{ seq: number; head?: StorageNativeHead; state?: StoragePayload }>>();
+	readonly #durable = new Map<string, number>();
 	constructor() {
 		super({
 			url: "http://127.0.0.1:1",
@@ -95,6 +102,9 @@ class MemoryNativeClient extends StorageClient {
 		});
 	}
 	override async write(input: WriteInput): Promise<StorageReceipt> {
+		const heads = this.#heads.get(input.generationId) ?? [];
+		if (input.firstSeq !== (heads.at(-1)?.seq ?? 0) + 1)
+			throw new StorageClientError("sequence_gap", "write does not follow accepted prefix");
 		this.writes.push(structuredClone(input));
 		const throughSeq = input.firstSeq + Math.max(1, input.entries.length) - 1;
 		for (const edit of input.nativeEdits ?? []) {
@@ -103,9 +113,9 @@ class MemoryNativeClient extends StorageClient {
 		}
 		for (const [index, entry] of input.entries.entries())
 			this.#entries.set(entry.entryId, { ...entry, seq: input.firstSeq + index });
-		const heads = this.#heads.get(input.generationId) ?? [];
 		heads.push({ seq: throughSeq, head: input.head, state: input.state });
 		this.#heads.set(input.generationId, heads);
+		if (input.durability === "required") this.#durable.set(input.generationId, throughSeq);
 		return {
 			operationId: input.operationId,
 			familyId: input.familyId,
@@ -123,6 +133,8 @@ class MemoryNativeClient extends StorageClient {
 	override async barrier(
 		input: Omit<StorageBarrier, "requestId" | "incarnation">,
 	): Promise<StorageBarrierSuccessResponse> {
+		this.barriers.push(input.throughSeq);
+		this.#durable.set(input.generationId, Math.max(this.#durable.get(input.generationId) ?? 0, input.throughSeq));
 		return {
 			...input,
 			schema: "artel.storage.protocol.response.v1",
@@ -137,7 +149,8 @@ class MemoryNativeClient extends StorageClient {
 	): Promise<StorageReadSuccessResponse> {
 		const heads = this.#heads.get(input.generationId) ?? [];
 		const latest = heads.at(-1)?.seq ?? 0;
-		const cut = input.cutSeq ?? latest;
+		const durable = this.#durable.get(input.generationId) ?? 0;
+		const cut = input.cutSeq ?? durable;
 		const at = heads.findLast(item => item.seq <= cut);
 		const start = input.startEntryId ?? at?.head?.contextAnchors?.startEntryId;
 		const path: StorageReadEntry[] = [];
@@ -158,7 +171,7 @@ class MemoryNativeClient extends StorageClient {
 			familyId: input.familyId,
 			generationId: input.generationId,
 			throughSeq: cut,
-			durableThroughSeq: latest,
+			durableThroughSeq: durable,
 			liveThroughSeq: latest,
 			head: at?.head ?? null,
 			state: at?.state ?? null,
@@ -304,6 +317,57 @@ it("keeps image references through a native fork and a history edit", async () =
 		const reopened = await SessionManager.openNative(new RocksNativeSessionStorage(client, "fork", "edited"));
 		expect(reopened.buildSessionContext()).toEqual(edited.buildSessionContext());
 		expect(JSON.stringify(reopened.buildSessionContext())).toContain(data);
+	});
+});
+
+it("resumes after a crash from applied writes left past the durable cut instead of forking the prefix", async () => {
+	const client = new MemoryNativeClient();
+	const crashed = SessionManager.createNative("/crash", new RocksNativeSessionStorage(client, "crash", "root"));
+	for (let index = 0; index < 11; index++)
+		crashed.appendMessage({ role: "user", content: String(index), timestamp: index });
+	await crashed.flushAndCheckpoint();
+	// Applied (buffered) but never barriered before the process died: live 12, durable 11.
+	const applied = crashed.appendMessage({ role: "user", content: "applied", timestamp: 11 });
+	expect(client.writes.at(-1)?.firstSeq).toBe(12);
+	expect(client.barriers).toEqual([11]);
+
+	const resumed = await SessionManager.openNative(new RocksNativeSessionStorage(client, "crash", "root"));
+	expect(client.barriers).toEqual([11, 12]);
+	expect(resumed.getLeafId()).toBe(applied);
+	resumed.appendMessage({ role: "user", content: "next", timestamp: 12 });
+	await resumed.flushAndCheckpoint();
+	expect(client.writes.at(-1)).toMatchObject({ firstSeq: 13, entries: [{ parentId: applied }] });
+
+	// A clean reopen reads the durable cut without another barrier.
+	await SessionManager.openNative(new RocksNativeSessionStorage(client, "crash", "root"));
+	expect(client.barriers).toEqual([11, 12, 13]);
+});
+
+it("reads a retained original attachment from a resumed native session without its full archive", async () => {
+	await withContourBlobs(async blobs => {
+		const client = new MemoryNativeClient();
+		const text = "original notes\n";
+		const { hash } = await blobs.put(Buffer.from(text));
+		const manager = SessionManager.createNative(
+			"/originals",
+			new RocksNativeSessionStorage(client, "originals", "root"),
+		);
+		const userId = manager.appendMessage(
+			{ role: "user", content: "read the file", timestamp: 1 },
+			{
+				clientMessageId: "client-1",
+				originalAttachments: [
+					{ name: "notes.txt", mediaType: "text/plain", bytes: text.length, contentHash: `sha256:${hash}` },
+				],
+			},
+		);
+		await manager.flushAndCheckpoint();
+
+		// A restart reopens only the working context; the archive stays unmaterialized.
+		const resumed = await SessionManager.openNative(new RocksNativeSessionStorage(client, "originals", "root"));
+		expect(() => resumed.getBranch()).toThrow("Full native history is not loaded");
+		for (const uri of ["attachment://original/message/client-1/0", `attachment://original/entry/${userId}/0`])
+			expect(await withOriginalAttachment(resumed, uri, filePath => Bun.file(filePath).text())).toBe(text);
 	});
 });
 

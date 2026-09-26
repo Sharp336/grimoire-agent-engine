@@ -2,17 +2,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { StreamAdmissionError } from "@oh-my-pi/pi-ai/utils/stream-admission";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { AuthStorage } from "../../src/session/auth-storage";
 
-// The mock producer reports its rejected error event after stream abort. Keep
-// that fixture-only rejection separate from the durable runtime outcome.
-process.on("unhandledRejection", error => {
-	if (!(error instanceof StreamAdmissionError)) throw error;
-});
 const root = process.argv[2];
 const cwd = path.join(root, "workspace");
 await fs.mkdir(cwd, { recursive: true });
