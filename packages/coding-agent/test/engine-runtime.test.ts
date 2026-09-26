@@ -6418,12 +6418,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("disposes a newborn held child while its effect admission is returning", async () => {
 		const parentPrompt = Promise.withResolvers<boolean>();
+		const parentDispatched = Promise.withResolvers<void>();
 		const busyReached = Promise.withResolvers<void>();
 		const returnBusy = Promise.withResolvers<void>();
 		const prompts: string[] = [];
 		const { runtime, cwd } = await createRuntime(async (_session, input) => {
 			prompts.push(input);
-			return input === "parent work" ? parentPrompt.promise : true;
+			if (input !== "parent work") return true;
+			parentDispatched.resolve();
+			return parentPrompt.promise;
 		});
 		const parent = await runtime.start(
 			{
@@ -6438,6 +6441,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			},
 			profile,
 		);
+		// The parent pauses mid-prompt: its model admission is already settled, only the newborn child is held.
+		await withTimeout(parentDispatched.promise, 2000, "Parent prompt was not dispatched");
 		await runtime.pause({ ...parent, commandId: "dispose-held-parent-pause", initiator: { kind: "human" } });
 		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
 		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(async (target, effect) => {
@@ -6490,6 +6495,75 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			returnBusy.resolve();
 			parentPrompt.resolve(true);
 			admission.mockRestore();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+		}
+	}, 15000);
+
+	it("disposes an agent whose model admission is parked behind a hold", async () => {
+		const prompts: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (_session, input) => {
+			prompts.push(input);
+			return true;
+		});
+		// A quiet store: no unrelated change will wake a parked admission, only the Engine itself can.
+		const quiet = spyOn(runtime.store, "changeSignal").mockReturnValue(Promise.withResolvers<void>().promise);
+		const held = Promise.withResolvers<void>();
+		const parked = Promise.withResolvers<void>();
+		let refused = false;
+		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(
+			async (target, effect, checkpoint) => {
+				await held.promise;
+				try {
+					return await originalAdmission(target, effect, checkpoint);
+				} catch (error) {
+					refused = true;
+					throw error;
+				}
+			},
+		);
+		// A refused admission re-reads the hold in its agent lane before it waits for a store change.
+		const originalIntent = runtime.store.intent.bind(runtime.store);
+		const intent = spyOn(runtime.store, "intent").mockImplementation(async agentInstanceId => {
+			const afterRefusal = refused;
+			const result = await originalIntent(agentInstanceId);
+			if (afterRefusal) parked.resolve();
+			return result;
+		});
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "parked-admission-start",
+					agentInstanceId: "parked-admission-agent",
+					agentInstanceRef: "grimoire://tasks/p/t/agents/parked-admission-agent",
+					executionId: "parked-admission-execution",
+					attemptId: "parked-admission-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "parked work",
+				},
+				profile,
+			);
+			// The hold settles before the first model admission, so that admission is refused and parks.
+			const paused = nextEngineEvent(runtime, "paused", started.attemptId);
+			await runtime.pause({ ...started, commandId: "parked-admission-pause", initiator: { kind: "human" } });
+			await withTimeout(paused, 2000, "Pause did not settle before model admission");
+			held.resolve();
+			await withTimeout(parked.promise, 2000, "Model admission did not park behind the hold");
+			// Only microtasks separate that re-read from the wait; one macrotask turn lets the admission reach it.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			await withTimeout(runtime.dispose({ closeStore: false }), 5000, "Parked admission blocked disposal");
+			expect(prompts).toEqual([]);
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "interrupted" });
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
+		} finally {
+			held.resolve();
+			admission.mockRestore();
+			intent.mockRestore();
+			quiet.mockRestore();
 			await runtime.dispose({ closeStore: false });
 			await runtime.store.close();
 		}
@@ -7756,11 +7830,13 @@ console.log("alive");`,
 			return true;
 		};
 		const cancelledPrompt = Promise.withResolvers<boolean>();
+		const cancelledDispatched = Promise.withResolvers<void>();
 		const preserved = await createRuntime(async (session, input, identity) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			if (input.startsWith("fail")) throw new Error("injected failed child");
-			if (input.startsWith("cancel")) return await cancelledPrompt.promise;
-			return true;
+			if (!input.startsWith("cancel")) return true;
+			cancelledDispatched.resolve();
+			return await cancelledPrompt.promise;
 		});
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-failed", "fail but retain child history");
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-completed", "complete and retain child history");
@@ -7788,6 +7864,8 @@ console.log("alive");`,
 			preserved.runtime.engineGeneration,
 		);
 		const cancelledStarted = await preserved.runtime.start(cancelledRequest, profile);
+		// Stop the child mid-prompt; a Stop before model admission never dispatches the prompt at all.
+		await withTimeout(cancelledDispatched.promise, 2000, "Cancelled child prompt was not dispatched");
 		await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
 		cancelledPrompt.resolve(true);
 		await preserved.runtime.drain();

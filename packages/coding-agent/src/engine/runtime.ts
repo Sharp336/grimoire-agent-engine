@@ -3298,6 +3298,8 @@ export class EngineRuntime {
 			if (["cancel_requested", "cancelled", "failed", "interrupted"].includes(binding.attemptState))
 				throw new EngineTargetError("cancelled", "Attempt cannot admit another effect");
 			const changed = this.store.changeSignal();
+			// Stop, release and disposal signal pause progress without a store change; a parked admission must see them.
+			const progress = binding.pauseProgress.promise;
 			try {
 				return await work();
 			} catch (error) {
@@ -3326,7 +3328,7 @@ export class EngineRuntime {
 				const abort = () => cancelled.resolve();
 				signal?.addEventListener("abort", abort, { once: true });
 				try {
-					await Promise.race([changed, cancelled.promise]);
+					await Promise.race([changed, progress, cancelled.promise]);
 				} finally {
 					signal?.removeEventListener("abort", abort);
 				}
