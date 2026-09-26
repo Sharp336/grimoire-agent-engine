@@ -19,6 +19,7 @@
 - An Engine event committed together with its command settlement now projects that command as settled.
 - Long answers from fast models no longer stop with `Stream admission capacity exceeded: maxEvents`: the Engine persists the first streamed delta of each block at once and coalesces the rest into at most one durable update per 100 ms or 8 KiB, so model streaming no longer waits on storage for every token.
 - An answer interrupted by a stream capacity limit keeps the text already streamed in chat history instead of showing only the trace, and the overflow no longer escapes as an unhandled rejection that could stop the Engine.
+- A native Engine answer that hits the output length limit while thinking, when compaction cannot recover it, stays in chat history with its thinking and `stopReason: length` instead of vanishing behind `Full native history is not loaded` and a silently completed Attempt.
 - Explicit Continue works after a restart when the last retained message is an assistant response, and explains that unfinished background jobs from the previous Attempt cannot return results.
 - Pause and Resume remain responsive while neighboring native sessions produce events.
 - Child agents start from a local assignment even when Grimoire is unavailable, retain their results across retries and restarts, and sync their lifecycle after reconnection.
