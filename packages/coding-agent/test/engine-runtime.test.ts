@@ -8898,7 +8898,8 @@ describe("EngineRuntime", () => {
 			flushCalls++;
 			if (flushCalls === 1) return originalFlush.call(this);
 			if (flushCalls === 3) failedTwice.resolve();
-			throw new Error("injected transcript flush failure");
+			// The owner may have applied the write before flush_wal failed, so this is not a rejection.
+			throw new StorageClientError("storage_error", "injected flush_wal failure after write_opt");
 		});
 		try {
 			const started = await runtime.start(

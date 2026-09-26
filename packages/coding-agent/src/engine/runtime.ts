@@ -6689,12 +6689,13 @@ function isEexist(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
-/** The storage owner rejected the transcript write itself; retrying the same prefix cannot make it durable. */
+/** The storage owner rejected the transcript write itself; retrying the same prefix cannot make it durable. Only a
+ * validation rejection proves that: any other storage failure leaves durability unknown (or merely refused admission). */
 function isRejectedTranscriptWrite(error: unknown): boolean {
 	for (let current = error, depth = 0; current instanceof Error && depth < 8; current = current.cause, depth++) {
 		if (current instanceof NativeSessionWriteRejectedError) return true;
 		if (current instanceof StorageClientError)
-			return !["outcome_unknown", "retryable", "backpressure"].includes(current.code);
+			return current.code === "conflict" || current.code === "schema_error" || current.code === "sequence_gap";
 	}
 	return false;
 }
