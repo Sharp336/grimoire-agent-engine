@@ -29,6 +29,8 @@ import {
 	boundedReceipt,
 	eventReadKeys,
 	projectionId,
+	retainedInputPayload,
+	retainInputParts,
 	runtimeReceipt,
 	settleRuntimeMessages,
 } from "./rocks-runtime-projection";
@@ -1106,6 +1108,8 @@ export class RocksEngineMutations {
 			attempt_id: target.attemptId,
 			published_at: null,
 		};
+		const payload = await retainedInputPayload(tx, stored);
+		if (payload) stored.payload = payload;
 		await tx.create("event", String(eventId), stored);
 		await this.projectEvent(tx, stored);
 		return stored;
@@ -1274,6 +1278,9 @@ export class RocksEngineMutations {
 	): Promise<EngineEvent[]> {
 		const native = options.transcriptCheckpoint?.native;
 		if (state === "completed" && !native) throw new EngineAttemptConflictError(binding.attemptId);
+		for (const event of events)
+			if (event.kind === "input_requested" && event.payload)
+				await retainInputParts(this.records, binding, event.payload);
 		return this.mutation(
 			binding.agentInstanceId,
 			async tx => {
