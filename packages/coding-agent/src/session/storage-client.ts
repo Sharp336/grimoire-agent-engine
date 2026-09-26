@@ -107,7 +107,12 @@ export function readStorageBinding(value = process.env.GRIMOIRE_STORAGE_BINDING)
 type WriteInput = Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
 type Lane = "write" | "read" | "control";
 
-/** One bounded HTTP client per Engine. Admission is synchronous; there is no hidden pending queue. */
+/**
+ * One bounded HTTP client per Engine. Write and control admission is synchronous; there is no hidden write queue.
+ * A read waits, oldest first, for a read slot until its own deadline: its callers are already bounded by their own
+ * admission (Control + Query requests, runtime mutations), so a burst of observer reads only adds latency and can
+ * neither reject an Engine command's read nor end a live event stream.
+ */
 export class StorageClient {
 	readonly #binding: StorageBinding;
 	readonly #limits: StorageClientLimits;
@@ -115,6 +120,8 @@ export class StorageClient {
 	readonly #listeners = new Set<(error: StorageClientError) => void>();
 	#writeBytes = 0;
 	#failure?: StorageClientError;
+	/** Reads waiting for a read slot, oldest first. A finishing read hands its slot to the head. */
+	readonly #readQueue: Array<PromiseWithResolvers<void>> = [];
 
 	constructor(binding: StorageBinding, limits: Partial<StorageClientLimits> = {}) {
 		this.#binding = readStorageBinding(JSON.stringify(binding))!;
@@ -223,16 +230,19 @@ export class StorageClient {
 	): Promise<StorageProtocolResponse> {
 		const requestId = crypto.randomUUID();
 		const body = this.#body(operation, key, { ...input, requestId, incarnation: this.incarnation });
-		const release = this.#reserve(lane, Buffer.byteLength(body));
-		return this.#http(route, body, requestId, Date.now() + this.#limits.deadlineMs)
-			.catch(error => {
-				if (!(error instanceof StorageClientError)) throw error;
-				if (confirmsWrites) {
-					if (!NOT_APPLIED[error.code]) throw this.#fence(error.code, error.message);
-				} else if (error.code === "outcome_unknown") throw new StorageClientError("retryable", error.message);
-				throw error;
-			})
-			.finally(release);
+		const deadline = Date.now() + this.#limits.deadlineMs;
+		const bytes = Buffer.byteLength(body);
+		const exchange = (release: () => void) =>
+			this.#http(route, body, requestId, deadline)
+				.catch(error => {
+					if (!(error instanceof StorageClientError)) throw error;
+					if (confirmsWrites) {
+						if (!NOT_APPLIED[error.code]) throw this.#fence(error.code, error.message);
+					} else if (error.code === "outcome_unknown") throw new StorageClientError("retryable", error.message);
+					throw error;
+				})
+				.finally(release);
+		return lane === "read" ? this.#reserveRead(bytes, deadline).then(exchange) : exchange(this.#reserve(lane, bytes));
 	}
 
 	async #write(write: StorageWrite, body: string): Promise<StorageReceipt> {
@@ -317,11 +327,43 @@ export class StorageClient {
 		)
 			throw new StorageClientError("backpressure", "Storage client admission budget exhausted");
 		this.#active[lane]++;
+		if (lane === "read") return () => this.#handOverRead();
 		if (lane === "write") this.#writeBytes += bytes;
 		return () => {
 			this.#active[lane]--;
 			if (lane === "write") this.#writeBytes -= bytes;
 		};
+	}
+	async #reserveRead(bytes: number, deadline: number): Promise<() => void> {
+		if (
+			this.#failure ||
+			bytes > this.#limits.requestBytes ||
+			(this.#active.read < this.#limits.readRequests && !this.#readQueue.length)
+		)
+			return this.#reserve("read", bytes);
+		const turn = Promise.withResolvers<void>();
+		this.#readQueue.push(turn);
+		const timer = setTimeout(
+			() => {
+				const index = this.#readQueue.indexOf(turn);
+				// Absent: a finishing read already handed this one its slot.
+				if (index < 0) return;
+				this.#readQueue.splice(index, 1);
+				turn.reject(new StorageClientError("backpressure", "Storage client admission budget exhausted"));
+			},
+			Math.max(0, deadline - Date.now()),
+		);
+		try {
+			await turn.promise;
+		} finally {
+			clearTimeout(timer);
+		}
+		return () => this.#handOverRead();
+	}
+	#handOverRead(): void {
+		const next = this.#readQueue.shift();
+		if (next) next.resolve();
+		else this.#active.read--;
 	}
 
 	/** Only a stale binding fences here. Every unusable response is `outcome_unknown`: a write then

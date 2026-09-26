@@ -217,6 +217,53 @@ it("keeps buffered runtime mutations on reserved control reads when observer rea
 	}
 });
 
+it("queues a read behind a full read lane instead of refusing it", async () => {
+	const holding = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as TestRequest;
+			const keys = body.query.selector.keys;
+			if (keys.some(key => key.id === "observer")) {
+				holding.resolve();
+				await release.promise;
+			}
+			return envelope(body.query.requestId, {
+				records: keys.map(key => ({ ...key, revision: null, value: null })),
+				nextCursor: null,
+			});
+		},
+	});
+	let observer: Promise<unknown> | undefined;
+	try {
+		// An observer read holds the only read slot. A command's read arriving now must wait for that slot:
+		// refusing it made a continued chat's Start fail as "admission budget exhausted" under observer load.
+		const client = new StorageClient(binding(server.port!), { readRequests: 1 });
+		const query = (id: string) =>
+			client.runtimeQuery({
+				selector: { type: "records", keys: [{ kind: "metadata", id }] },
+				maxRecords: 1,
+				maxBytes: 1024,
+			});
+		observer = query("observer");
+		await holding.promise;
+		const command = query("command");
+		const later = query("later");
+		expect(client.pending.read).toBe(1);
+		release.resolve();
+		expect((await command).records[0]?.id).toBe("command");
+		expect((await later).records[0]?.id).toBe("later");
+		await observer;
+		expect(client.pending.read).toBe(0);
+	} finally {
+		release.resolve();
+		await observer?.catch(() => {});
+		await server.stop(true);
+	}
+});
+
 it("keeps one runtime scope from consuming the whole required mutation budget", async () => {
 	const release = Promise.withResolvers<void>();
 	const client = {
