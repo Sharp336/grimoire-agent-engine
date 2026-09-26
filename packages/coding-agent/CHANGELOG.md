@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- A native Engine turn with eight or more parallel tool calls, such as eight `read` calls at once, no longer fails every call and the Attempt with `Storage client admission budget exhausted`: a storage write, barrier or control read that finds its lane full now waits, oldest first, for a slot until its deadline, as reads already did. Only a request that never got a slot is refused, and it was never sent, so the refusal cannot fence the client.
 - Parallel tool calls in one native Engine turn, such as launching six children at once, no longer fail with `Runtime mutation admission exhausted` beyond the fourth: a chat's state changes wait their turn, and the Engine refuses them only after a chat or the Engine has queued far more than any real turn.
 - Native Engine history stores images as `blob:sha256:` references in the contour body root (`PI_BLOBS_DIR`) instead of base64, restores them when a chat is opened, forked or edited, and admits large image or text messages that the 8 MiB entry budget used to reject.
 - A native Engine chat reopened after an unclean stop now confirms writes that were applied but not yet durable, so its next message follows them instead of failing with `write does not follow accepted prefix`.

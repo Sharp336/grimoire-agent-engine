@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { expect, it, vi } from "bun:test";
 import { RuntimeRecords } from "../../src/engine/runtime-records";
 import { StorageClient, StorageClientError, storageCanonicalJson } from "../../src/session/storage-client";
 import {
@@ -83,14 +83,16 @@ it("recovers the original durable receipt after a lost write response, without s
 	}
 });
 
-it("rejects overflow synchronously while retaining separate read and required-control lanes", async () => {
+it("queues a write behind its full lane, unsent, while read and control lanes stay separate", async () => {
 	const gate = Promise.withResolvers<void>();
+	const sent: string[] = [];
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
 		async fetch(request) {
 			const body = (await request.json()) as TestRequest;
 			if (body.operation === "write") {
+				sent.push(body.write.operationId);
 				if (body.write.durability === "buffered") await gate.promise;
 				return envelope(body.write.requestId, { receipt: receipt(body.write) });
 			}
@@ -108,7 +110,7 @@ it("rejects overflow synchronously while retaining separate read and required-co
 	try {
 		const client = new StorageClient(binding(server.port!), { writeRequests: 1 });
 		const first = client.write({ ...input, durability: "buffered" });
-		expect(() => client.write({ ...input, operationId: "op-two" })).toThrow("admission budget");
+		const second = client.write({ ...input, operationId: "op-two" });
 		expect(
 			(await client.readRange({ familyId: "family", generationId: "generation", maxRecords: 1, maxBytes: 1024 }))
 				.events,
@@ -116,11 +118,86 @@ it("rejects overflow synchronously while retaining separate read and required-co
 		expect((await client.write({ ...input, familyId: "control", operationId: "terminal" }, true)).outcome).toBe(
 			"success",
 		);
+		expect(sent).not.toContain("op-two");
+		expect(client.pending.write).toBe(1);
 		gate.resolve();
+		expect((await second).outcome).toBe("success");
 		await first;
-		expect(client.pending.writeBytes).toBe(0);
+		expect(sent.at(-1)).toBe("op-two");
+		expect(client.pending).toEqual({ write: 0, read: 0, control: 0, writeBytes: 0 });
 	} finally {
 		gate.resolve();
+		await server.stop(true);
+	}
+});
+
+it("admits a queued barrier with its own deadline and refuses a waiter only unsent, without fencing", async () => {
+	// Each parallel tool call of one turn checkpoints through a barrier on the control lane. The ninth used to be
+	// refused outright, which failed every call and the Attempt.
+	const held = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const slowSent = Promise.withResolvers<void>();
+	const releaseSlow = Promise.withResolvers<void>();
+	const sent: string[] = [];
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as TestRequest;
+			if (body.operation === "read_range") {
+				held.resolve();
+				await release.promise;
+				return envelope(body.read.requestId, {
+					familyId: body.read.familyId,
+					generationId: body.read.generationId,
+					throughSeq: 0,
+					durableThroughSeq: 0,
+					liveThroughSeq: 0,
+					events: [],
+					nextCursor: null,
+				});
+			}
+			sent.push(body.barrier.familyId);
+			slowSent.resolve();
+			await releaseSlow.promise;
+			return envelope(body.barrier.requestId, { durableThroughSeq: 1 });
+		},
+	});
+	vi.useFakeTimers();
+	try {
+		const client = new StorageClient(binding(server.port!), {
+			controlRequests: 1,
+			queuedRequests: 2,
+			deadlineMs: 1000,
+		});
+		const barrier = (familyId: string) =>
+			client.barrier({ familyId, generationId: "g", throughSeq: 1, dependencies: [] });
+		// t=0: a control read holds the only slot.
+		const holder = client.readRange({ familyId: "held", generationId: "g", maxRecords: 1, maxBytes: 1024 }, true);
+		await held.promise;
+		vi.advanceTimersByTime(500);
+		// t=500: two barriers wait until t=1500; the bounded queue refuses a third at once.
+		const slow = barrier("slow");
+		const late = barrier("late");
+		await expect(barrier("overflow")).rejects.toMatchObject({ code: "backpressure" });
+		vi.advanceTimersByTime(499);
+		// t=999: the holder finishes and "slow" takes its slot.
+		release.resolve();
+		await holder;
+		await slowSent.promise;
+		// t=1500: "late" is refused unsent. "slow" keeps a full deadline from its admission: counting its queue
+		// time would end it now as an unknown barrier outcome and fence the client.
+		vi.advanceTimersByTime(501);
+		await expect(late).rejects.toMatchObject({ code: "backpressure" });
+		releaseSlow.resolve();
+		expect((await slow).durableThroughSeq).toBe(1);
+		expect(sent).toEqual(["slow"]);
+		expect(client.failure).toBeUndefined();
+		expect(client.pending).toEqual({ write: 0, read: 0, control: 0, writeBytes: 0 });
+	} finally {
+		vi.useRealTimers();
+		release.resolve();
+		releaseSlow.resolve();
 		await server.stop(true);
 	}
 });
@@ -128,10 +205,7 @@ it("rejects overflow synchronously while retaining separate read and required-co
 it("keeps buffered runtime mutations on reserved control reads when observer reads fill their lane", async () => {
 	const observerStarted = Promise.withResolvers<void>();
 	const releaseObserver = Promise.withResolvers<void>();
-	const controlStarted = Promise.withResolvers<void>();
-	const releaseControl = Promise.withResolvers<void>();
 	let observer: Promise<unknown> | undefined;
-	let control: Promise<unknown> | undefined;
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
@@ -142,9 +216,6 @@ it("keeps buffered runtime mutations on reserved control reads when observer rea
 				if (keys.some(key => key.id === "observer")) {
 					observerStarted.resolve();
 					await releaseObserver.promise;
-				} else if (keys.some(key => key.id === "control")) {
-					controlStarted.resolve();
-					await releaseControl.promise;
 				}
 				return envelope(body.query.requestId, {
 					records: keys.map(key => ({ ...key, revision: null, value: null })),
@@ -188,31 +259,9 @@ it("keeps buffered runtime mutations on reserved control reads when observer rea
 		).toBe("persisted");
 		releaseObserver.resolve();
 		await observer;
-
-		control = client.runtimeQuery(
-			{
-				selector: { type: "records", keys: [{ kind: "metadata", id: "control" }] },
-				maxRecords: 1,
-				maxBytes: 1024,
-			},
-			true,
-		);
-		await controlStarted.promise;
-		await expect(
-			records.mutate(
-				"blocked-scope",
-				async tx => tx.put("metadata", "blocked", { value: "rejected" }),
-				[],
-				"buffered",
-			),
-		).rejects.toThrow("admission budget");
-		releaseControl.resolve();
-		await control;
 	} finally {
 		releaseObserver.resolve();
-		releaseControl.resolve();
 		await observer?.catch(() => {});
-		await control?.catch(() => {});
 		await server.stop(true);
 	}
 });
@@ -382,7 +431,7 @@ it("fences all later calls after the owner incarnation changes", async () => {
 	try {
 		const client = new StorageClient(binding(server.port!));
 		await expect(client.write(input)).rejects.toThrow("incarnation changed");
-		expect(() => client.write(input)).toThrow("incarnation changed");
+		await expect(client.write(input)).rejects.toThrow("incarnation changed");
 	} finally {
 		await server.stop(true);
 	}

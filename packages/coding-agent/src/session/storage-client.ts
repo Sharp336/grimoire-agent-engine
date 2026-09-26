@@ -28,6 +28,8 @@ export interface StorageClientLimits {
 	controlRequests: number;
 	requestBytes: number;
 	responseBytes: number;
+	/** Requests that may wait for a slot in one lane; beyond it a request is refused at once. */
+	queuedRequests: number;
 	deadlineMs: number;
 }
 
@@ -38,6 +40,7 @@ const defaults: StorageClientLimits = {
 	controlRequests: 8,
 	requestBytes: 1024 * 1024,
 	responseBytes: 2 * 1024 * 1024,
+	queuedRequests: 1024,
 	deadlineMs: 10_000,
 };
 
@@ -106,12 +109,14 @@ export function readStorageBinding(value = process.env.GRIMOIRE_STORAGE_BINDING)
 
 type WriteInput = Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
 type Lane = "write" | "read" | "control";
+type Waiter = { bytes: number; turn: PromiseWithResolvers<() => void> };
 
 /**
- * One bounded HTTP client per Engine. Write and control admission is synchronous; there is no hidden write queue.
- * A read waits, oldest first, for a read slot until its own deadline: its callers are already bounded by their own
- * admission (Control + Query requests, runtime mutations), so a burst of observer reads only adds latency and can
- * neither reject an Engine command's read nor end a live event stream.
+ * One bounded HTTP client per Engine. Each lane runs a fixed number of requests; a request that finds its lane full
+ * waits, oldest first, for a slot until one deadline passes, and is then refused with `backpressure`. A waiting
+ * request has sent nothing, so that refusal is unambiguous and never fences. Every caller is already bounded by its
+ * own admission (native session pending writes, runtime mutation heads, Control + Query requests), and each lane's
+ * waiting queue has its own bound, so a burst — a turn of parallel tool calls, observer reads — only adds latency.
  */
 export class StorageClient {
 	readonly #binding: StorageBinding;
@@ -120,8 +125,8 @@ export class StorageClient {
 	readonly #listeners = new Set<(error: StorageClientError) => void>();
 	#writeBytes = 0;
 	#failure?: StorageClientError;
-	/** Reads waiting for a read slot, oldest first. A finishing read hands its slot to the head. */
-	readonly #readQueue: Array<PromiseWithResolvers<void>> = [];
+	/** Requests waiting for a slot, oldest first per lane. A finishing request admits the heads that now fit. */
+	readonly #queues: Record<Lane, Waiter[]> = { write: [], read: [], control: [] };
 
 	constructor(binding: StorageBinding, limits: Partial<StorageClientLimits> = {}) {
 		this.#binding = readStorageBinding(JSON.stringify(binding))!;
@@ -152,8 +157,9 @@ export class StorageClient {
 		const payloadHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}` as const;
 		const write: StorageWrite = { ...payload, payloadHash, requestId: crypto.randomUUID() };
 		const body = `{"schema":${JSON.stringify(STORAGE_PROTOCOL_SCHEMA)},"version":${JSON.stringify(STORAGE_PROTOCOL_VERSION)},"operation":"write","write":${canonical.slice(0, -1)},"payloadHash":${JSON.stringify(payloadHash)},"requestId":${JSON.stringify(write.requestId)}}}`;
-		const release = this.#reserve(control ? "control" : "write", Buffer.byteLength(body));
-		return this.#write(write, body).finally(release);
+		return this.#reserve(control ? "control" : "write", Buffer.byteLength(body)).then(release =>
+			this.#write(write, body).finally(release),
+		);
 	}
 
 	/**
@@ -230,10 +236,9 @@ export class StorageClient {
 	): Promise<StorageProtocolResponse> {
 		const requestId = crypto.randomUUID();
 		const body = this.#body(operation, key, { ...input, requestId, incarnation: this.incarnation });
-		const deadline = Date.now() + this.#limits.deadlineMs;
-		const bytes = Buffer.byteLength(body);
-		const exchange = (release: () => void) =>
-			this.#http(route, body, requestId, deadline)
+		// The exchange's deadline starts at admission: time spent queued must not cut short a barrier whose timeout fences.
+		return this.#reserve(lane, Buffer.byteLength(body)).then(release =>
+			this.#http(route, body, requestId, Date.now() + this.#limits.deadlineMs)
 				.catch(error => {
 					if (!(error instanceof StorageClientError)) throw error;
 					if (confirmsWrites) {
@@ -241,8 +246,8 @@ export class StorageClient {
 					} else if (error.code === "outcome_unknown") throw new StorageClientError("retryable", error.message);
 					throw error;
 				})
-				.finally(release);
-		return lane === "read" ? this.#reserveRead(bytes, deadline).then(exchange) : exchange(this.#reserve(lane, bytes));
+				.finally(release),
+		);
 	}
 
 	async #write(write: StorageWrite, body: string): Promise<StorageReceipt> {
@@ -318,52 +323,55 @@ export class StorageClient {
 			[key]: value,
 		});
 	}
-	#reserve(lane: Lane, bytes: number): () => void {
+	async #reserve(lane: Lane, bytes: number): Promise<() => void> {
 		if (this.#failure) throw this.#failure;
+		const queue = this.#queues[lane];
+		if (!queue.length && this.#fits(lane, bytes)) return this.#take(lane, bytes);
 		if (
 			bytes > this.#limits.requestBytes ||
-			this.#active[lane] >= this.#limits[`${lane}Requests`] ||
-			(lane === "write" && this.#writeBytes + bytes > this.#limits.writeBytes)
+			(lane === "write" && bytes > this.#limits.writeBytes) ||
+			queue.length >= this.#limits.queuedRequests
 		)
 			throw new StorageClientError("backpressure", "Storage client admission budget exhausted");
+		const waiter: Waiter = { bytes, turn: Promise.withResolvers() };
+		queue.push(waiter);
+		const timer = setTimeout(() => {
+			const index = queue.indexOf(waiter);
+			// Absent: a finishing request already admitted this one.
+			if (index < 0) return;
+			queue.splice(index, 1);
+			waiter.turn.reject(new StorageClientError("backpressure", "Storage client admission budget exhausted"));
+			// A write too large for the free bytes may have held back smaller ones behind it.
+			this.#admitWaiting(lane);
+		}, this.#limits.deadlineMs);
+		try {
+			return await waiter.turn.promise;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+	#fits(lane: Lane, bytes: number): boolean {
+		return (
+			bytes <= this.#limits.requestBytes &&
+			this.#active[lane] < this.#limits[`${lane}Requests`] &&
+			(lane !== "write" || this.#writeBytes + bytes <= this.#limits.writeBytes)
+		);
+	}
+	#take(lane: Lane, bytes: number): () => void {
 		this.#active[lane]++;
-		if (lane === "read") return () => this.#handOverRead();
 		if (lane === "write") this.#writeBytes += bytes;
 		return () => {
 			this.#active[lane]--;
 			if (lane === "write") this.#writeBytes -= bytes;
+			this.#admitWaiting(lane);
 		};
 	}
-	async #reserveRead(bytes: number, deadline: number): Promise<() => void> {
-		if (
-			this.#failure ||
-			bytes > this.#limits.requestBytes ||
-			(this.#active.read < this.#limits.readRequests && !this.#readQueue.length)
-		)
-			return this.#reserve("read", bytes);
-		const turn = Promise.withResolvers<void>();
-		this.#readQueue.push(turn);
-		const timer = setTimeout(
-			() => {
-				const index = this.#readQueue.indexOf(turn);
-				// Absent: a finishing read already handed this one its slot.
-				if (index < 0) return;
-				this.#readQueue.splice(index, 1);
-				turn.reject(new StorageClientError("backpressure", "Storage client admission budget exhausted"));
-			},
-			Math.max(0, deadline - Date.now()),
-		);
-		try {
-			await turn.promise;
-		} finally {
-			clearTimeout(timer);
+	#admitWaiting(lane: Lane): void {
+		const queue = this.#queues[lane];
+		while (queue.length && this.#fits(lane, queue[0].bytes)) {
+			const next = queue.shift()!;
+			next.turn.resolve(this.#take(lane, next.bytes));
 		}
-		return () => this.#handOverRead();
-	}
-	#handOverRead(): void {
-		const next = this.#readQueue.shift();
-		if (next) next.resolve();
-		else this.#active.read--;
 	}
 
 	/** Only a stale binding fences here. Every unusable response is `outcome_unknown`: a write then
@@ -427,6 +435,9 @@ export class StorageClient {
 	#fence(code: StorageErrorCode, message: string): StorageClientError {
 		if (!this.#failure) {
 			this.#failure = new StorageClientError(code, message);
+			// Waiting requests have sent nothing; they fail now instead of after a slot frees.
+			for (const queue of Object.values(this.#queues))
+				for (const waiter of queue.splice(0)) waiter.turn.reject(this.#failure);
 			for (const listener of this.#listeners) listener(this.#failure);
 		}
 		return this.#failure;

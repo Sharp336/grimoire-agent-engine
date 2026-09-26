@@ -3256,6 +3256,52 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("runs a turn of twelve parallel reads without refusing its own storage requests", async () => {
+		const count = 12;
+		const ids = Array.from({ length: count }, (_, index) => `read-parallel-${index}`);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ids.map((id, index) => ({
+						type: "toolCall" as const,
+						id,
+						name: "read",
+						arguments: { path: `parallel-${index}.txt` },
+					})),
+				},
+				{ content: ["done"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		for (let index = 0; index < count; index++)
+			fs.writeFileSync(path.join(cwd, `parallel-${index}.txt`), `parallel content ${index}`);
+		await runtime.start(
+			{
+				commandId: "command-parallel-reads",
+				agentInstanceId: "agent-parallel-reads",
+				executionId: "execution-parallel-reads",
+				attemptId: "attempt-parallel-reads",
+				authorityGeneration: 1,
+				cwd,
+				input: "read them all",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect((await runtime.store.getAttempt("attempt-parallel-reads"))?.state).toBe("completed");
+		for (const [index, id] of ids.entries()) {
+			const result = toolResultOf(mock, id);
+			expect(result?.isError).not.toBeTrue();
+			expect(JSON.stringify(result?.content)).toContain(`parallel content ${index}`);
+		}
+		const settled = (await runtime.store.pendingEvents()).filter(event => event.kind === "tool_settled");
+		expect(settled).toHaveLength(count);
+	}, 60_000);
+
 	it("records model dispatch certainty without exposing the prompt", async () => {
 		const { runtime, cwd } = await createRuntime();
 		await runtime.start(
