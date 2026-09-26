@@ -1347,7 +1347,14 @@
                     "event_lifecycle",
                     "attempt_all",
                     "inbox_agent_pending",
-                    "upload_ready"
+                    "upload_ready",
+                    "reclaim_pending",
+                    "agent_records",
+                    "delivery_event",
+                    "delete_pending",
+                    "attempt_open",
+                    "command_received",
+                    "inbox_pending"
                   ]
                 },
                 "key": {
@@ -1788,7 +1795,7 @@
     }
   },
   "x-artel": {
-    "protocolRevision": 16,
+    "protocolRevision": 18,
     "hash": {
       "algorithm": "sha-256",
       "encoding": "hex",
@@ -2118,7 +2125,7 @@
         "id"
       ]
     },
-    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions. upload_ready has no partition, contains every metadata subtype=blob_upload row and orders by ready_at then id.",
+    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions. upload_ready has no partition, contains every metadata subtype=blob_upload row and orders by ready_at then id. Native reclaim reads only indexes: reclaim_pending (no partition) holds metadata native_tombstone rows with numeric deleted_at and native_delete_progress rows with complete=true and runtime_reclaimed!=true, and reclaim removes a row when its work is done; agent_records partitions every non-identity, non-metadata row by [agent_instance_id]; delivery_event partitions deliveries by [event_id]. All three order by id. Engine startup and loops read only indexes too, all without partition and ordered by id: delete_pending holds metadata native_delete_progress rows with complete!=true; attempt_open holds attempts whose state is not completed, failed, cancelled or interrupted; command_received holds commands with state=received; inbox_pending holds inbox subtype=item rows with disposition=pending. inbox_wake partitions by [engine_generation] and orders by deliver_at then id.",
     "runtimeSortTypes": "All ordered scalar fields are safe unsigned integers except session.updated_at (ISO string); inbox.deliver_at may be null (sorts before numeric timestamps). after follows declared sort fields with optional final id; after without id excludes all records equal to that sort tuple. event_lifecycle is descending by positive event_id; after uses its original positive value."
   },
   "allOf": [
