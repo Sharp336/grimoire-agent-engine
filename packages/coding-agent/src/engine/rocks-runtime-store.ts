@@ -98,6 +98,45 @@ function readRequest(request: RuntimePageRequest | RuntimeQueueRequest, type: st
 	const { principalId: _principal, authorizedAgentInstanceRefs: _refs, ...read } = request;
 	validateRuntimeValue(type, read);
 }
+/** The detail kind the owner's `event_projection` index files a change under. */
+function projectionChangeKind(change: RuntimeChange): unknown {
+	return change.kind === "receipt"
+		? "state"
+		: change.kind === "invalidate"
+			? change.value.resource === "holds"
+				? "state"
+				: change.value.resource === "context"
+					? "usage"
+					: change.value.resource
+			: change.kind;
+}
+/**
+ * Whether a committed projected event can add changes to `request`, mirroring the index channels
+ * `runtimeEvents` reads. A false positive costs one more read; a false negative loses a wake.
+ */
+function runtimeWaitMatches(request: RuntimeEventsRequest, event: ProjectedEvent, agentInstanceRef: string): boolean {
+	if (
+		event.projection_principal !== request.principalId &&
+		!(event.projection_principal === "" && request.authorizedAgentInstanceRefs?.includes(agentInstanceRef))
+	)
+		return false;
+	const { scope } = request;
+	if (scope.kind === "catalog") return Boolean(event.summary_payload);
+	if (scope.kind === "branch" && event.membership_payload && event.projection_root === scope.rootAgentInstanceRef)
+		return true;
+	return (scope.kind === "branch" ? scope.interests : [scope]).some(
+		interest =>
+			interest.agentInstanceRef === agentInstanceRef &&
+			event.projection_payload.some(change => {
+				const kind = projectionChangeKind(change);
+				const attempt = change.kind === "state" ? change.value.attemptId : change.attemptId;
+				return (
+					interest.kinds.some(selected => selected === kind) &&
+					(interest.kind !== "attempt" || attempt == null || attempt === interest.attemptId)
+				);
+			}),
+	);
+}
 
 /** Current projections and native history share the owner; this class never opens a legacy database. */
 export class RocksEngineStore extends RocksEngineMutations {
@@ -999,16 +1038,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 				} else
 					changes = event.projection_payload.filter(change => {
 						const attempt = change.kind === "state" ? change.value.attemptId : change.attemptId;
-						const kind =
-							change.kind === "receipt"
-								? "state"
-								: change.kind === "invalidate"
-									? change.value.resource === "holds"
-										? "state"
-										: change.value.resource === "context"
-											? "usage"
-											: change.value.resource
-									: change.kind;
+						const kind = projectionChangeKind(change);
 						return (
 							kind === source.kind &&
 							// State has no top-level attemptId, so the owner indexes it in the agent channel.
@@ -1068,54 +1098,79 @@ export class RocksEngineStore extends RocksEngineMutations {
 		return finish("eventBatch", result, work, result.changes.length, request.maxBytes);
 	}
 	async waitRuntimeEvents(request: RuntimeEventsRequest, signal?: AbortSignal): Promise<RuntimeEventBatch> {
-		const change = this.changeSignal();
-		const result = await this.runtimeEvents(request);
-		if (
-			result.changes.length ||
-			result.hasMore ||
-			request.untilCursor !== undefined ||
-			signal?.aborted ||
-			request.timeoutMs <= 0
-		)
-			return result;
-		const wake = Promise.withResolvers<void>();
-		const abort = () => wake.resolve();
-		const timer = setTimeout(
-			abort,
+		const deadline =
+			Date.now() +
 			Math.min(
 				request.timeoutMs,
 				request.scope.kind === "catalog" ? runtimeLimits.appCursorHeartbeatMs : runtimeLimits.eventWaitMs,
-			),
-		);
-		signal?.addEventListener("abort", abort, { once: true });
-		try {
-			await Promise.race([change, wake.promise]);
-		} finally {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", abort);
-		}
-		const next = await this.runtimeEvents({
-			...request,
-			afterCursor: result.throughCursor,
-			remainingWork: {
-				...request.remainingWork,
-				scannedRows: request.remainingWork.scannedRows - result.work.scannedRows,
-				materializedBytes: request.remainingWork.materializedBytes - result.work.materializedBytes,
-				timeMs: request.remainingWork.timeMs - result.work.elapsedMs,
-			},
-		});
-		next.work.scannedRows += result.work.scannedRows;
-		next.work.materializedBytes += result.work.materializedBytes;
-		next.work.elapsedMs += result.work.elapsedMs;
+			);
+		const total = { scannedRows: 0, materializedBytes: 0, elapsedMs: 0 };
+		let afterCursor = request.afterCursor;
+		let waited = false;
 		for (;;) {
-			const bytes = size(next);
-			if (bytes === next.work.bytes) break;
-			next.work.bytes = bytes;
+			// Watch before the consistent read. Only a committed event this scope reads wakes the wait;
+			// an unobserved sibling must not spend its query budget.
+			const changed = Promise.withResolvers<void>();
+			const unwatch = this.watchCommits(puts => {
+				for (const put of puts) {
+					const event = put.value as unknown as ProjectedEvent;
+					// Events without an AgentInstance ref are not projected, so no scope reads them.
+					if (put.kind !== "event" || !event.projection_payload) continue;
+					const identity = puts.find(row => row.kind === "identity" && row.id === event.agent_instance_id)
+						?.value as unknown as RocksIdentity | undefined;
+					if (identity && runtimeWaitMatches(request, event, identity.agent_instance_ref)) changed.resolve();
+				}
+			});
+			try {
+				const result = await this.runtimeEvents({
+					...request,
+					afterCursor,
+					remainingWork: {
+						...request.remainingWork,
+						scannedRows: request.remainingWork.scannedRows - total.scannedRows,
+						materializedBytes: request.remainingWork.materializedBytes - total.materializedBytes,
+						timeMs: request.remainingWork.timeMs - total.elapsedMs,
+					},
+				});
+				total.scannedRows += result.work.scannedRows;
+				total.materializedBytes += result.work.materializedBytes;
+				total.elapsedMs += result.work.elapsedMs;
+				if (
+					result.changes.length ||
+					result.hasMore ||
+					request.untilCursor !== undefined ||
+					signal?.aborted ||
+					Date.now() >= deadline
+				) {
+					// The first read already accounts for itself; later reads report the whole wait.
+					if (!waited) return result;
+					Object.assign(result.work, total);
+					for (;;) {
+						const bytes = size(result);
+						if (bytes === result.work.bytes) break;
+						result.work.bytes = bytes;
+					}
+					if (result.work.bytes > request.maxBytes)
+						throw new RuntimeQueryError("restore_budget", "Event read exceeds its byte budget", result.work);
+					validateRuntimeValue("eventBatch", result);
+					return result;
+				}
+				afterCursor = result.throughCursor;
+				waited = true;
+				const wake = Promise.withResolvers<void>();
+				const abort = () => wake.resolve();
+				signal?.addEventListener("abort", abort, { once: true });
+				const timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
+				try {
+					await Promise.race([changed.promise, wake.promise]);
+				} finally {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", abort);
+				}
+			} finally {
+				unwatch();
+			}
 		}
-		if (next.work.bytes > request.maxBytes)
-			throw new RuntimeQueryError("restore_budget", "Event read exceeds its byte budget", next.work);
-		validateRuntimeValue("eventBatch", next);
-		return next;
 	}
 	async runtimeCommand(
 		commandId: string,

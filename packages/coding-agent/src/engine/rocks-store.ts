@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
-import type { StorageDependency } from "../session/storage-protocol";
+import type { StorageDependency, StorageRuntimeMutation } from "../session/storage-protocol";
 import type {
 	EngineAttemptState,
 	EngineBindingSnapshot,
@@ -142,6 +142,7 @@ export interface RocksTransitionOptions {
 export class RocksEngineMutations {
 	readonly records: RuntimeRecords;
 	#change = Promise.withResolvers<void>();
+	readonly #commitWatchers = new Set<(puts: StorageRuntimeMutation["puts"]) => void>();
 	constructor(
 		readonly storageClient: StorageClient,
 		readonly projectEvent: (tx: RuntimeTransaction, event: EngineEvent) => Promise<void>,
@@ -157,13 +158,32 @@ export class RocksEngineMutations {
 	changeSignal(): Promise<void> {
 		return this.#change.promise;
 	}
+	/** Calls `watch` with the rows of every mutation this store commits until the returned disposer runs. */
+	watchCommits(watch: (puts: StorageRuntimeMutation["puts"]) => void): () => void {
+		this.#commitWatchers.add(watch);
+		return () => this.#commitWatchers.delete(watch);
+	}
 	async mutation<T>(
 		scope: string,
 		work: (tx: RuntimeTransaction) => Promise<T>,
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
-		const result = await this.records.mutate(scope, work, dependencies, durability);
+		// Conflicts replay `work` on a fresh transaction; only the last one is committed.
+		let committed: RuntimeTransaction | undefined;
+		const result = await this.records.mutate(
+			scope,
+			tx => {
+				committed = tx;
+				return work(tx);
+			},
+			dependencies,
+			durability,
+		);
+		if (this.#commitWatchers.size && committed) {
+			const { puts } = committed.mutation();
+			for (const watch of this.#commitWatchers) watch(puts);
+		}
 		const change = this.#change;
 		this.#change = Promise.withResolvers<void>();
 		change.resolve();
