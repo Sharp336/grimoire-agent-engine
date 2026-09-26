@@ -896,6 +896,8 @@ export class RocksEngineMutations {
 					pending_accounted: false,
 				} satisfies RocksCommand);
 			}
+			// Settle before the event: its summary must no longer project this Start as pending.
+			await this.settle(tx, command.commandId, receipt, command.canonicalHash, true);
 			if (
 				command.operation === "start" &&
 				command.executionId &&
@@ -916,7 +918,6 @@ export class RocksEngineMutations {
 					},
 					{ kind: "rejected", payload: receipt.detail, causationCommandId: command.commandId },
 				);
-			await this.settle(tx, command.commandId, receipt, command.canonicalHash, true);
 		});
 	}
 	async settle(
@@ -1084,9 +1085,9 @@ export class RocksEngineMutations {
 			) {
 				throw new EngineAttemptConflictError(target.attemptId);
 			}
-			const result = await this.append(tx, target, event);
+			// Settle before the event: its summary must no longer project this Start as pending.
 			await this.settle(tx, target.commandId, receipt, command.canonical_hash, true);
-			return result;
+			return this.append(tx, target, event);
 		});
 	}
 	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot, digest?: string): Promise<void> {

@@ -200,7 +200,7 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 		});
 		const options: EngineRuntimeOptions = {
 			databasePath: path.join(runRoot, "engine.sqlite"),
-			attachmentBlobStore: new BlobStore(path.join(runRoot, "upload-blobs")),
+			attachmentBlobStore: new BlobStore(path.join(runRoot, "data", "blobs")),
 			sessionDefaults: {
 				cwd,
 				agentDir,
