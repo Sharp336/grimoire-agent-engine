@@ -1346,7 +1346,8 @@
                     "identity_root",
                     "event_lifecycle",
                     "attempt_all",
-                    "inbox_agent_pending"
+                    "inbox_agent_pending",
+                    "upload_ready"
                   ]
                 },
                 "key": {
@@ -1649,7 +1650,8 @@
             "running",
             "blocked_by_child",
             "awaiting_generation_scan",
-            "failed"
+            "failed",
+            "quarantined"
           ]
         },
         "scanned": {
@@ -1740,12 +1742,53 @@
               "maximum": 300000
             }
           }
+        },
+        "quarantine": {
+          "type": "array",
+          "maxItems": 16,
+          "description": "First quarantined reclaim elements. An element that fails three consecutive passes is recorded under m:reclaim-quarantine:<kind>:<element> and the cursor moves on.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "element",
+              "phase",
+              "error",
+              "at"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "native",
+                  "blob"
+                ]
+              },
+              "element": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "phase": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "error": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          }
         }
       }
     }
   },
   "x-artel": {
-    "protocolRevision": 13,
+    "protocolRevision": 16,
     "hash": {
       "algorithm": "sha-256",
       "encoding": "hex",
@@ -1803,7 +1846,7 @@
       "storage_error": "RocksDB I/O or corruption only; the owner becomes degraded",
       "invalid_cursor": "cursor was not issued for this read scope/kind/cut/leaf or names a position outside it; request error, storage stays ready",
       "not_found": "requested entry does not exist",
-      "retryable": "transient read/admission condition (deadline, concurrent reclaim of a deleted generation, decoded page budget); nothing changed, retry",
+      "retryable": "transient read/admission condition (deadline, concurrent reclaim of a deleted generation); nothing changed, retry",
       "rejected_before_apply": "conflict/schema validation after admission is durably receipted (outcome conflict, not_applied); receipt lookup never returns outcome_unknown for it"
     },
     "receiptFields": [
@@ -1848,9 +1891,11 @@
         "H": "H<hash>\\0<ownerKey>: owner row, written in the owner's batch",
         "c": "c<hash>: deletion candidate (logical C; tag C is the native child index). Set when an owner drops the hash or a retired intent leaves an unowned body",
         "D": "D<hash>: delete in progress; an owner write of that hash is a conflict",
-        "V": "V<hash>: {bytes, children}; the body was hashed once, later references only stat its size"
+        "V": "V<hash>: {bytes, children}; the body was hashed once, later references only stat its size",
+        "m:reclaim-quarantine": "m:reclaim-quarantine:<native|blob>:<sha256 of the native row key | body hash>: {kind, element, phase, error, at}; written after three consecutive failures of that element; native Search skips it, a quarantined body keeps its file and loses c/D/V"
       },
-      "sweep": "Per candidate, bounded per pass: no H, lock(hash), no live intent, D under apply_lock, unlink body and sidecars, delete D, c and V."
+      "sweep": "Per candidate, bounded per pass: no H, lock(hash), no live intent, D under apply_lock, unlink body and sidecars, delete D, c and V.",
+      "uploads": "C5: metadata blob-upload:<key> exists only as state=ready with ready_at (ms epoch), is written once and then only deleted; it owns its body. The body reclaim tombstones rows older than ready_at + 7 days through the upload_ready index (bounded per pass); consuming, removing or expiring the row makes its body a candidate unless another owner holds it. An inbox acceptance whose upload row is gone is conflict 'ready upload descriptor missing'."
     },
     "stateTransitions": {
       "admission": "rejected_before_admission | admitted_pending",
@@ -1883,7 +1928,8 @@
       "cursor": "Opaque versioned string binds kind, family/generation, frozen cut, selected context leaf and next traversal position; cross-scope/kind/cut/leaf reuse or a forged position is invalid_cursor. No retained snapshot.",
       "watermarks": "durableThroughSeq is required WAL prefix; liveThroughSeq is applied prefix; no read waits for future writes",
       "empty": "Empty generation is valid: barrier/read response throughSeq=durableThroughSeq=liveThroughSeq=0 and events=[]; concrete response schemas allow minimum=0.",
-      "context": "Newest-to-oldest selected leaf ancestry only; seq is origin-generation-local, entryId is family-unique. Bounded snapshot, decoded bytes, serialized full response bytes and traversal steps; oversize first record and corrupt records are explicit errors."
+      "context": "Newest-to-oldest selected leaf ancestry only; seq is origin-generation-local, entryId is family-unique. Bounded snapshot, decoded bytes, serialized full response bytes and traversal steps; oversize first record and corrupt records are explicit errors.",
+      "decodedBudget": "A read page also bounds the stored bytes it decodes (maxBytes + one maximal event). Reaching that bound ends the page deterministically with a cursor at the next entry (skipped removed or replaced entries may make it short or empty); a first record larger than maxBytes is schema_error."
     },
     "generationSemantics": {
       "initial": "generation starts at firstSeq=1; first write with firstSeq!=1 is sequence_gap",
@@ -2066,9 +2112,13 @@
       "inbox_agent_pending": [
         "position",
         "id"
+      ],
+      "upload_ready": [
+        "ready_at",
+        "id"
       ]
     },
-    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions.",
+    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions. upload_ready has no partition, contains every metadata subtype=blob_upload row and orders by ready_at then id.",
     "runtimeSortTypes": "All ordered scalar fields are safe unsigned integers except session.updated_at (ISO string); inbox.deliver_at may be null (sorts before numeric timestamps). after follows declared sort fields with optional final id; after without id excludes all records equal to that sort tuple. event_lifecycle is descending by positive event_id; after uses its original positive value."
   },
   "allOf": [
