@@ -594,7 +594,10 @@ describe("EngineRuntime", () => {
 			offset: 0,
 			contentBase64: png.toString("base64"),
 		});
-		await expect(runtime.start(request, profile)).rejects.toThrow("does not accept images");
+		await expect(runtime.start(request, profile)).rejects.toMatchObject({
+			code: "attachment_requires_images",
+			message: expect.stringContaining('Image "pixel.png" cannot be sent'),
+		});
 		expect(mock.calls).toHaveLength(0);
 		expect(await runtime.store.getAttempt(request.attemptId)).toBeUndefined();
 		const queued = await runtime.enqueueAgentInbox(request.agentInstanceId, {

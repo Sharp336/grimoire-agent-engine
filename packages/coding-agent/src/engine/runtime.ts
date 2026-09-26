@@ -4661,11 +4661,12 @@ export class EngineRuntime {
 	): void {
 		assertFilesReadable(session.getEnabledToolNames().includes("read"), originals);
 		if (!images?.length) return;
-		if (!model?.input.includes("image") || session.settings.get("images.blockImages"))
-			throw new EngineTargetError(
-				"invalid_request",
-				"The selected model or profile does not accept images; choose an image-capable route",
-			);
+		if (model?.input.includes("image") && !session.settings.get("images.blockImages")) return;
+		const image = originals?.find(item => SUPPORTED_IMAGE_MIME_TYPES.has(item.mediaType));
+		throw new EngineTargetError(
+			"attachment_requires_images",
+			`${image ? `Image "${image.name}" cannot be sent` : "Images cannot be sent"}: the selected model or profile does not accept images. Choose an image-capable route or send the message without this image.`,
+		);
 	}
 
 	async #dispatchModel(
