@@ -238,6 +238,8 @@ describe("native session storage contract", () => {
 				durableThroughSeq: 0,
 				liveThroughSeq: 0,
 				events: [],
+				head: null,
+				state: null,
 				nextCursor: null,
 			} satisfies StorageReadResponse;
 			const responses = {

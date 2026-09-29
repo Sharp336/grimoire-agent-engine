@@ -58,6 +58,13 @@
       "maxLength": 160,
       "pattern": "^[A-Za-z0-9:_-]+$"
     },
+    "runtimeId": {
+      "description": "Public runtime IDs (up to 200 ASCII characters) and current derived record keys, including effects:{attemptId}:{bindingId} (409 characters). Other storage identities retain the id contract.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 409,
+      "pattern": "^[A-Za-z0-9:_.-]+$"
+    },
     "bytesHash": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
@@ -1020,7 +1027,7 @@
           ]
         },
         "id": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/runtimeId"
         }
       }
     },
@@ -1051,7 +1058,7 @@
           ]
         },
         "id": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/runtimeId"
         },
         "revision": {
           "anyOf": [
@@ -1094,7 +1101,7 @@
           ]
         },
         "id": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/runtimeId"
         },
         "value": {
           "type": "object",
@@ -1434,7 +1441,7 @@
           ]
         },
         "id": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/runtimeId"
         },
         "revision": {
           "anyOf": [
@@ -1795,7 +1802,7 @@
     }
   },
   "x-artel": {
-    "protocolRevision": 18,
+    "protocolRevision": 19,
     "hash": {
       "algorithm": "sha-256",
       "encoding": "hex",

@@ -8,9 +8,9 @@
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
-export const STORAGE_PROTOCOL_REVISION = 18 as const;
+export const STORAGE_PROTOCOL_REVISION = 19 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:28096f927ece6cdddf6c64fda1e823f89d042607c74e3edcb94628c0153007f9" as const;
+	"sha256:e7144d432e83cde915fd6d319cdb8b64a9a40b06cbc54de410f34d160c058ee3" as const;
 
 export type StorageOperation =
 	| "write"
