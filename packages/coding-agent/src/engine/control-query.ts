@@ -8,6 +8,7 @@ import {
 	type EngineInboxMutation,
 	type EngineInboxSource,
 	type EngineProfileRouteState,
+	type EngineSemanticBindingSnapshot,
 	type EngineTarget,
 	EngineTargetError,
 } from "./contracts";
@@ -15,6 +16,7 @@ import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
+import { retryFromAttempt } from "./rocks-runtime-projection";
 import { type EngineRuntime, nativeArchiveUnsupported } from "./runtime";
 import type { EngineAttachmentStageRequest } from "./runtime-attachments";
 import { RuntimeQueryError } from "./runtime-projection";
@@ -106,6 +108,7 @@ export type EngineControlQueryResponse =
 	  };
 
 export interface EnginePublicSnapshot {
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	agentInstanceId: string;
 	executionId: string;
 	attemptId: string;
@@ -372,6 +375,7 @@ async function dispatchRequest(
 				const result = {
 					version: "1.0",
 					agentInstanceRef,
+					...(agent.bindingSnapshot ? { bindingSnapshot: agent.bindingSnapshot } : {}),
 					sessionId: page.sessionId,
 					revision: page.revision,
 					anchor: page.anchor,
@@ -404,6 +408,7 @@ async function dispatchRequest(
 			const result = {
 				version: "1.0",
 				agentInstanceRef,
+				...(agent.bindingSnapshot ? { bindingSnapshot: agent.bindingSnapshot } : {}),
 				sessionId: page.sessionId,
 				revision: page.revision,
 				anchor: page.anchor,
@@ -596,7 +601,7 @@ async function dispatchRequest(
 				),
 			};
 		case "command":
-			return await runEngineCommand(options, validateCommand(params.command));
+			return await runEngineCommand(options, validateEngineCommand(params.command));
 	}
 }
 
@@ -617,7 +622,10 @@ function finishRuntimeHistory(result: { work: RuntimeWork }, started: number): v
 }
 
 export async function runEngineCommand(
-	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "resolveLaunchProfile" | "provisionMailbox">,
+	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "resolveLaunchProfile" | "provisionMailbox"> & {
+		/** Proven enrichment for an already-admitted pre-S0 local child; never part of command identity. */
+		legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
+	},
 	command: EngineCommandEnvelope,
 ): Promise<EngineCommandReceipt> {
 	if (command.deviceId !== options.deviceId || command.engineId !== options.engineId) {
@@ -648,6 +656,7 @@ export async function runEngineCommand(
 			command,
 			resolveLaunchProfile: options.resolveLaunchProfile,
 			provisionMailbox: options.provisionMailbox,
+			legacyBindingSnapshot: options.legacyBindingSnapshot,
 		});
 		// Native start commits its receipt atomically with the Attempt. Preserve that exact receipt.
 		const committed = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
@@ -818,6 +827,7 @@ async function snapshotFromAttempt(
 	const exactBinding = binding?.attemptId === attempt.attempt_id ? binding : undefined;
 	return {
 		agentInstanceId: attempt.agent_instance_id,
+		bindingSnapshot: attempt.binding_snapshot,
 		executionId: attempt.execution_id,
 		attemptId: attempt.attempt_id,
 		bindingId: attempt.binding_id,
@@ -827,18 +837,7 @@ async function snapshotFromAttempt(
 		state: attempt.state,
 		manualHold: binding?.manualHold ?? false,
 		intentRevision: binding?.intentRevision ?? 0,
-		retry:
-			attempt.retry_attempt > 0
-				? {
-						attempt: Number(attempt.retry_attempt),
-						maxAttempts: Number(attempt.retry_max_attempts),
-						...(attempt.retry_route ? { route: attempt.retry_route } : {}),
-						...(attempt.retry_delay_ms === null ? {} : { delayMs: Number(attempt.retry_delay_ms) }),
-						...(attempt.retry_scheduled_at === null ? {} : { scheduledAt: Number(attempt.retry_scheduled_at) }),
-						...(attempt.retry_outcome ? { outcome: attempt.retry_outcome } : {}),
-						...(attempt.retry_error ? { error: attempt.retry_error } : {}),
-					}
-				: undefined,
+		retry: retryFromAttempt(attempt),
 		profileDigest: exactBinding?.profileDigest,
 		...(attempt.profile_route_state
 			? { profileRoute: JSON.parse(attempt.profile_route_state) as EngineProfileRouteState }
@@ -1169,7 +1168,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 	};
 }
 
-function validateCommand(value: unknown): EngineCommandEnvelope {
+export function validateEngineCommand(value: unknown): EngineCommandEnvelope {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("command must be an object");
 	const command = value as Record<string, unknown>;
 	if (command.schema !== "grimoire.engine.command.v1") throw new Error("Unsupported command schema");
@@ -1201,6 +1200,7 @@ function validateCommand(value: unknown): EngineCommandEnvelope {
 	if (!command.payload || typeof command.payload !== "object" || Array.isArray(command.payload)) {
 		throw new Error("command.payload must be an object");
 	}
+	if (command.bindingSnapshot !== undefined) validateRuntimeValue("bindingSnapshot", command.bindingSnapshot);
 	return command as unknown as EngineCommandEnvelope;
 }
 

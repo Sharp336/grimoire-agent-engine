@@ -684,10 +684,16 @@ function normalizeOptionalNullsForSchema(
 		if (!Array.isArray(branches)) return { value, changed: false };
 
 		let changedCandidate: { value: unknown; changed: true } | null = null;
+		let originalMatches: boolean | undefined;
 
 		for (const branch of branches) {
 			const normalized = normalizeOptionalNullsForSchema(branch, value, isRoot);
 			if (!normalized.changed) continue;
+
+			// Prefer an already-valid branch over a different branch's repair:
+			// removing an explicitly allowed null would lose caller data.
+			originalMatches ??= branches.some(candidate => branchMatchesSchema(candidate, value));
+			if (originalMatches) return { value, changed: false };
 
 			if (branchMatchesSchema(branch, normalized.value)) {
 				return normalized;

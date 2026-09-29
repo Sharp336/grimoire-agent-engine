@@ -139,6 +139,48 @@ describe("Tool argument coercion", () => {
 		expect(result.payload).toBe(300);
 	});
 
+	it("keeps schema-valid null data when another union branch accepts an empty result", () => {
+		const tool: Tool = {
+			name: "union-result",
+			description: "",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					result: {
+						anyOf: [
+							{
+								type: "object",
+								additionalProperties: false,
+								properties: { data: { type: "null" } },
+								required: ["data"],
+							},
+							{ type: "object", additionalProperties: false, properties: {} },
+						],
+					},
+				},
+				required: ["result"],
+			} as never,
+		};
+
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-null-data",
+				name: tool.name,
+				arguments: { result: { data: null } },
+			}),
+		).toEqual({ result: { data: null } });
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-missing-data",
+				name: tool.name,
+				arguments: { result: {} },
+			}),
+		).toEqual({ result: {} });
+	});
+
 	it("stringifies array values when schema expects string", () => {
 		const tool: Tool = {
 			name: "array-string",

@@ -55,7 +55,31 @@ const projectionLimits = {
 
 // JSON Schema covers the shape; these are the cross-field byte/identity invariants.
 function validProjection(name, value) {
-  if (name === 'command' && ['launch', 'continue', 'enqueue', 'steer'].includes(value.action)) {
+  if (name === 'bindingSnapshot') {
+    if (value.taskRef === null && value.workStepId !== null) return false;
+    if ((value.bindingRevision === 0) !== (value.installationId === null)) return false;
+  }
+  if (name === 'bindingGate' && ((value.phase === 'open') !== (value.operationId === null)
+    || (value.operationId === null) !== (value.proposalHash === null))) return false;
+  if (name === 'bindingCheckpoint' && value.status === 'complete'
+    && (value.next_cursor !== null || ['nonterminal_starts', 'nonterminal_attempts', 'open_effects',
+      'unsettled_children', 'mutable_pending_writes'].some(key => value[key] !== 0))) return false;
+  if (name === 'bindingIdleReceipt') {
+    if (value.engine_checkpoint.engine_generation === undefined) return false;
+    for (const checkpoint of [value.ch_checkpoint, value.engine_checkpoint]) {
+      if (checkpoint.status !== 'complete' || ['agent_ref', 'installation_id', 'binding_revision',
+        'operation_id', 'proposal_hash'].some(key => checkpoint[key] !== value[key])) return false;
+    }
+  }
+  if (name === 'bindingOperationResult' && value.task_ref === null && value.work_step_id !== null) return false;
+  if (name === 'bindingResult' && value.action !== 'register_installation') {
+    if (value.task_ref === null && value.work_step_id !== null) return false;
+    if (['agent_ref', 'installation_id', 'operation_id', 'proposal_hash'].some(key =>
+      value[key] !== value.operation_result[key])) return false;
+  }
+  if (value?.bindingSnapshot && ['agentSummary', 'detailState', 'historyPage', 'nativeTarget', 'holdsPage', 'lifecycleActivity'].includes(name)
+    && value.bindingSnapshot.agentInstanceRef !== value.agentInstanceRef) return false;
+  if (name === 'command' && ['launch', 'continue', 'enqueue', 'steer', 'resume'].includes(value.action)) {
     const p = value.payload;
     if (p.attachmentUploadIds && (!Object.hasOwn(p, 'text') || !p.clientMessageId)) return false;
     if (Object.hasOwn(p, 'text') && !p.text.length && !p.attachmentUploadIds?.length) return false;
@@ -96,7 +120,7 @@ function validProjection(name, value) {
   }
   if (name === 'detailState') {
     if ((value.target.attemptId ?? null) !== value.attemptId) return false;
-    if (value.attemptId === null && (value.messages.length || value.tools.length || value.toolsNextCursor !== null)) return false;
+    if (value.attemptId === null && (value.messages.length || value.tools.length || value.toolsNextCursor !== null || value.retry != null)) return false;
     if (value.messages.some(message => message.resource && (message.resource.agentInstanceRef !== value.agentInstanceRef
       || message.resource.attemptId !== value.attemptId))) return false;
   }

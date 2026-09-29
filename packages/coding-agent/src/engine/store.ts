@@ -4,11 +4,13 @@ import type {
 	EngineBindingSnapshot,
 	EngineEvent,
 	EngineRetryOutcome,
+	EngineSemanticBindingSnapshot,
 	EngineToolPolicy,
 } from "./contracts";
 import type { RuntimeScope } from "./runtime-protocol";
 
 export interface EngineAttemptRow {
+	binding_snapshot?: EngineSemanticBindingSnapshot;
 	agent_instance_id: string;
 	execution_id: string;
 	attempt_id: string;
@@ -60,6 +62,7 @@ export interface ExpiredChildHistory {
 }
 
 export interface RetainedDirectChildHistory {
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	agentInstanceId: string;
 	agentInstanceRef: string;
 	engineAgentId: string;
@@ -74,6 +77,7 @@ export interface EngineCommandIdentity {
 	engineGeneration: number;
 	agentInstanceId: string;
 	agentInstanceRef?: string;
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	parentAgentInstanceId?: string;
 	parentAgentInstanceRef?: string;
 	bindingId?: string;
@@ -121,6 +125,7 @@ export type EngineStartConversationIdentity = Pick<
 	| "operation"
 	| "agentInstanceId"
 	| "agentInstanceRef"
+	| "bindingSnapshot"
 	| "parentAgentInstanceId"
 	| "authorityGeneration"
 	| "serializedCommand"
@@ -195,8 +200,10 @@ export type EngineCommandAdmission =
 	| { status: "replay"; receipt: EngineCommandReceipt };
 
 export class EngineCommandConflictError extends Error {
-	constructor(commandId: string) {
-		super(`Command ${commandId} was already admitted with different canonical content`);
+	constructor(commandId: string, readonly reason: "canonical_content" | "receipt" = "canonical_content") {
+		super(reason === "receipt"
+			? `Command ${commandId} was already settled with a different receipt`
+			: `Command ${commandId} was already admitted with different canonical content`);
 		this.name = "EngineCommandConflictError";
 	}
 }

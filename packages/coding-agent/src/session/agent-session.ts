@@ -2318,7 +2318,16 @@ export class AgentSession {
 	async #persistMessageEnd(message: AgentMessage): Promise<void> {
 		try {
 			if (message.role === "hookMessage" || message.role === "custom") {
-				this.sessionManager.appendCustomMessageEntry(
+				const sourceCommandId = message.customType === "engine-command-context" &&
+					message.details && typeof message.details === "object" && "sourceCommandId" in message.details
+						? message.details.sourceCommandId
+						: undefined;
+				const alreadyAdmitted = sourceCommandId && this.sessionManager.getContextBranch().some(entry =>
+					entry.type === "custom_message" &&
+					entry.customType === message.customType &&
+					(entry.details as { sourceCommandId?: unknown } | undefined)?.sourceCommandId === sourceCommandId
+				);
+				if (!alreadyAdmitted) this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,
 					message.display,
@@ -5836,13 +5845,14 @@ export class AgentSession {
 		images?: ImageContent[],
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
+		durableBeforeEnqueue = false,
 	): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "steer", identity, context);
+		await this.#queueUserMessage(expandedText, images, "steer", identity, context, durableBeforeEnqueue);
 	}
 
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
@@ -5908,6 +5918,7 @@ export class AgentSession {
 		mode: "steer" | "followUp",
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
+		durableBeforeEnqueue = false,
 	): Promise<void> {
 		this.#userInterruptSuppressed = false;
 		const normalizedImages = await this.#normalizeImagesForModel(images);
@@ -5935,7 +5946,50 @@ export class AgentSession {
 			attribution: "user" as const,
 			timestamp: Date.now(),
 		};
+		let alreadyDelivered = false;
+		if (durableBeforeEnqueue) {
+			if (!identity?.sourceCommandId || !identity.clientMessageId)
+				throw new Error("Durable steering requires exact command and user message identities");
+			const sourceCommandId = identity.sourceCommandId;
+			const clientMessageId = identity.clientMessageId;
+			const branch = this.sessionManager.getContextBranch();
+			const prior = branch.find(
+				entry => entry.type === "message" && entry.message.role === "user" &&
+					(entry.sourceCommandId === sourceCommandId || entry.clientMessageId === clientMessageId),
+			);
+			if (prior) {
+				if (
+					prior.type !== "message" ||
+					prior.message.role !== "user" ||
+					prior.clientMessageId !== identity.clientMessageId ||
+					!Array.isArray(prior.message.content) ||
+					prior.message.content[0]?.type !== "text" ||
+					prior.message.content[0].text !== text ||
+					JSON.stringify(prior.originalAttachments ?? []) !== JSON.stringify(identity.originalAttachments ?? [])
+				)
+					throw new Error("Durable steering command identity conflicts with its retained user message");
+				identity = { ...identity, sourceCommandId: prior.sourceCommandId };
+				const sameMessage = (queued: AgentMessage) =>
+					queued.role === "user" && this.#messageIdentities.get(queued)?.clientMessageId === clientMessageId;
+				alreadyDelivered = this.agent.peekSteeringQueue().some(sameMessage) || this.agent.state.messages.some(sameMessage);
+			}
+			if (!alreadyDelivered && contextMessage && !branch.some(entry =>
+				entry.type === "custom_message" &&
+				entry.customType === contextMessage.customType &&
+				(entry.details as { sourceCommandId?: string } | undefined)?.sourceCommandId ===
+					(contextMessage.details as { sourceCommandId?: string } | undefined)?.sourceCommandId
+			)) this.sessionManager.appendCustomMessageEntry(
+				contextMessage.customType,
+				contextMessage.content,
+				contextMessage.display,
+				contextMessage.details,
+				contextMessage.attribution,
+			);
+			if (!prior) this.sessionManager.appendMessage(message, identity);
+			await this.sessionManager.flushAndCheckpoint();
+		}
 		this.#rememberUserMessageIdentity(message, identity);
+		if (alreadyDelivered) return;
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp(message);
@@ -5945,7 +5999,7 @@ export class AgentSession {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer(message);
 		}
-		this.#scheduleIdleQueueDrain();
+		if (!durableBeforeEnqueue) this.#scheduleIdleQueueDrain();
 	}
 
 	#rememberUserMessageIdentity(

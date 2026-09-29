@@ -651,9 +651,20 @@ describe("YieldTool", () => {
 		await expect(tool.execute("call-empty-type", { type: [], result: {} } as never)).rejects.toThrow(
 			"type must be a string or non-empty array of strings",
 		);
-		await expect(
-			tool.execute("call-null-data", { type: "summary", result: { data: null } } as never),
-		).rejects.toThrow("data is required when yield indicates success");
+		const nullTool = new YieldTool(createSession({ outputSchema: { type: "null" } }));
+		const args = validateToolArguments(nullTool as Tool, {
+			type: "toolCall",
+			id: "call-null-data",
+			name: "yield",
+			arguments: { result: { data: null } },
+		});
+		expect(args).toEqual({ result: { data: null } });
+		const accepted = await nullTool.execute("call-null-data", args as never);
+		expect(accepted.details).toMatchObject({ status: "success", data: null });
+		const objectTool = new YieldTool(createSession({ outputSchema: { type: "object" } }));
+		await expect(objectTool.execute("call-null-invalid", { result: { data: null } } as never)).rejects.toThrow(
+			"does not match schema",
+		);
 	});
 
 	it("aborts instead of throwing forever after repeated untyped empty results", async () => {

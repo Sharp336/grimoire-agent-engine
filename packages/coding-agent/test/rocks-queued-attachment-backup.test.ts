@@ -13,6 +13,7 @@ import type { EngineCommandIdentity } from "../src/engine/store";
 import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -80,6 +81,7 @@ it.skipIf(!(executable && runRoot))(
 				engineGeneration: generation,
 				agentInstanceId,
 				agentInstanceRef,
+				bindingSnapshot: semanticBinding(agentInstanceRef),
 				executionId: `execution-${suffix}`,
 				attemptId: `attempt-${suffix}`,
 				authorityGeneration: 1,
@@ -239,6 +241,7 @@ it.skipIf(!(executable && runRoot))(
 						commandId: `continue-${suffix}`,
 						agentInstanceId,
 						agentInstanceRef,
+						bindingSnapshot: semanticBinding(agentInstanceRef),
 						principalId,
 						executionId: `continued-execution-${suffix}`,
 						attemptId: `continued-attempt-${suffix}`,
@@ -333,6 +336,7 @@ it.skipIf(!(executable && runRoot))(
 					commandId: `start-${suffix}`,
 					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					principalId,
 					clientMessageId,
 					attachmentUploadIds: [uploadId],

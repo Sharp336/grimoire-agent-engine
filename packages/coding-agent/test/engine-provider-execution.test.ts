@@ -41,6 +41,7 @@ describe("ProviderExecutionClient", () => {
 			baseUrl: "http://192.168.1.10/runtime/provider-broker/v1",
 		},
 		{ mode: "owner_local", api: "openai-responses", baseUrl: "https://provider.invalid/v1" },
+		{ mode: "hosted_broker", api: "openai-responses", baseUrl: "https://core.invalid/runtime/provider-broker/v1" },
 	])("resolves exact $mode $api material at $baseUrl", async ({ mode, api, baseUrl }) => {
 		const credential = mode === "hosted_broker" ? `gri_pbr_${"a".repeat(48)}` : "fixture-secret";
 		const client = new ProviderExecutionClient(
@@ -99,7 +100,6 @@ describe("ProviderExecutionClient", () => {
 			api: "openai-responses",
 			baseUrl: "http://10.42.71.145:18767/runtime/provider-broker/v1",
 		},
-		{ mode: "hosted_broker", api: "openai-responses", baseUrl: "https://core.invalid/runtime/provider-broker/v1" },
 		{ mode: "hosted_broker", api: "openai-completions", baseUrl: "http://10.42.71.145:18767/v1" },
 		{
 			mode: "hosted_broker",

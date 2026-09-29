@@ -382,6 +382,7 @@ export async function nativeLifecyclePage(
 			source: "engine",
 			sessionId: pinned.sessionId,
 			agentInstanceRef: agentRef,
+			...(event.bindingSnapshot ? { bindingSnapshot: event.bindingSnapshot } : {}),
 			attemptId: event.attemptId,
 			executionId: event.executionId,
 			eventId: String(event.eventId),

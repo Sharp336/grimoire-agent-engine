@@ -2,6 +2,9 @@ import { expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
+import type { RocksAttempt, RocksBinding, RocksCommand } from "../src/engine/rocks-runtime-rows";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
@@ -10,6 +13,7 @@ import { EngineRuntime, type EngineRuntimeOptions } from "../src/engine/runtime"
 import { launchLocalEngineChild, runEngineService } from "../src/engine/service";
 import * as storage from "../src/session/storage-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 // The caller supplies an isolated real Rust owner, never an existing user contour.
 it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN_ROOT || !Bun.env.GRIMOIRE_NATS_SERVER)(
@@ -106,6 +110,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				parentAgentInstanceId,
 				parentAgentInstanceRef,
 				parentAttemptId: "parent-attempt",
+				parentBindingSnapshot: semanticBinding(parentAgentInstanceRef, "grimoire://tasks/grimoire/child-test"),
 				principalId: "test-owner",
 				authorityGeneration: 1,
 				profileRef,
@@ -130,15 +135,47 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			const childBinding = (await runtime.store.getBinding(first.agentInstanceId))!;
 			const command = (await runtime.store.getStartConversationIdentity(childBinding.commandId))!;
 			expect(JSON.parse(command.serializedCommand!).payload).toMatchObject({ input: request.assignment });
+			expect(childBinding.bindingSnapshot).toEqual({
+				...semanticBinding(first.agentInstanceRef!, "grimoire://tasks/grimoire/child-test"),
+				parentAgentInstanceRef, parentAttemptId: request.parentAttemptId, parentBindingRevision: 0,
+			});
 			await expect(
 				launchLocalEngineChild(runtime, resolver, { ...request, assignment: "changed" }),
 			).rejects.toThrow();
+			// Materialize the exact pre-S0 durable shape, not a new command with an old commandId.
+			const legacyCommand: EngineCommandEnvelope = JSON.parse(command.serializedCommand!);
+			delete legacyCommand.bindingSnapshot;
+			if (!isRecord(legacyCommand.payload.localChild)) throw new Error("Child birth was not retained");
+			delete legacyCommand.payload.localChild.agentInstanceId;
+			delete legacyCommand.payload.localChild.workStepId;
+			const legacyIdentity = engineCommandIdentity(legacyCommand);
+			const legacyDigest = await runtime.store.getBindingConversationIdentity(first.agentInstanceId);
+			await runtime.store.mutation(first.agentInstanceId, async tx => {
+				const row = (await tx.get<RocksCommand>("command", childBinding.commandId))!;
+				await tx.put("command", row.command_id, {
+					...row, identity: legacyIdentity, canonical_hash: legacyIdentity.canonicalHash,
+					payload_bytes: Buffer.byteLength(legacyIdentity.serializedCommand!),
+				});
+				const attempt = (await tx.get<RocksAttempt>("attempt", childBinding.attemptId))!;
+				// Terminal Attempt rewrites must predicate the absence of open effects, even when only metadata changes.
+				const effects = await tx.get<{ count: number }>("metadata", `effects:${attempt.attempt_id}:${attempt.binding_id}`);
+				expect(effects?.count ?? 0).toBe(0);
+				delete attempt.binding_snapshot;
+				await tx.put("attempt", childBinding.attemptId, attempt);
+				const binding = (await tx.get<RocksBinding>("binding", first.agentInstanceId))!;
+				delete binding.binding_snapshot;
+				await tx.put("binding", first.agentInstanceId, binding);
+			});
 			await runtime.dispose();
 			runtime = await EngineRuntime.create(options);
 			// Replay uses the admitted snapshot and terminal result, without a fresh cache or provider call.
 			await fs.rename(profileFile, `${profileFile}.parked`);
 			expect(await launchLocalEngineChild(runtime, resolver, request)).toEqual(first);
 			expect(calls).toBe(1);
+			expect((await runtime.store.getStartConversationIdentity(childBinding.commandId))?.serializedCommand)
+				.toBe(legacyIdentity.serializedCommand);
+			expect((await runtime.store.getBinding(first.agentInstanceId))?.sessionFile).toBe(childBinding.sessionFile);
+			expect(await runtime.store.getBindingConversationIdentity(first.agentInstanceId)).toBe(legacyDigest);
 			expect(JSON.stringify(await runtime.store.nativeHistoryPage(first.agentInstanceId))).toContain(
 				"Verified local evidence 42",
 			);
@@ -169,6 +206,12 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			let hostedRequests = 0;
 			let online = false;
 			const projected = new Map<string, Record<string, unknown>>();
+			projected.set(parentAgentInstanceRef, {
+				agent_instance_ref: parentAgentInstanceRef, owner_principal_id: "test-owner",
+				task_ref: request.parentBindingSnapshot.taskRef, work_step_id: null,
+				binding_mode: "legacy_immutable", binding_revision: 0, execution_owner_installation_id: null,
+				status: "active", revision: 1, requested_execution: {},
+			});
 			const hostedCalls: string[] = [];
 			const hosted = Bun.serve({
 				port: 0,
@@ -187,13 +230,15 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					if (name === "grimoire_agent_instance") {
 						const ref =
 							args.action === "create"
-								? `grimoire://tasks/${args.project_id}/${args.task_id}/agents/${args.agent_instance_id}`
+								? `${args.task_ref}/agents/${args.agent_instance_id}`
 								: String(args.agent_instance_ref);
 						if (args.action === "create" && !projected.has(ref))
 							projected.set(ref, {
 								...args,
 								agent_instance_ref: ref,
 								owner_principal_id: "test-owner",
+								binding_revision: 0,
+								execution_owner_installation_id: null,
 								revision: 1,
 							});
 						const agent = projected.get(ref)!;
@@ -204,6 +249,23 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 						result = { agent_instance: agent };
 					}
 					return Response.json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: result } });
+				},
+			});
+			const structuredChildModel = createMockModel({
+				handler: context => {
+					calls++;
+					expect(JSON.stringify(context.messages.find(message => message.role === "user"))).toContain(
+						"Inspect local evidence 42",
+					);
+					return {
+						content: [
+							{
+								type: "toolCall",
+								name: "yield",
+								arguments: { result: { data: { evidence: 42, verified: true } } },
+							},
+						],
+					};
 				},
 			});
 			const parentModel = createMockModel({
@@ -223,7 +285,22 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 							],
 						};
 					expect(result.isError).not.toBeTrue();
-					expect(JSON.stringify(result)).toContain("Verified local evidence 42");
+					expect(result.details).toMatchObject({
+						results: [
+							{
+								agentInstanceRef: expect.stringContaining("grimoire://tasks/grimoire/child-test/agents/"),
+								transcriptRef: expect.stringContaining("history://"),
+								output: '{"evidence":42,"verified":true}',
+								exitCode: 0,
+								structuredOutput: {
+									source: "session",
+									status: "valid",
+									data: { evidence: 42, verified: true },
+								},
+							},
+						],
+					});
+					expect(JSON.stringify(result)).toContain('{"evidence":42,"verified":true}');
 					return { content: ["Parent received local child result"] };
 				},
 			});
@@ -235,9 +312,12 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					resolveSessionContinuation: options.resolveSessionContinuation,
 					resolveSessionProfile: async profile => ({
 						options: {
-							model: profile.spawns === "*" ? parentModel.model : model.model,
+							model: profile.spawns === "*" ? parentModel.model : structuredChildModel.model,
 							enableMCP: profile.spawns !== "*",
 							enableLsp: false,
+							...(profile.spawns !== "*"
+								? { requireYieldTool: true, outputSchema: { type: "object", required: ["evidence", "verified"] } }
+								: {}),
 						},
 						childProfiles: [{ profileRef, displayName: "Local worker" }],
 						dispose() {},
@@ -272,6 +352,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 						commandId: serviceAttempt,
 						agentInstanceId: parentAgentInstanceId,
 						agentInstanceRef: parentAgentInstanceRef,
+						bindingSnapshot: request.parentBindingSnapshot,
 						executionId: serviceAttempt,
 						attemptId: serviceAttempt,
 						principalId: request.principalId,
@@ -305,7 +386,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 						agent =>
 							(agent.requested_execution as Record<string, unknown>).parent_attempt_id === serviceAttempt &&
 							agent.status === "completed",
-					)
+					) || projected.get(first.agentInstanceRef!)?.status !== "completed"
 				) {
 					if (Date.now() > projectionDeadline)
 						throw new Error("Local child lifecycle was not projected after reconnect");

@@ -1,6 +1,7 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex, StorageRuntimeRecord } from "../session/storage-protocol";
-import { type EngineAttemptState, type EngineEvent, type EngineTarget, EngineTargetError } from "./contracts";
+import { type EngineAttemptState, type EngineEvent, type EngineSemanticBindingSnapshot, type EngineTarget, EngineTargetError, legacyLocalChildBirth, sameSemanticBinding } from "./contracts";
 import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import {
 	nativeHistoryEntry,
@@ -214,7 +215,10 @@ export class RocksEngineStore extends RocksEngineMutations {
 	async getHistoryArchive(_agentId: string): Promise<EngineHistoryArchive | undefined> {
 		return undefined;
 	}
-	async listRetainedDirectChildHistory(parentAgentId: string): Promise<RetainedDirectChildHistory[]> {
+	async listRetainedDirectChildHistory(
+		parentAgentId: string,
+		parentSnapshot: EngineSemanticBindingSnapshot,
+	): Promise<RetainedDirectChildHistory[]> {
 		const cut = await this.meta();
 		const page = await this.records.query("identity_parent", [parentAgentId]);
 		if (page.nextCursor)
@@ -232,14 +236,37 @@ export class RocksEngineStore extends RocksEngineMutations {
 				command?.operation === "start" &&
 				command.identity.parentAgentInstanceId === parentAgentId &&
 				command.identity.agentInstanceRef
-			)
+			) {
+				let snapshot = attempt.binding_snapshot ?? command.identity.bindingSnapshot;
+				if (!snapshot && command.identity.serializedCommand) {
+					const retained: unknown = JSON.parse(command.identity.serializedCommand);
+					if (isRecord(retained) && isRecord(retained.payload) && isRecord(retained.payload.localChild) &&
+						typeof retained.payload.localChild.parentAttemptId === "string") {
+						const parent = await this.getAttempt(retained.payload.localChild.parentAttemptId);
+						if (parent?.agent_instance_id === parentAgentId &&
+							(!parent.binding_snapshot || sameSemanticBinding(parent.binding_snapshot, parentSnapshot))) {
+							try {
+								snapshot = legacyLocalChildBirth({
+									agentInstanceRef: command.identity.agentInstanceRef,
+									parentAgentInstanceRef: command.identity.parentAgentInstanceRef,
+									payload: retained.payload,
+								}, parentSnapshot).bindingSnapshot;
+							} catch (error) {
+								// Unproven legacy birth is unavailable context, not permission to infer URI scope.
+								if (!(error instanceof EngineTargetError)) throw error;
+							}
+						}
+					}
+				}
 				rows.push({
 					agentInstanceId: identity.agent_instance_id,
 					agentInstanceRef: command.identity.agentInstanceRef,
+					bindingSnapshot: snapshot,
 					engineAgentId: binding.engine_agent_id,
 					sessionFile: binding.session_file,
 					updated: attempt.updated_at,
 				});
+			}
 		}
 		await this.assertCut(cut);
 		return rows
@@ -448,6 +475,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			result = {
 				kind: "bound",
 				...common,
+				...(attempt.binding_snapshot ? { bindingSnapshot: attempt.binding_snapshot } : {}),
 				attemptId: attempt.attempt_id,
 				executionId: attempt.execution_id,
 				authorityGeneration: attempt.authority_generation,
@@ -477,6 +505,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 				result = {
 					kind: "pending",
 					...common,
+					...(pending.identity.bindingSnapshot ? { bindingSnapshot: pending.identity.bindingSnapshot } : {}),
 					commandId: pending.command_id,
 					attemptId: pending.identity.attemptId,
 					executionId: pending.identity.executionId,
@@ -616,8 +645,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const work = queryWork();
 		const cut = await this.meta(work);
 		const identity = await this.identity(request.agentInstanceRef, request, work);
+		const current = await this.attempt(identity, undefined, work);
 		if (request.attemptId) {
-			const current = await this.attempt(identity, undefined, work);
 			if (current?.attempt_id !== request.attemptId)
 				throw new EngineTargetError("stale_target", "Hold read no longer names the current Attempt");
 		}
@@ -634,6 +663,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			{
 				version: "1.0",
 				agentInstanceRef: request.agentInstanceRef,
+				...(current?.binding_snapshot ? { bindingSnapshot: current.binding_snapshot } : {}),
 				attemptId: request.attemptId ?? null,
 				revision,
 				items,

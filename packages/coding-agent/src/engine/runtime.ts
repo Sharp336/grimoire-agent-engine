@@ -61,8 +61,11 @@ import {
 } from "../session/session-manager";
 import { readStorageBinding, StorageClient, StorageClientError } from "../session/storage-client";
 import type { ConfiguredThinkingLevel } from "../thinking";
+import type { StructuredSubagentOutput, YieldItem } from "../task/types";
+import { arrayValuedLabels, assembleYieldResult } from "../task/yield-assembly";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
+import { buildOutputValidator } from "../tools/output-schema-validator";
 import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
@@ -85,6 +88,8 @@ import {
 	type EngineReconcileResult,
 	type EngineRejectedCommand,
 	type EngineResolveInputRequest,
+	type EngineSemanticBindingSnapshot,
+	sameSemanticBinding,
 	type EngineStartRequest,
 	type EngineStartResult,
 	type EngineSteerRequest,
@@ -182,11 +187,6 @@ type EngineHistoryActivityBlock = {
 	error?: string;
 };
 
-function taskRefFromAgentInstanceRef(agentInstanceRef: string | undefined): string | undefined {
-	if (!agentInstanceRef?.startsWith("grimoire://tasks/")) return undefined;
-	const agentSegment = agentInstanceRef.lastIndexOf("/agents/");
-	return agentSegment > "grimoire://tasks/".length ? agentInstanceRef.slice(0, agentSegment) : undefined;
-}
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
@@ -210,39 +210,47 @@ function terminalYield(
 		isError?: unknown;
 	}[],
 	startIndex: number,
-): { found: boolean; data?: unknown } {
-	const successfulResults = new Map<string, { data: unknown; messageIndex: number }>();
+	lastAssistantText?: string,
+	outputSchema?: unknown,
+): { found: boolean; data?: unknown; rawText?: boolean; schemaOverridden?: boolean; aborted?: boolean; error?: string } {
+	const pendingById = new Map<string, { indices: number[]; next: number }>();
+	const ordered: (YieldItem | undefined)[] = [];
 	for (let i = Math.max(0, startIndex); i < messages.length; i++) {
 		const message = messages[i];
-		if (
-			message?.role !== "toolResult" ||
-			message.toolName !== "yield" ||
-			typeof message.toolCallId !== "string" ||
-			message.isError === true ||
-			!message.details ||
-			typeof message.details !== "object" ||
-			Array.isArray(message.details)
-		) {
+		if (message?.role === "assistant" && Array.isArray(message.content)) {
+			for (const block of message.content) {
+				if (!block || typeof block !== "object") continue;
+				const call = block as { type?: string; id?: unknown; name?: string };
+				if (call.type !== "toolCall" || call.name !== "yield" || typeof call.id !== "string") continue;
+				const pending = pendingById.get(call.id) ?? { indices: [], next: 0 };
+				pending.indices.push(ordered.length);
+				pendingById.set(call.id, pending);
+				ordered.push(undefined);
+			}
+		}
+		if (message?.role !== "toolResult" || message.toolName !== "yield" || typeof message.toolCallId !== "string")
 			continue;
-		}
+		const pending = pendingById.get(message.toolCallId);
+		if (!pending) continue;
+		const index = pending.indices[pending.next++];
+		if (index === undefined) continue;
+		if (message.isError === true || !message.details || typeof message.details !== "object" || Array.isArray(message.details))
+			continue;
 		const details = message.details as Record<string, unknown>;
-		if (details.status !== "success" || (Array.isArray(details.type) && details.type.length > 0)) continue;
-		if (!Object.hasOwn(details, "data")) continue;
-		successfulResults.set(message.toolCallId, { data: details.data, messageIndex: i });
+		if (details.status === "success" || details.status === "aborted") ordered[index] = details as YieldItem;
 	}
-	for (let i = messages.length - 1; i >= Math.max(0, startIndex); i--) {
-		const message = messages[i];
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const block = message.content[j];
-			if (!block || typeof block !== "object") continue;
-			const call = block as { type?: string; id?: unknown; name?: string };
-			if (call.type !== "toolCall" || call.name !== "yield" || typeof call.id !== "string") continue;
-			const result = successfulResults.get(call.id);
-			if (result && result.messageIndex > i) return { found: true, data: result.data };
-		}
-	}
-	return { found: false };
+	const items = ordered.filter((item): item is YieldItem => item !== undefined);
+	const last = items.at(-1);
+	if (last?.status === "aborted") return { found: false, aborted: true, error: last.error };
+	if (items.length === 0) return { found: false };
+	const assembled = assembleYieldResult(
+		items,
+		lastAssistantText,
+		items.some(item => Array.isArray(item.type) && item.type.length > 0) ? arrayValuedLabels(outputSchema) : undefined,
+	);
+	return assembled && !assembled.missingData && assembled.data !== undefined
+		? { found: true, data: assembled.data, rawText: assembled.rawText, schemaOverridden: assembled.schemaOverridden }
+		: { found: false };
 }
 
 interface LiveBinding extends EngineBindingSnapshot {
@@ -260,6 +268,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	unsubscribe: () => void;
 	disposeProfile: () => void;
 	requireYieldTool: boolean;
+	outputSchema?: unknown;
 	pauseGate: AgentPauseGate;
 	activeToolCallIds: Set<string>;
 	childWaits: Map<string, { agentInstanceId: string; attemptId?: string }>;
@@ -268,6 +277,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseCommandIds: Set<string>;
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
+	resumeMessageCommands: Set<string>;
+	pendingPausedMessage?: { input: string; identity: SessionMessageIdentity; images?: ImageContent[] };
 	traceWriteTail: Promise<void>;
 	streamAdmission?: StreamAdmission;
 	messageWriteError?: unknown;
@@ -285,7 +296,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	lastAssistantMessageId?: string;
 	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
-	/** Uploads of direct Start/steer messages by clientMessageId, consumed once the user entry is durable. */
+	/** Uploads of direct Start/steer/resume messages by clientMessageId, consumed once the user entry is durable. */
 	directUploads: Map<string, EngineMessageAttachments>;
 	pendingInput?: PendingInput;
 }
@@ -351,7 +362,7 @@ interface PendingInput {
 	resolve: (result: ExtensionAskDialogResult | undefined) => void;
 }
 
-type HistoryDispatchKind = "prompt" | "continue" | "continue_after_assistant";
+type HistoryDispatchKind = "prompt" | "continue" | "continue_after_assistant" | "resume_queued";
 
 interface PreparedHistoryStart {
 	sessionManager: SessionManager;
@@ -412,6 +423,7 @@ export interface EngineRuntimeOptions {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
 		parentAttemptId: string;
+		parentBindingSnapshot: EngineSemanticBindingSnapshot;
 		principalId?: string;
 		authorityGeneration: number;
 		profileRef: string;
@@ -584,6 +596,7 @@ export class EngineRuntime {
 
 	start(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
 		validateStartRequest(request);
+		if (request.bindingSnapshot) request = { ...request, bindingSnapshot: { ...request.bindingSnapshot } };
 		if (request.attachmentUploadIds !== undefined) {
 			const references = this.#messageAttachments(request);
 			request = { ...request, attachmentUploadIds: references!.uploadIds };
@@ -783,17 +796,43 @@ export class EngineRuntime {
 
 	pause(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
+		if (request.message !== undefined || request.clientMessageId !== undefined || request.attachmentUploadIds !== undefined)
+			throw new EngineTargetError("invalid_request", "Only resume accepts a user message");
 		return this.#branchControl(request, "pause");
 	}
 
 	resume(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
 		validateCommandContext(request.context);
-		return this.#branchControl(request, "resume");
+		const message = request.message !== undefined || request.clientMessageId !== undefined || request.attachmentUploadIds !== undefined;
+		if (message) {
+			validateRuntimeValue("composerText", request.message);
+			validateRuntimeValue("id", request.clientMessageId);
+			if (
+				(!request.message?.trim() && !request.attachmentUploadIds?.length) ||
+				!request.principalId?.trim() ||
+				request.expectedIntentRevision === undefined
+			) throw new EngineTargetError("invalid_request", "Resume message requires text or uploads, principal and intent revision");
+		}
+		if (!message) return this.#branchControl(request, "resume");
+		return (async () => {
+			// A pause_requested turn may still be appending its answer; wait outside the
+			// branch lane so its safe-point checkpoint can finish before the new user entry.
+			for (;;) {
+				const binding = this.#bindings.get(request.agentInstanceId);
+				if (binding?.attemptId !== request.attemptId || binding.attemptState !== "pause_requested") break;
+				const changed = this.store.changeSignal();
+				if (binding.attemptState === "pause_requested")
+					await Promise.race([changed, binding.pauseProgress.promise]);
+			}
+			return this.#branchControl(request, "resume");
+		})();
 	}
 
 	cancel(request: EngineCancelRequest): Promise<EngineControlResult> {
 		validateStartFence(request);
+		if ("message" in request || "clientMessageId" in request || "attachmentUploadIds" in request)
+			throw new EngineTargetError("invalid_request", "Stop cannot carry a user message");
 		return this.#branchControl(request, "stop");
 	}
 
@@ -828,26 +867,81 @@ export class EngineRuntime {
 				action === "stop" && "pendingStartCommandId" in request && request.pendingStartCommandId
 					? (request as EngineCancelRequest)
 					: undefined;
-			if (!startFence) await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
+			const resumeMessage = action === "resume" && "message" in request && request.message !== undefined;
+			const resumedIntent = resumeMessage && request.expectedIntentRevision !== undefined &&
+				durable.intentCommandId === request.commandId &&
+				durable.intentRevision === request.expectedIntentRevision + 1;
+			const recoveringAcceptedMessage = action === "resume" && !resumeMessage &&
+				root?.pendingPausedMessage !== undefined && root.attemptState === "running" && attempt.state === "paused";
+			if (!startFence && !resumedIntent)
+				await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
 			if (
 				action === "resume" &&
-				(!root || !["paused", "pause_requested", "waiting_input"].includes(root.attemptState))
+				(!root || (!resumedIntent && !recoveringAcceptedMessage &&
+					!["paused", "pause_requested", "waiting_input"].includes(root.attemptState)))
 			)
 				throw new EngineTargetError(
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
+			if (resumeMessage) {
+				if (!root || (!resumedIntent && root.attemptState !== "paused") || root.pendingInput ||
+					[...this.#pendingToolApprovals.values()].some(pending => pending.record.target.bindingId === root.bindingId))
+					throw new EngineTargetError("too_late", "A paused Attempt without pending input or approval is required");
+				const intent = await this.store.intent(request.agentInstanceId);
+				if (resumedIntent
+					? intent.holds.length > 0
+					: !intent.holds.some(hold => hold.kind === "pause" && hold.sourceAgentInstanceId === request.agentInstanceId) ||
+						intent.holds.some(hold => hold.kind !== "pause" || hold.sourceAgentInstanceId !== request.agentInstanceId))
+					throw new EngineTargetError("agent_busy", "Another branch hold prevents message resume");
+				if (!root.resumeMessageCommands.has(request.commandId)) {
+					const references = this.#messageAttachments(request);
+					const prepared = references
+						? await this.attachmentUploads.prepareForMessage(request.clientMessageId!, references)
+						: undefined;
+					this.#assertAttachmentSupport(root.session, prepared?.images, prepared?.originalAttachments);
+					await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
+					if (references) root.directUploads.set(request.clientMessageId!, references);
+					const identity: SessionMessageIdentity = {
+						sourceCommandId: request.commandId,
+						clientMessageId: request.clientMessageId,
+						...(prepared ? { originalAttachments: prepared.originalAttachments } : {}),
+					};
+					await root.session.steer(
+						request.message!,
+						prepared?.images,
+						identity,
+						request.context
+							? {
+									customType: "engine-command-context",
+									content: request.context,
+									display: false,
+									details: { sourceCommandId: request.commandId },
+								}
+							: undefined,
+						true,
+					);
+					root.resumeMessageCommands.add(request.commandId);
+					root.pendingPausedMessage = { input: request.message!, identity, images: prepared?.images };
+				}
+			}
 			let changed: { agentIds: string[]; events: EngineEvent[]; intentRevision: number } | undefined;
 			const changeIntent = async () => {
-				changed = await this.store.branchIntent(
-					request.agentInstanceId,
-					request.commandId,
-					action,
-					request.expectedIntentRevision,
-					startFence,
-				);
+				try {
+					changed = await this.store.branchIntent(
+						request.agentInstanceId,
+						request.commandId,
+						action,
+						request.expectedIntentRevision,
+						startFence,
+					);
+				} catch (error) {
+					if (resumeMessage)
+						throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
+					throw error;
+				}
 			};
-			if (action === "resume" && root && "context" in request && request.context)
+			if (action === "resume" && root && "context" in request && request.context && !resumeMessage)
 				await this.#sendCommandContext(root, request.context, request.commandId, changeIntent);
 			else await changeIntent();
 			if (!changed) throw new Error("Command context returned without applying its intent boundary");
@@ -915,33 +1009,51 @@ export class EngineRuntime {
 						this.#trackRun(this.#finishPause(binding, binding.attemptId));
 					}
 				} else if (action === "resume") {
-					const previous = binding.attemptState;
+					const previous = resumedIntent || (recoveringAcceptedMessage && agentId === request.agentInstanceId)
+						? (await this.store.getAttemptTarget(binding.attemptId))?.state ?? binding.attemptState
+						: binding.attemptState;
 					binding.attemptState = binding.pendingInput ? "waiting_input" : "running";
-					await this.#commitAttemptTransition(
-						binding,
-						binding.attemptState,
-						[
-							{
-								kind: "resumed",
-								causationCommandId: request.commandId,
-								payload: controlPayload(initiator, binding.attemptState, false, binding),
-							},
-						],
-						{ expectedStates: [previous] },
-					);
-					binding.resumeCommandIds.add(request.commandId);
+					if (previous !== binding.attemptState && !["completed", "cancelled", "failed", "interrupted"].includes(previous)) {
+						try {
+							await this.#commitAttemptTransition(
+								binding,
+								binding.attemptState,
+								[
+									{
+										kind: "resumed",
+										causationCommandId: request.commandId,
+										payload: controlPayload(initiator, binding.attemptState, false, binding),
+									},
+								],
+								{ expectedStates: [previous] },
+							);
+						} catch (error) {
+							binding.attemptState = previous;
+							throw error;
+						}
+					}
 					binding.pauseRequests.clear();
 					binding.pauseGate.resume();
 					this.#notifyPauseProgress(binding);
 				}
 			};
-			await apply(request.agentInstanceId);
-			for (const id of changed.agentIds) {
-				// A pending child has no effects to quiesce. Its eventual admission inherits the durable hold.
-				if (id !== request.agentInstanceId && this.#bindings.has(id)) await this.#inLane(id, () => apply(id));
+			try {
+				await apply(request.agentInstanceId);
+				for (const id of changed.agentIds) {
+					// A pending child has no effects to quiesce. Its eventual admission inherits the durable hold.
+					if (id !== request.agentInstanceId && this.#bindings.has(id)) await this.#inLane(id, () => apply(id));
+				}
+			} catch (error) {
+				if (resumeMessage)
+					throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
+				throw error;
 			}
 			this.#signalInboxWake();
-			const intent = await this.store.intent(request.agentInstanceId);
+			const intent = await this.store.intent(request.agentInstanceId).catch(error => {
+				if (resumeMessage)
+					throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
+				throw error;
+			});
 			const result: EngineControlResult = {
 				phase: "applied",
 				manualHold: intent.manualHold,
@@ -950,17 +1062,24 @@ export class EngineRuntime {
 					? { alreadyTerminal: true as const }
 					: {}),
 			};
-			await this.store.commitBindingEvent(
-				{
-					...durable,
-					manualHold: intent.manualHold,
-					intentRevision: intent.intentRevision,
-					intentCommandId: request.commandId,
-				},
-				{ kind: "holds_changed", causationCommandId: request.commandId, payload: { action, ...result } },
-				request.commandId,
-				{ outcome: "applied", detail: result },
-			);
+			try {
+				await this.store.commitBindingEvent(
+					{
+						...durable,
+						manualHold: intent.manualHold,
+						intentRevision: intent.intentRevision,
+						intentCommandId: request.commandId,
+					},
+					{ kind: "holds_changed", causationCommandId: request.commandId, payload: { action, ...result } },
+					request.commandId,
+					{ outcome: "applied", detail: result },
+				);
+			} catch (error) {
+				if (resumeMessage)
+					throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
+				throw error;
+			}
+			if (action === "resume" && root) root.resumeCommandIds.add(request.commandId);
 			return result;
 		});
 	}
@@ -1145,7 +1264,7 @@ export class EngineRuntime {
 		});
 	}
 
-	recordCommandRejection(command: EngineRejectedCommand, settleCommand = true): Promise<void> {
+	recordCommandRejection(command: EngineRejectedCommand): Promise<void> {
 		return this.#inLane(command.agentInstanceId, async () => {
 			this.#throwIfDisposed();
 			const retainedBinding =
@@ -1171,7 +1290,7 @@ export class EngineRuntime {
 				outcome: "rejected" as const,
 				detail: { code: command.code, message: command.message },
 			};
-			if (command.operation === "start" && settleCommand) {
+			if (command.operation === "start") {
 				const event = await this.store.commitUnboundStartRejection(
 					target,
 					{ kind: "rejected", payload, causationCommandId: command.commandId },
@@ -1185,7 +1304,7 @@ export class EngineRuntime {
 				"rejected",
 				payload,
 				command.commandId,
-				settleCommand ? command.commandId : undefined,
+				command.commandId,
 				receipt,
 			);
 		});
@@ -1351,10 +1470,12 @@ export class EngineRuntime {
 		return this.#inLane(target.agentInstanceId, async () => {
 			if (this.#bindings.get(target.agentInstanceId)?.attemptId !== target.attemptId) {
 				const retained = await this.store.nativeSessionHeader(target);
+				const attempt = await this.store.getAttempt(target.attemptId);
 				return {
 					schema: "grimoire.engine.session_context.v1",
 					status: "not_ready",
 					attemptId: target.attemptId,
+					...(attempt?.binding_snapshot ? { bindingSnapshot: attempt.binding_snapshot } : {}),
 					sessionId: retained.sessionId,
 					cwd: retained.cwd,
 					context: null,
@@ -1366,6 +1487,7 @@ export class EngineRuntime {
 			return {
 				schema: "grimoire.engine.session_context.v1",
 				attemptId: binding.attemptId,
+				bindingSnapshot: binding.bindingSnapshot,
 				sessionId: binding.session.sessionId,
 				cwd: binding.session.sessionManager.getCwd(),
 				model: model ? { provider: model.provider, id: model.id, contextWindow: model.contextWindow } : null,
@@ -1637,6 +1759,8 @@ export class EngineRuntime {
 				throw new EngineTargetError("stale_target", `History source ${field} is stale`);
 			}
 		}
+		if (edit.mode === "edit" && !(await this.#sameAdmittedBinding(source, request)))
+			throw new EngineTargetError("stale_target", "History edit cannot cross semantic bindings");
 		const sourceAttempt = await this.store.getAttempt(source.attemptId);
 		if (!sourceAttempt || !TERMINAL_ATTEMPT_STATES.has(sourceAttempt.state)) {
 			throw new EngineTargetError("agent_busy", `History source Attempt ${source.attemptId} is not terminal`);
@@ -1732,6 +1856,10 @@ export class EngineRuntime {
 	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
 		let binding = this.#bindings.get(request.agentInstanceId);
+		const admitted = binding ?? await this.store.getBinding(request.agentInstanceId);
+		if (admitted?.bindingSnapshot?.bindingRevision === 0 &&
+			!sameSemanticBinding(admitted.bindingSnapshot, request.bindingSnapshot))
+			throw new EngineTargetError("stale_target", "Legacy binding is immutable");
 		if (binding) {
 			if (binding.attemptId === request.attemptId) {
 				if (binding.executionId === request.executionId) {
@@ -1752,6 +1880,7 @@ export class EngineRuntime {
 			if (
 				priorAttempt.agent_instance_id !== request.agentInstanceId ||
 				priorAttempt.execution_id !== request.executionId
+				|| (priorAttempt.binding_snapshot && !sameSemanticBinding(priorAttempt.binding_snapshot, request.bindingSnapshot))
 			) {
 				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} is already bound`);
 			}
@@ -1815,7 +1944,7 @@ export class EngineRuntime {
 		let restoreReceipt: RestoreWorkspaceReceipt | undefined;
 		if (!binding) {
 			const prior = await this.store.getBinding(request.agentInstanceId);
-			if (prior?.sessionFile?.startsWith("native:")) {
+			if (prior?.sessionFile?.startsWith("native:") && await this.#sameAdmittedBinding(prior, request)) {
 				const storage = this.#nativeSessionStorage(prior.sessionFile);
 				const loaded = await storage.readContext();
 				const restored = await resolveRestoreWorkspace(
@@ -1890,6 +2019,7 @@ export class EngineRuntime {
 			binding &&
 			!preparedSession &&
 			profile.continuationPolicy !== "fresh" &&
+			await this.#sameAdmittedBinding(binding, request) &&
 			binding.profileDigest === continuationDigest
 				? binding
 				: undefined;
@@ -1942,6 +2072,7 @@ export class EngineRuntime {
 			reused.attemptId = request.attemptId;
 			reused.commandId = request.commandId;
 			reused.authorityGeneration = request.authorityGeneration;
+			reused.bindingSnapshot = request.bindingSnapshot;
 			reused.attemptState = "accepted";
 			reused.state = "idle";
 			reused.steerCommandIds = [];
@@ -2205,6 +2336,7 @@ export class EngineRuntime {
 			if (
 				!preparedSessionManager &&
 				prior?.sessionFile &&
+				await this.#sameAdmittedBinding(prior, request) &&
 				(prior.profileDigest === profileDigest ||
 					(restoreReceipt &&
 						prior.profileDigest === compatibilityDigest &&
@@ -2280,6 +2412,8 @@ export class EngineRuntime {
 							}) => {
 								const parent = liveBinding;
 								if (!parent) throw new Error("Engine child launcher is not bound to its parent Attempt");
+								if (!parent.bindingSnapshot)
+									throw new EngineTargetError("source_unavailable", "Parent Attempt binding is unavailable");
 								if (
 									!childProfileRefs.includes(child.profileRef) ||
 									!childProfiles.some(candidate => candidate.profileRef === child.profileRef)
@@ -2296,6 +2430,7 @@ export class EngineRuntime {
 										parentAgentInstanceId: parent.agentInstanceId,
 										parentAgentInstanceRef: request.agentInstanceRef!,
 										parentAttemptId: parent.attemptId,
+										parentBindingSnapshot: parent.bindingSnapshot,
 										principalId: request.principalId,
 										authorityGeneration: request.authorityGeneration,
 										cwd: request.cwd,
@@ -2443,6 +2578,7 @@ export class EngineRuntime {
 			const binding: LiveBinding = {
 				bindingId: `${route}:${bindingGeneration}`,
 				commandId: request.commandId,
+				bindingSnapshot: request.bindingSnapshot,
 				agentInstanceId: request.agentInstanceId,
 				executionId: request.executionId,
 				attemptId: request.attemptId,
@@ -2471,6 +2607,7 @@ export class EngineRuntime {
 				launchModel: resolved?.profileRoutes ? created.session.model : undefined,
 				launchThinkingLevel: created.session.configuredThinkingLevel(),
 				requireYieldTool: profile.requireYieldTool === true,
+				outputSchema: sessionOptions.outputSchema,
 				pauseGate,
 				activeToolCallIds: new Set(),
 				childWaits: new Map(),
@@ -2479,6 +2616,7 @@ export class EngineRuntime {
 				pauseCommandIds: new Set(),
 				pauseRequests: new Map(),
 				resumeCommandIds: new Set(),
+				resumeMessageCommands: new Set(),
 				traceWriteTail: Promise.resolve(),
 				traceTools: new Map(),
 				childLaunches: new Set(),
@@ -2714,19 +2852,24 @@ export class EngineRuntime {
 				});
 			},
 		};
-		const parentTaskRef = taskRefFromAgentInstanceRef(request.agentInstanceRef);
+		const parentTaskRef = request.bindingSnapshot?.taskRef;
 		if (
 			!prior?.sessionFile ||
 			profile.continuationPolicy === "fresh" ||
 			prior.authorityGeneration !== request.authorityGeneration ||
+			!(await this.#sameAdmittedBinding(prior, request)) ||
 			!parentTaskRef
 		) {
 			return access;
 		}
 		const canonicalCwd = await canonicalWorkspacePath(request.cwd);
 		const refs: Array<{ id: string; parentId: string; sessionFile: string }> = [];
-		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId)) {
-			if (taskRefFromAgentInstanceRef(child.agentInstanceRef) !== parentTaskRef) continue;
+		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId, request.bindingSnapshot!)) {
+			const snapshot = child.bindingSnapshot;
+			if (!snapshot || snapshot.taskRef !== parentTaskRef ||
+				snapshot.parentAgentInstanceRef !== request.agentInstanceRef ||
+				snapshot.parentBindingRevision !== request.bindingSnapshot?.bindingRevision ||
+				snapshot.parentAttemptId === null) continue;
 			if (child.engineAgentId !== engineAgentId(child.agentInstanceId)) continue;
 			const loaded = await this.#nativeSessionStorage(child.sessionFile).readContext();
 			const mappedCwd = (
@@ -2748,6 +2891,22 @@ export class EngineRuntime {
 			});
 		}
 		return { ...access, refs };
+	}
+
+	async #sameAdmittedBinding(prior: EngineBindingSnapshot, request: EngineStartRequest): Promise<boolean> {
+		if (prior.bindingSnapshot) return sameSemanticBinding(prior.bindingSnapshot, request.bindingSnapshot);
+		const identity = await this.store.getStartConversationIdentity(prior.commandId);
+		if (identity?.bindingSnapshot) return sameSemanticBinding(identity.bindingSnapshot, request.bindingSnapshot);
+		// A trusted r0 snapshot proves the immutable legacy binding without parsing its provenance URI.
+		// Never enrich an owned row, and never rewrite the retained digests or completed Attempt.
+		if (request.bindingSnapshot?.bindingRevision === 0 && request.bindingSnapshot.installationId === null &&
+			identity?.operation === "start" && identity.agentInstanceRef === request.agentInstanceRef &&
+			identity.agentInstanceRef?.startsWith("grimoire://tasks/") &&
+			identity.agentInstanceId === request.agentInstanceId &&
+			identity.parentAgentInstanceId === request.parentAgentInstanceId)
+			return true;
+		// Unscoped native SDK sessions have no hosted Task binding.
+		return !request.agentInstanceRef && !request.bindingSnapshot && !identity?.agentInstanceRef;
 	}
 
 	async #continuationDigest(
@@ -2791,6 +2950,7 @@ export class EngineRuntime {
 	): Promise<string | undefined> {
 		if (!prior.sessionFile || profile.continuationPolicy === "fresh") return undefined;
 		if (prior.authorityGeneration !== request.authorityGeneration) return undefined;
+		if (!(await this.#sameAdmittedBinding(prior, request))) return undefined;
 		const storedDigest = await this.store.getBindingConversationIdentity(request.agentInstanceId);
 		const restoredIdentity =
 			restoreReceipt &&
@@ -3420,7 +3580,9 @@ export class EngineRuntime {
 					effect,
 					() =>
 						this.#withSessionScope(binding, () =>
-							this.#dispatchPrompt(binding.session, input, identity, kind, images),
+							kind === "resume_queued"
+								? binding.session.continueNativeHistory().then(() => true)
+								: this.#dispatchPrompt(binding.session, input, identity, kind, images),
 						),
 					audit,
 				);
@@ -3568,11 +3730,13 @@ export class EngineRuntime {
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 				binding.streamAdmission?.check();
-				if (
-					terminalYield(binding.session.messages, attemptMessageStart).found ||
-					binding.attemptState !== "running"
-				)
-					break;
+				const yielded = terminalYield(
+					binding.session.messages,
+					attemptMessageStart,
+					binding.session.getLastAssistantText(),
+					binding.outputSchema,
+				);
+				if (yielded.found || yielded.aborted || binding.attemptState !== "running") break;
 				await this.#dispatchModel(
 					binding,
 					"Your previous response was not submitted. Call the yield tool now with the complete output object in result.data. Do not answer with text.",
@@ -3580,9 +3744,14 @@ export class EngineRuntime {
 			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
 			binding.streamAdmission?.check();
-			if (binding.requireYieldTool && !terminalYield(binding.session.messages, attemptMessageStart).found) {
-				throw new Error("required_yield_not_submitted");
-			}
+			const yielded = terminalYield(
+				binding.session.messages,
+				attemptMessageStart,
+				binding.session.getLastAssistantText(),
+				binding.outputSchema,
+			);
+			if (yielded.aborted) throw new Error(yielded.error || "yield_aborted");
+			if (binding.requireYieldTool && !yielded.found) throw new Error("required_yield_not_submitted");
 			await this.#settleAttempt(binding, attemptId, attemptMessageStart, "completed");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -4149,6 +4318,14 @@ export class EngineRuntime {
 			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 			binding.streamAdmission?.check();
 			await binding.session.waitForIdle();
+			if (binding.pendingPausedMessage) {
+				const pending = binding.pendingPausedMessage;
+				binding.pendingPausedMessage = undefined;
+				if (binding.session.agent.hasQueuedMessages()) {
+					await this.#dispatchModel(binding, pending.input, pending.identity, "resume_queued", pending.images);
+					continue;
+				}
+			}
 			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
 			await this.asyncJobManager.drainDeliveries({ filter });
 			await this.#waitForToolInvocations(binding, attemptId);
@@ -4165,12 +4342,17 @@ export class EngineRuntime {
 	}
 
 	#completionPayload(binding: LiveBinding, attemptMessageStart: number, full = false): EngineCompletionPayload {
-		const yielded = terminalYield(binding.session.messages, attemptMessageStart);
-		const final = yielded.found ? JSON.stringify(yielded.data) : (binding.session.getLastAssistantText() ?? "");
+		const lastAssistantText = binding.session.getLastAssistantText();
+		const yielded = terminalYield(binding.session.messages, attemptMessageStart, lastAssistantText, binding.outputSchema);
+		const final = yielded.found
+			? yielded.rawText && typeof yielded.data === "string"
+				? yielded.data
+				: JSON.stringify(yielded.data)
+			: (lastAssistantText ?? "");
 		const outputTruncated =
 			final.length > MAX_ASSISTANT_FINAL_CHARS &&
 			!(full && Buffer.byteLength(JSON.stringify(final)) <= MAX_TERMINAL_RESULT_BYTES);
-		return {
+		const payload: EngineCompletionPayload = {
 			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,
 			...(!yielded.found && binding.lastAssistantMessageId
 				? { assistantMessageId: binding.lastAssistantMessageId }
@@ -4178,6 +4360,43 @@ export class EngineRuntime {
 			...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
 			...(outputTruncated ? { outputTruncated: true } : {}),
 		};
+		if (full && yielded.found) {
+			const source = binding.outputSchema === undefined ? "none" : "session";
+			const { validator, normalized, error } = buildOutputValidator(binding.outputSchema);
+			const validation = validator?.validate(yielded.data);
+			const structuredOutput: StructuredSubagentOutput = {
+				source,
+				mode: "permissive",
+				status:
+					source === "none" || error || normalized === undefined
+						? "unavailable"
+						: yielded.schemaOverridden || validation?.success === false
+							? "invalid"
+							: "valid",
+				data: yielded.data,
+				...(error ? { error: `invalid output schema: ${error}` } : {}),
+				...(yielded.schemaOverridden ? { error: "yield schema validation overridden" } : {}),
+				...(validation?.success === false ? { error: "yield data does not match output schema" } : {}),
+			};
+			if (
+				!outputTruncated &&
+				Buffer.byteLength(JSON.stringify({ ...payload, structuredOutput }), "utf8") <= MAX_TERMINAL_RESULT_BYTES
+			) {
+				payload.structuredOutput = structuredOutput;
+			} else {
+				payload.structuredOutput = {
+					source,
+					mode: "permissive",
+					status: "unavailable",
+					error: "Structured result exceeds terminal result size limit; read the transcript",
+				} satisfies StructuredSubagentOutput;
+			}
+		}
+		if (full && Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_TERMINAL_RESULT_BYTES) {
+			payload.assistantFinal = `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]`;
+			payload.outputTruncated = true;
+		}
+		return payload;
 	}
 
 	async #finishCancel(binding: LiveBinding, request: EngineCancelRequest, abort: Promise<void>): Promise<void> {
@@ -4317,6 +4536,7 @@ export class EngineRuntime {
 		attemptState: EngineAttemptState,
 		beforeSessionDispose?: () => Promise<void>,
 	): Promise<void> {
+		binding.session.beginDispose();
 		const errors: unknown[] = [];
 		await collectFailure(errors, binding.unsubscribe);
 		await collectFailure(errors, () => this.#cancelToolApprovals(binding, reason));
@@ -4570,7 +4790,11 @@ export class EngineRuntime {
 	#notifyEvents(events: readonly EngineEvent[]): void {
 		for (const event of events) {
 			for (const listener of this.#listeners) {
-				void Promise.resolve(listener(event)).catch(() => {});
+				try {
+					void Promise.resolve(listener(event)).catch(() => {});
+				} catch {
+					// A projection subscriber cannot undo an already committed Engine event.
+				}
 			}
 		}
 	}
@@ -4579,6 +4803,7 @@ export class EngineRuntime {
 		return {
 			bindingId: binding.bindingId,
 			commandId: binding.commandId,
+			bindingSnapshot: binding.bindingSnapshot,
 			agentInstanceId: binding.agentInstanceId,
 			executionId: binding.executionId,
 			attemptId: binding.attemptId,

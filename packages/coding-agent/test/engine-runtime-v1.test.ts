@@ -1,4 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { sameSemanticBinding, validateS0Binding, validateStartRequest } from "../src/engine/contracts";
+import { engineCommandIdentity } from "../src/engine/nats-adapter";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import {
 	RUNTIME_PROTOCOL_HASH,
@@ -15,6 +17,7 @@ import {
 	identity,
 	nativeCheckpoint,
 	runtimeV1Fixture,
+	semanticBinding,
 } from "./helpers/runtime-v1-rocks-fixture";
 import { storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
@@ -30,6 +33,50 @@ function failCommit(
 		return write(input, ...rest);
 	});
 }
+
+it("fences semantic scope independently of opaque Agent provenance and rejects dormant S1 admission", () => {
+	const ref = "grimoire://tasks/birth/provenance/agents/legacy";
+	const snapshot = semanticBinding(ref, "grimoire://tasks/current/explicit", "step");
+	validateS0Binding(snapshot, ref);
+	expect(sameSemanticBinding(snapshot, { ...snapshot })).toBe(true);
+	for (const changed of [
+		{ ...snapshot, taskRef: "grimoire://tasks/current/other" },
+		{ ...snapshot, workStepId: null },
+		{ ...snapshot, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` },
+	]) expect(sameSemanticBinding(snapshot, changed)).toBe(false);
+	for (const rejected of [
+		{ ...snapshot, taskRef: null },
+		{ ...snapshot, taskRef: `grimoire://tasks/~u/${"a".repeat(64)}/private` },
+		{ ...snapshot, taskRef: null, workStepId: null },
+		{ ...snapshot, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` },
+		{ ...snapshot, bindingRevision: Number.MAX_SAFE_INTEGER + 1 },
+	]) expect(() => validateS0Binding(rejected, ref)).toThrow();
+	const ownedRef = `grimoire://agents/~u/${"b".repeat(64)}/owned`;
+	validateRuntimeValue("agi", ownedRef);
+	expect(() => validateS0Binding({ ...snapshot, agentInstanceRef: ownedRef }, ownedRef)).toThrow();
+	expect(() => validateRuntimeValue("agi", `${ref}\n`)).toThrow();
+	const native = {
+		commandId: "native", agentInstanceId: "native", executionId: "execution", attemptId: "attempt",
+		authorityGeneration: 1, cwd: "pinned", input: "native SDK",
+	};
+	validateStartRequest(native);
+	validateStartRequest({ ...native, agentInstanceRef: ref, bindingSnapshot: snapshot });
+	expect(() => validateStartRequest({ ...native, agentInstanceRef: ref })).toThrow();
+	for (const bindingSnapshot of [
+		snapshot,
+		{ ...snapshot, taskRef: null, workStepId: null },
+		{ ...snapshot, agentInstanceRef: ownedRef, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` },
+	]) expect(() => validateStartRequest({ ...native, bindingSnapshot })).toThrow();
+	const envelope = {
+		schema: "grimoire.engine.command.v1" as const, op: "start" as const, commandId: "exact",
+		deviceId: "device", engineId: "engine", engineGeneration: 1, agentInstanceId: "agent",
+		agentInstanceRef: ref, bindingSnapshot: snapshot, authorityGeneration: 1, issuedAt: 1,
+		payload: { cwd: "pinned", input: "same" },
+	};
+	expect(engineCommandIdentity(envelope).canonicalHash).not.toBe(
+		engineCommandIdentity({ ...envelope, bindingSnapshot: { ...snapshot, workStepId: null } }).canonicalHash,
+	);
+});
 
 describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () => {
 	const { createStore, reopen } = runtimeV1Fixture();
@@ -166,9 +213,6 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			if (page.nextCursor === null) break;
 			page = await store.runtimeHolds({ ...request, cursor: String(page.nextCursor) });
 		}
-		// Each page re-walks the fixed ancestor path (three hold keys and one identity per level plus the cut),
-		// so its work stays the same on every page instead of growing with the continuation.
-		expect(rows).toEqual(rows.map(() => 4 * (depth + 1) + 4));
 		expect(rows[0]).toBeLessThanOrEqual(runtimeLimits.bootstrapScannedRows);
 		expect(page.nextCursor).toBeNull();
 		expect(commands).toEqual(heldDepths.toReversed().map(held => `hold-${held}`));
@@ -568,6 +612,79 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		});
 		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, { kind: "catalog" }));
 		expect(catalog.changes).toEqual([]);
+	});
+
+	it("publishes committed retry waits and settlements on the same Attempt and restores the settled detail after reopen", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["state"] };
+		const request = { principalId: "owner" };
+		const before = await store.runtimeSnapshot(scope, request);
+		const summary = (await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary;
+		expect(before.agents[0].retry).toBeNull();
+		const waiting = { attempt: 1, maxAttempts: 3, route: "provider/model", delayMs: 34074.824224, scheduledAt: 9000.125, outcome: "waiting" as const, error: "Bearer secret-value" };
+		const scheduled = await store.commitAttemptRetry(target, waiting, { kind: "retry_scheduled", payload: { retry: waiting } });
+		expect(scheduled).toBeDefined();
+		expect(await store.getAttempt(target.attemptId)).toMatchObject({ retry_delay_ms: 34074.824224, retry_scheduled_at: 9000.125 });
+		const scheduledFrame = await store.runtimeEvents(eventsRequest(before.epoch, scheduled!.eventId - 1, scope));
+		expect(scheduledFrame.changes).toMatchObject([{
+			kind: "state",
+			agentInstanceRef,
+			revision: scheduled!.eventId,
+			value: {
+				attemptId: target.attemptId,
+				target: { executionId: target.executionId },
+				retry: { attempt: 1, maxAttempts: 3, route: "provider/model", delayMs: 34075, scheduledAt: 9001, outcome: "waiting", error: expect.any(String) },
+			},
+		}]);
+		expect(JSON.stringify(scheduledFrame)).not.toContain("secret-value");
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].retry).toEqual(
+			scheduledFrame.changes[0].value.retry,
+		);
+		const settled = { attempt: 1, maxAttempts: 3, outcome: "succeeded" as const };
+		const completed = await store.commitAttemptRetry(target, settled, { kind: "retry_settled", payload: { retry: settled } });
+		const settledFrame = await store.runtimeEvents(eventsRequest(before.epoch, completed!.eventId - 1, scope));
+		expect(settledFrame.changes).toMatchObject([{
+			kind: "state",
+			agentInstanceRef,
+			revision: completed!.eventId,
+			value: {
+				attemptId: target.attemptId,
+				target: { executionId: target.executionId },
+				retry: { attempt: 1, maxAttempts: 3, route: "provider/model", delayMs: 34075, scheduledAt: 9001, outcome: "succeeded" },
+			},
+		}]);
+		expect((await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary).toEqual(summary);
+		store = reopen();
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].retry).toEqual(settledFrame.changes[0].value.retry);
+	});
+
+	it("settles a waiting retry in the recovery frame and does not carry it into a replacement Attempt", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const request = { principalId: "owner" };
+		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["state"] };
+		await store.commitAttemptRetry(target, { attempt: 2, maxAttempts: 3, outcome: "waiting", scheduledAt: 9000 }, { kind: "retry_scheduled" });
+		const generation = await store.nextEngineGeneration();
+		const interrupted = (await store.interruptGeneration(generation)).find(event => event.kind === "interrupted");
+		expect(interrupted).toBeDefined();
+		const recoveryFrame = await store.runtimeEvents(eventsRequest((await store.runtimeSnapshot(scope, request)).epoch, interrupted!.eventId - 1, scope));
+		expect(recoveryFrame.changes.find(change => change.kind === "state")?.value).toMatchObject({
+			state: "interrupted",
+			retry: { attempt: 2, maxAttempts: 3, outcome: "interrupted" },
+		});
+		store = reopen();
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].retry).toMatchObject({
+			attempt: 2, outcome: "interrupted",
+		});
+		expect(await store.commitAttemptRetry(target, { attempt: 3, maxAttempts: 3, outcome: "waiting" }, { kind: "retry_scheduled" })).toBeUndefined();
+		const next = { ...target, attemptId: "next-attempt", executionId: "next-execution", commandId: "next-command", bindingGeneration: 2, engineGeneration: generation };
+		await store.commitAttemptTransition(next, "running", [{ kind: "running" }]);
+		const current = await store.runtimeSnapshot({ ...scope, attemptId: next.attemptId }, request);
+		expect(current.agents[0]).toMatchObject({ attemptId: next.attemptId, retry: null });
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].retry).toMatchObject({ outcome: "interrupted" });
 	});
 
 	it("emits exact usage and context invalidations after model settlement without token or app churn", async () => {

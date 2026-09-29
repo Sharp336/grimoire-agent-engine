@@ -24,8 +24,9 @@ import type {
 	EngineHistoryEditSource,
 	EngineLaunchProfile,
 	EngineResolveInputRequest,
+	EngineSemanticBindingSnapshot,
 } from "./contracts";
-import { EngineTargetError, validateCommandContext } from "./contracts";
+import { EngineTargetError, validateCommandContext, validateS0Binding } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
@@ -70,6 +71,7 @@ export interface EngineCommandEnvelope {
 	engineGeneration: number;
 	agentInstanceId: string;
 	agentInstanceRef?: string;
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	parentAgentInstanceId?: string;
 	parentAgentInstanceRef?: string;
 	runtimeBindingId?: string;
@@ -97,6 +99,7 @@ export interface AgentMessageEnvelope {
 
 export interface EngineEventEnvelope {
 	schema: "grimoire.engine.event.v1";
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	eventId: string;
 	agentSeq: number;
 	causationCommandId: string;
@@ -527,26 +530,13 @@ export class NatsEngineAdapter {
 				return;
 			}
 			if (error instanceof EngineCommandConflictError) {
-				if (command?.executionId && command.attemptId) {
-					await this.runtime
-						.recordCommandRejection(
-							{
-								commandId: command.commandId,
-								agentInstanceId: command.agentInstanceId,
-								executionId: command.executionId,
-								attemptId: command.attemptId,
-								authorityGeneration: command.authorityGeneration,
-								bindingGeneration: command.bindingGeneration,
-								code: "invalid_request",
-								message: error.message,
-								...(command.op === "start" ? { operation: "start" as const } : {}),
-							},
-							false,
-						)
-						.catch(reportError => this.#report(reportError));
+				// Admission collisions and receipt races preserve the retained command.
+				// Report only: command.rejected would terminally fail its original hosted job.
+				try {
+					this.#report(error);
+				} finally {
+					message.term("command_id_conflict");
 				}
-				message.term("command_id_conflict");
-				this.#report(error);
 				return;
 			}
 			if (error instanceof EngineTargetError && error.code === "agent_busy" && !command?.browserPayloadHash) {
@@ -803,6 +793,7 @@ export class NatsEngineAdapter {
 	#eventEnvelope(event: EngineEvent): EngineEventEnvelope {
 		return {
 			schema: "grimoire.engine.event.v1",
+			...(event.bindingSnapshot ? { bindingSnapshot: event.bindingSnapshot } : {}),
 			eventId: String(event.eventId),
 			agentSeq: event.seq,
 			causationCommandId: event.causationCommandId,
@@ -849,6 +840,7 @@ export async function dispatchEngineCommand(options: {
 	command: EngineCommandEnvelope;
 	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
+	legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
 }): Promise<unknown> {
 	const { runtime, command } = options;
 	if (command.browserPayloadHash) {
@@ -889,8 +881,11 @@ export async function dispatchEngineCommand(options: {
 					principalId: command.principalId ?? "",
 					uploadIds: requiredStringList(command.payload, "attachmentUploadIds"),
 				});
-	if (attachments && !["start", "steer", "enqueue"].includes(command.op))
+	if (attachments && !["start", "steer", "enqueue", "resume"].includes(command.op))
 		throw new EngineTargetError("invalid_request", "Attachments are supported only on message commands");
+	if (["pause", "cancel"].includes(command.op) &&
+		(command.payload.text !== undefined || command.payload.clientMessageId !== undefined))
+		throw new EngineTargetError("invalid_request", "Pause and Stop cannot carry a user message");
 	switch (command.op) {
 		case "enqueue": {
 			const agentInstanceRef = requiredEnvelopeString(command.agentInstanceRef, "agentInstanceRef");
@@ -981,6 +976,8 @@ export async function dispatchEngineCommand(options: {
 						context,
 						agentInstanceId: command.agentInstanceId,
 						agentInstanceRef,
+						bindingSnapshot: command.bindingSnapshot ?? options.legacyBindingSnapshot,
+						parentAgentInstanceRef: command.parentAgentInstanceRef,
 						displayName: optionalRecordString(command.payload, "displayName"),
 						delegationHint: optionalRecordString(command.payload, "delegationHint"),
 						parentAgentInstanceId: optionalRecordString(
@@ -1047,14 +1044,25 @@ export async function dispatchEngineCommand(options: {
 				initiator: controlInitiator(command.payload),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
-		case "resume":
+		case "resume": {
+			const hasMessage = command.payload.text !== undefined ||
+				command.payload.clientMessageId !== undefined || attachments !== undefined;
+			if (hasMessage && typeof command.payload.text !== "string")
+				throw new EngineTargetError("invalid_request", "Resume message requires text");
 			return await runtime.resume({
 				...boundTarget(command),
 				commandId: command.commandId,
 				context,
 				initiator: controlInitiator(command.payload),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
+				...(hasMessage ? {
+					message: messageText(command.payload, "text", Boolean(attachments)),
+					clientMessageId: requiredRecordString(command.payload, "clientMessageId"),
+					principalId: command.principalId,
+					attachmentUploadIds: attachments?.uploadIds,
+				} : {}),
 			});
+		}
 		case "cancel":
 			if (command.runtimeBindingId === undefined && command.bindingGeneration === undefined) {
 				return await runtime.cancelPendingStart({
@@ -1213,6 +1221,9 @@ function parseCommandSubject(subject: string): [string, string, string, EngineCo
 
 function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {
 	if (command.browserTarget) validateRuntimeValue("target", command.browserTarget);
+	if (command.bindingSnapshot) validateRuntimeValue("bindingSnapshot", command.bindingSnapshot);
+	if (command.op === "start" && command.agentInstanceRef && command.bindingSnapshot)
+		validateS0Binding(command.bindingSnapshot, command.agentInstanceRef);
 	const payloadHash = sha256(stableStringifyJson(command.payload));
 	const canonical = {
 		op: command.op,
@@ -1228,6 +1239,7 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 		engineGeneration: command.engineGeneration,
 		agentInstanceId: command.agentInstanceId,
 		agentInstanceRef: command.agentInstanceRef,
+		...(command.bindingSnapshot ? { bindingSnapshot: command.bindingSnapshot } : {}),
 		parentAgentInstanceId: command.parentAgentInstanceId,
 		parentAgentInstanceRef: command.parentAgentInstanceRef,
 		bindingId: command.runtimeBindingId,
@@ -1245,6 +1257,7 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 		engineGeneration: command.engineGeneration,
 		agentInstanceId: command.agentInstanceId,
 		agentInstanceRef: command.agentInstanceRef,
+		bindingSnapshot: command.bindingSnapshot,
 		parentAgentInstanceId: command.parentAgentInstanceId,
 		parentAgentInstanceRef: command.parentAgentInstanceRef,
 		bindingId: command.runtimeBindingId,

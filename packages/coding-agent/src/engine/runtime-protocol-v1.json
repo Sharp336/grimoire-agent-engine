@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 13,
+    "contractRevision": 16,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -67,7 +67,7 @@
       "serverHttpConcurrentPages": 16,
       "detailInterests": 32,
       "detailKinds": 7,
-      "summaryBytes": 4096,
+      "summaryBytes": 8192,
       "detailStateBytes": 49152,
       "liveChangeBytes": 49152,
       "bulkPreviewBytes": 4096,
@@ -524,7 +524,137 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 1000,
-      "pattern": "^grimoire://tasks/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/agents/[A-Za-z0-9._-]+$"
+      "pattern": "^grimoire://(?:tasks/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/agents|agents/~u/[a-f0-9]{64})/[A-Za-z0-9._-]+(?![\\s\\S])"
+    },
+    "taskRef": {
+      "type": "string",
+      "maxLength": 1000,
+      "pattern": "^grimoire://tasks/(?:[A-Za-z0-9._-]+|~u/[a-f0-9]{64})/[A-Za-z0-9._-]+(?![\\s\\S])"
+    },
+    "bindingSnapshot": {
+      "type": "object",
+      "properties": {
+        "agentInstanceRef": { "$ref": "#/$defs/agi" },
+        "taskRef": { "oneOf": [{ "$ref": "#/$defs/taskRef" }, { "type": "null" }] },
+        "workStepId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "bindingRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "installationId": { "oneOf": [{ "$ref": "#/$defs/installationId" }, { "type": "null" }] },
+        "parentAgentInstanceRef": { "oneOf": [{ "$ref": "#/$defs/agi" }, { "type": "null" }] },
+        "parentAttemptId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "parentBindingRevision": { "oneOf": [{ "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, { "type": "null" }] }
+      },
+      "required": ["agentInstanceRef", "taskRef", "workStepId", "bindingRevision", "installationId", "parentAgentInstanceRef", "parentAttemptId", "parentBindingRevision"],
+      "additionalProperties": false
+    },
+    "installationId": {
+      "type": "string",
+      "pattern": "^install_[a-f0-9]{32}(?![\\s\\S])"
+    },
+    "bindingGate": {
+      "description": "Dormant S1 semantic admission gate; independent of manual holds and transport generations.",
+      "type": "object",
+      "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
+        "phase": { "enum": ["open", "preparing", "committed_closed"] },
+        "operationId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "proposalHash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "gateRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "censusMutationRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "committedTarget": { "$ref": "#/$defs/bindingSnapshot" }
+      },
+      "required": ["bindingSnapshot", "phase", "operationId", "proposalHash", "gateRevision", "censusMutationRevision"],
+      "additionalProperties": false
+    },
+    "bindingCheckpoint": {
+      "description": "Dormant S1 private checkpoint. Only complete zero census can support commit.",
+      "type": "object",
+      "properties": {
+        "agent_ref": { "$ref": "#/$defs/agi" },
+        "installation_id": { "$ref": "#/$defs/installationId" },
+        "operation_id": { "$ref": "#/$defs/id" },
+        "proposal_hash": { "$ref": "#/$defs/hash" },
+        "binding_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "gate_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "census_mutation_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "runtime_contract_revision": { "const": 16 },
+        "engine_generation": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "status": { "enum": ["complete", "busy", "unknown"] },
+        "nonterminal_starts": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "nonterminal_attempts": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "open_effects": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "unsettled_children": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "mutable_pending_writes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "next_cursor": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
+      },
+      "required": ["agent_ref", "installation_id", "operation_id", "proposal_hash", "binding_revision", "gate_revision", "census_mutation_revision", "runtime_contract_revision", "status", "nonterminal_starts", "nonterminal_attempts", "open_effects", "unsettled_children", "mutable_pending_writes", "next_cursor"],
+      "additionalProperties": false
+    },
+    "bindingIdleReceipt": {
+      "type": "object",
+      "properties": {
+        "schema": { "const": "grimoire.agent_binding.idle.v1" },
+        "agent_ref": { "$ref": "#/$defs/agi" },
+        "installation_id": { "$ref": "#/$defs/installationId" },
+        "operation_id": { "$ref": "#/$defs/id" },
+        "proposal_hash": { "$ref": "#/$defs/hash" },
+        "binding_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "ch_checkpoint": { "$ref": "#/$defs/bindingCheckpoint" },
+        "engine_checkpoint": { "$ref": "#/$defs/bindingCheckpoint" }
+      },
+      "required": ["schema", "agent_ref", "installation_id", "operation_id", "proposal_hash", "binding_revision", "ch_checkpoint", "engine_checkpoint"],
+      "additionalProperties": false
+    },
+    "bindingOperationResult": {
+      "type": "object",
+      "properties": {
+        "agent_ref": { "$ref": "#/$defs/agi" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "binding_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "task_ref": { "oneOf": [{ "$ref": "#/$defs/taskRef" }, { "type": "null" }] },
+        "work_step_id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "installation_id": { "$ref": "#/$defs/installationId" },
+        "phase": { "enum": ["active", "preparing", "committed_await_adopt"] },
+        "operation_id": { "$ref": "#/$defs/id" },
+        "proposal_hash": { "$ref": "#/$defs/hash" },
+        "status": { "enum": ["prepared", "committed", "adopted", "aborted", "unchanged"] }
+      },
+      "required": ["agent_ref", "revision", "binding_revision", "task_ref", "work_step_id", "installation_id", "phase", "operation_id", "proposal_hash", "status"],
+      "additionalProperties": false
+    },
+    "bindingResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema": { "const": "grimoire.agent_binding.result.v1" },
+            "action": { "const": "register_installation" },
+            "status": { "const": "registered" },
+            "installation_id": { "$ref": "#/$defs/installationId" }
+          },
+          "required": ["schema", "action", "status", "installation_id"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": { "const": "grimoire.agent_binding.result.v1" },
+            "action": { "enum": ["prepare", "status", "commit", "abort", "adopt"] },
+            "agent_ref": { "$ref": "#/$defs/agi" },
+            "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "binding_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "task_ref": { "oneOf": [{ "$ref": "#/$defs/taskRef" }, { "type": "null" }] },
+            "work_step_id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+            "installation_id": { "$ref": "#/$defs/installationId" },
+            "phase": { "enum": ["active", "preparing", "committed_await_adopt"] },
+            "operation_id": { "$ref": "#/$defs/id" },
+            "proposal_hash": { "$ref": "#/$defs/hash" },
+            "status": { "enum": ["prepared", "committed", "adopted", "aborted", "unchanged"] },
+            "operation_result": { "$ref": "#/$defs/bindingOperationResult" }
+          },
+          "required": ["schema", "action", "agent_ref", "revision", "binding_revision", "task_ref", "work_step_id", "installation_id", "phase", "operation_id", "proposal_hash", "status", "operation_result"],
+          "additionalProperties": false
+        }
+      ]
     },
     "text": {
       "type": "string",
@@ -1104,10 +1234,33 @@
               "$ref": "#/$defs/intent"
             },
             "payload": {
-              "type": "object",
-              "properties": {},
-              "required": [],
-              "additionalProperties": false
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {},
+                  "required": [],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "text": {
+                      "$ref": "#/$defs/composerText"
+                    },
+                    "clientMessageId": {
+                      "$ref": "#/$defs/id"
+                    },
+                    "attachmentUploadIds": {
+                      "$ref": "#/$defs/attachmentUploadIds"
+                    }
+                  },
+                  "required": [
+                    "text",
+                    "clientMessageId"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
             }
           },
           "required": [
@@ -1835,6 +1988,7 @@
     "receipt": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
         "version": {
           "const": "1.0"
         },
@@ -2010,6 +2164,7 @@
     "historyPage": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
         "version": {
           "const": "1.0"
         },
@@ -2580,6 +2735,9 @@
     "agentSummary": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
+        "bindingPhase": { "enum": ["active", "preparing", "committed_await_adopt"] },
+        "bindingOperationId": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
         "agentInstanceRef": {
           "$ref": "#/$defs/agi"
         },
@@ -3116,9 +3274,48 @@
       ],
       "additionalProperties": false
     },
+    "retryState": {
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "route": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "delayMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "scheduledAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "outcome": {
+          "enum": ["waiting", "succeeded", "failed", "cancelled", "interrupted"]
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": ["attempt", "maxAttempts"],
+      "additionalProperties": false
+    },
     "detailState": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
         "agentInstanceRef": {
           "$ref": "#/$defs/agi"
         },
@@ -3142,6 +3339,16 @@
         },
         "state": {
           "$ref": "#/$defs/runtimeState"
+        },
+        "retry": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/retryState"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "manualHold": {
           "type": "boolean"
@@ -4067,6 +4274,7 @@
         {
           "type": "object",
           "properties": {
+            "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
             "kind": {
               "const": "pending"
             },
@@ -4128,6 +4336,7 @@
         {
           "type": "object",
           "properties": {
+            "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
             "kind": {
               "const": "bound"
             },
@@ -4616,6 +4825,7 @@
     "holdsPage": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
         "version": {
           "const": "1.0"
         },
@@ -5219,6 +5429,7 @@
     "lifecycleActivity": {
       "type": "object",
       "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/bindingSnapshot" },
         "id": {
           "type": "string",
           "minLength": 1,

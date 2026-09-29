@@ -11,6 +11,7 @@ import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/ses
 import { SessionManager } from "../src/session/session-manager";
 import * as storage from "../src/session/storage-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN_ROOT)(
 	"branches and edits real Rocks history before compaction, across inherited prefixes and restart",
@@ -117,6 +118,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					commandId: `${id}-start`,
 					agentInstanceId: id,
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					executionId: `${id}-execution`,
 					attemptId: `${id}-attempt`,
 					authorityGeneration: 1,
@@ -133,6 +135,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				commandId: `${id}-branch`,
 				agentInstanceId: `${id}-branch`,
 				agentInstanceRef: `${agentInstanceRef}-branch`,
+				bindingSnapshot: semanticBinding(`${agentInstanceRef}-branch`),
 				executionId: `${id}-branch-execution`,
 				attemptId: `${id}-branch-attempt`,
 				authorityGeneration: 1,
@@ -161,6 +164,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					commandId: `${id}-edit`,
 					agentInstanceId: id,
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					executionId: `${id}-edit-execution`,
 					attemptId: `${id}-edit-attempt`,
 					input: undefined,
@@ -214,6 +218,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					commandId: `${id}-continue`,
 					agentInstanceId: branch.agentInstanceId,
 					agentInstanceRef: request.agentInstanceRef,
+					bindingSnapshot: request.bindingSnapshot,
 					attemptId: `${id}-continue-attempt`,
 					executionId: `${id}-continue-execution`,
 					authorityGeneration: 1,

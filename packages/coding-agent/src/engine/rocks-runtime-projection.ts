@@ -3,9 +3,11 @@ import {
 	type EngineEvent,
 	type EngineInboxItem,
 	type EngineProfileRouteState,
+	type EngineRetryState,
 	type EngineTarget,
 	EngineTargetError,
 } from "./contracts";
+import { safeEngineErrorDetail } from "./public-error";
 import { encodeCursor } from "./rocks-runtime-cursor";
 import type {
 	RocksAttempt,
@@ -474,6 +476,19 @@ async function projectedTools(
 	return { tools, toolsNextCursor: null };
 }
 
+export function retryFromAttempt(attempt: RocksAttempt): EngineRetryState | undefined {
+	if (attempt.retry_attempt == null || attempt.retry_attempt <= 0) return undefined;
+	return {
+		attempt: Number(attempt.retry_attempt),
+		maxAttempts: Number(attempt.retry_max_attempts),
+		...(attempt.retry_route ? { route: attempt.retry_route } : {}),
+		...(attempt.retry_delay_ms == null ? {} : { delayMs: Math.ceil(Number(attempt.retry_delay_ms)) }),
+		...(attempt.retry_scheduled_at == null ? {} : { scheduledAt: Math.ceil(Number(attempt.retry_scheduled_at)) }),
+		...(attempt.retry_outcome ? { outcome: attempt.retry_outcome } : {}),
+		...(attempt.retry_error ? { error: safeEngineErrorDetail(attempt.retry_error) } : {}),
+	};
+}
+
 export async function projectedDetail(
 	tx: RuntimeTransaction,
 	identity: RocksIdentity,
@@ -518,6 +533,7 @@ export async function projectedDetail(
 	const inputPage = boundedItems(inputs, runtimeLimits.bulkPreviewBytes * 2, runtimeLimits.httpPageRecords);
 	return {
 		agentInstanceRef: identity.agent_instance_ref,
+		...(attempt?.binding_snapshot ? { bindingSnapshot: attempt.binding_snapshot } : {}),
 		attemptId: attempt?.attempt_id ?? null,
 		revision,
 		target: {
@@ -527,6 +543,7 @@ export async function projectedDetail(
 			...(attempt ? { attemptId: attempt.attempt_id, executionId: attempt.execution_id } : {}),
 		},
 		state: attempt?.state ?? "registered",
+		retry: attempt ? (retryFromAttempt(attempt) ?? null) : null,
 		...(profileRoute ? { profileRoute } : {}),
 		manualHold: holds.length > 0,
 		holds: heldPage,
@@ -664,6 +681,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		const detail = await projectedDetail(tx, identity, current, event.eventId);
 		const value = {
 			agentInstanceRef: identity.agent_instance_ref,
+			...(binding?.binding_snapshot ? { bindingSnapshot: binding.binding_snapshot } : {}),
 			rootAgentInstanceRef: identity.root_agent_instance_ref,
 			parentAgentInstanceRef: identity.parent_agent_instance_ref,
 			revision: Math.max(1, identity.summary_revision),
@@ -837,7 +855,13 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		attempt.profile_route_state = JSON.stringify({ ...route, eventSeq: event.seq });
 	}
 	let detail: Record<string, unknown> | null = null;
-	if (summaryEvents.has(event.kind) || toolEvent || event.kind === "profile_route_changed") {
+	if (
+		summaryEvents.has(event.kind) ||
+		toolEvent ||
+		event.kind === "profile_route_changed" ||
+		event.kind === "retry_scheduled" ||
+		event.kind === "retry_settled"
+	) {
 		detail = await projectedDetail(tx, identity, attempt, event.eventId);
 		validateRuntimeValue("detailState", detail);
 		await putProjection(tx, event, "detail", projectionId("detail", event.agentInstanceId, event.attemptId), detail);

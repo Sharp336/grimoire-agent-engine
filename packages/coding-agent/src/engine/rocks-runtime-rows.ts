@@ -7,6 +7,7 @@ export interface RocksIdentity extends RuntimeIdentityRow {
 	updated_at: number;
 }
 export interface RocksBinding {
+	binding_snapshot?: EngineBindingSnapshot["bindingSnapshot"];
 	agent_instance_id: string;
 	binding_id: string;
 	command_id: string;
@@ -103,6 +104,7 @@ export function bindingTarget(binding: EngineBindingSnapshot) {
 }
 export function bindingSnapshot(row: RocksBinding): EngineBindingSnapshot {
 	return {
+		bindingSnapshot: row.binding_snapshot,
 		agentInstanceId: row.agent_instance_id,
 		executionId: row.execution_id,
 		attemptId: row.attempt_id,

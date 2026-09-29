@@ -57,7 +57,7 @@ function resolveYieldPayload(
 	return {
 		value: item.data,
 		fromLastAssistantText: false,
-		missingData: item.data === undefined || item.data === null,
+		missingData: item.data === undefined,
 	};
 }
 

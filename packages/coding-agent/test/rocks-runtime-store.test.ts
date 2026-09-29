@@ -6,6 +6,7 @@ import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
 import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const workerExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const testRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -33,6 +34,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				engineGeneration: generation,
 				agentInstanceId: `agent-${suffix}`,
 				agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/${suffix}`,
+				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/runtime-fixture/agents/${suffix}`),
 				executionId: `execution-${suffix}`,
 				attemptId: `attempt-${suffix}`,
 				authorityGeneration: 1,
@@ -227,6 +229,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				commandId: `cancel-before-start-${suffix}`,
 				agentInstanceId: `cancel-agent-${suffix}`,
 				agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/cancel-${suffix}`,
+				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/runtime-fixture/agents/cancel-${suffix}`),
 				engineGeneration: nextGeneration,
 			};
 			await store.registerAgent(cancelled);

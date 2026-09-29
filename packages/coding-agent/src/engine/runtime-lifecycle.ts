@@ -1,4 +1,5 @@
 import type { EngineEvent } from "./contracts";
+import { safeEngineErrorDetail } from "./public-error";
 
 const lifecycleKinds = {
 	running: ["started", "Attempt started"],
@@ -23,7 +24,7 @@ export function lifecycleSummary(event: Pick<EngineEvent, "kind" | "payload">): 
 		return [
 			retry.attempt === undefined ? "" : `attempt ${retry.attempt}/${retry.maxAttempts}`,
 			retry.route,
-			retry.error,
+			retry.error ? safeEngineErrorDetail(retry.error) : undefined,
 		]
 			.filter(Boolean)
 			.join(" · ")

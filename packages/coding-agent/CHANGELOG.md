@@ -10,6 +10,11 @@
 
 ### Fixed
 
+- Shared OpenAI Responses accounts now accept hosted broker execution material, retaining the existing identity, execution-pin, broker-token and transport checks.
+- Sending a message with Resume persists it before releasing the pause and continues the same Attempt. Retried commands do not append the message twice; uncertain delivery remains explicit instead of silently resending or starting another Attempt.
+- Child results retain bounded structured yield data and schema-validation status through local and hosted launchers to the parent task tool. A final error yield fails the child even after partial sections; plain-text final yields stay unquoted, and oversized results retain their transcript reference.
+- Tool argument normalization preserves values already valid for a union branch, including explicit schema-approved null, instead of discarding them while repairing another branch.
+- Runtime detail snapshots and state updates now expose the current Attempt's retry wait and settlement without changing command targets. Fractional provider delays are rounded only in the public observation; recovery and new Attempts clear stale waiting state.
 - Managed (`--status-file`) logins for loopback OAuth providers with paste-code fallback (Anthropic, Z.ai, OpenRouter) stay in `authorization_required` until the loopback callback, instead of failing with `oauth_login_failed` because the headless flow had no interactive paste prompt.
 - Python shell, Bash, and pip subprocesses no longer open extra console windows on Windows.
 - Engine agents retain their canonical display names and delegation hints without changing chat identity or routing.

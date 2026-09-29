@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 
 describe("subagent warning injection", () => {
-	it("injects null-data warning when yield is success without data", () => {
+	it("injects missing-data warning when yield succeeds without data", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "partial output",
 			exitCode: 0,
@@ -20,6 +20,23 @@ describe("subagent warning injection", () => {
 
 		expect(result.rawOutput).toBe(`${SUBAGENT_WARNING_NULL_YIELD}\n\npartial output`);
 		expect(result.hasYield).toBe(true);
+	});
+
+	it("preserves schema-approved null yield data instead of treating it as omitted", () => {
+		const result = finalizeSubprocessOutput({
+			rawOutput: "partial output",
+			exitCode: 0,
+			stderr: "",
+			doneAborted: false,
+			signalAborted: false,
+			yieldItems: [{ status: "success", data: null }],
+			outputSchema: { type: "null" },
+			outputSchemaSource: "session",
+		});
+
+		expect(result.rawOutput).toBe("null");
+		expect(result.exitCode).toBe(0);
+		expect(result.structuredOutput).toMatchObject({ status: "valid", data: null });
 	});
 
 	it("injects missing-submit warning when subagent exits cleanly without yield", () => {

@@ -7,6 +7,7 @@ import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
 import type { StorageRuntimeIndex } from "../src/session/storage-protocol";
 import { startStorageWorker } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const workerExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const testRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -35,6 +36,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				engineGeneration: generation,
 				agentInstanceId,
 				agentInstanceRef: `grimoire://tasks/grimoire/native-delete-fixture/agents/${suffix}`,
+				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/native-delete-fixture/agents/${suffix}`),
 				executionId: `execution-${suffix}`,
 				attemptId: `attempt-old-${suffix}`,
 				authorityGeneration: 1,
@@ -188,6 +190,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				engineGeneration: generation,
 				agentInstanceId,
 				agentInstanceRef: `grimoire://tasks/grimoire/native-abandon-fixture/agents/${suffix}`,
+				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/native-abandon-fixture/agents/${suffix}`),
 				executionId: `execution-${suffix}`,
 				attemptId: `attempt-${suffix}`,
 				authorityGeneration: 1,

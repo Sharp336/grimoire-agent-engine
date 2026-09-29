@@ -23,9 +23,11 @@ import {
 import { engineAgentId, engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
+import { EngineCommandConflictError } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
@@ -45,6 +47,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const client = await connect({ servers: broker.url });
 		const command = startCommand(runtime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
 		command.agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/agent";
+		command.bindingSnapshot = semanticBinding(command.agentInstanceRef);
 		command.principalId = "owner";
 		command.browserPayloadHash = `sha256:${"a".repeat(64)}`;
 		command.browserTarget = { agentInstanceRef: command.agentInstanceRef };
@@ -273,6 +276,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				{
 					commandId: "queue-start",
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 					principalId: "queue-owner",
 					executionId: "queue-execution",
@@ -348,26 +352,199 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}
 	}, 30000);
 
+	it("redelivers a released paused message Resume claim through NATS without a second user entry or Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-resume-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const models = new ModelRegistry(auth, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		registerMockApi("nats-paused-resume");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["initial"] };
+				},
+				{ content: ["corrected"] },
+			],
+		});
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
+			sessionDefaults: {
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
+				model: mock.model,
+				modelRegistry: models,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			},
+		});
+		const profile = { spawns: "", profileDigest: "resume-profile", enableMCP: false, enableLsp: false };
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "resume-device",
+			engineId: "resume-engine",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => profile,
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const agentInstanceRef = "grimoire://tasks/grimoire/resume-boundary/agents/paused";
+			const started = await runtime.start({
+				commandId: "nats-resume-start",
+				agentInstanceRef,
+				bindingSnapshot: semanticBinding(agentInstanceRef),
+				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+				principalId: "owner",
+				executionId: "nats-resume-execution",
+				attemptId: "nats-resume-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "initial work",
+			}, profile);
+			await entered.promise;
+			const hold = await runtime.pause({
+				...started,
+				commandId: "nats-resume-pause",
+				initiator: { kind: "human" },
+				expectedIntentRevision: started.intentRevision,
+			});
+			release.resolve();
+			await waitFor(async () => (await runtime.store.getAttempt(started.attemptId))?.state === "paused");
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "nats-resume-message",
+				op: "resume",
+				deviceId: "resume-device",
+				engineId: "resume-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				agentInstanceRef,
+				runtimeBindingId: started.bindingId,
+				bindingGeneration: started.bindingGeneration,
+				executionId: started.executionId,
+				attemptId: started.attemptId,
+				authorityGeneration: started.authorityGeneration,
+				principalId: "owner",
+				browserPayloadHash: `sha256:${"a".repeat(64)}`,
+				browserTarget: { agentInstanceRef, executionId: started.executionId, attemptId: started.attemptId },
+				issuedAt: Date.now(),
+				payload: {
+					initiator: { kind: "human" },
+					expectedIntentRevision: hold.intentRevision,
+					text: "correct this answer",
+					clientMessageId: "nats-resume-user-message",
+				},
+			};
+			const identity = engineCommandIdentity(command);
+			expect(await runtime.store.admitCommand(identity, runtime.engineGeneration)).toMatchObject({ status: "claimed" });
+			await runtime.store.releaseCommand(command.commandId, identity.canonicalHash, runtime.engineGeneration);
+			const subject = adapter.commandSubject(started.agentInstanceId, "resume");
+			await jetstream(client).publish(subject, JSON.stringify(command), { msgID: "resume-released-claim" });
+			await waitFor(async () =>
+				(await runtime.store.runtimeCommand(command.commandId, { principalId: "owner" })).stage === "applied",
+			);
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+			expect(mock.calls).toHaveLength(2);
+			const session = runtime.agentRegistry.get(started.engineAgentId)?.session;
+			expect(session?.sessionManager.getContextBranch().filter(entry =>
+				entry.type === "message" && entry.clientMessageId === "nats-resume-user-message",
+			)).toHaveLength(1);
+			expect(await runtime.store.admitCommand(identity, runtime.engineGeneration)).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "applied" },
+			});
+			expect(mock.calls).toHaveLength(2);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		} finally {
+			release.resolve();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			auth.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
 	it("runs two agent command routes, event outbox and an offline durable mailbox", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		authStorage.setRuntimeApiKey("mock", "isolated-test");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd);
 		fs.writeFileSync(path.join(cwd, "permit.txt"), "approved through broker");
 		let dispatchCount = 0;
 		let permitExecuted = false;
-		const runtime = await EngineRuntime.create({
+		let hubQueueId = "";
+		const runningA = Promise.withResolvers<void>();
+		const releaseA = Promise.withResolvers<void>();
+		registerMockApi("nats-native-tool-turns");
+		const toolModel = createMockModel({
+			handler: async context => {
+				const results = context.messages.filter(message => message.role === "toolResult");
+				const user = context.messages.findLast(message => message.role === "user");
+				if (JSON.stringify(user?.content ?? "").includes("NATIVE HUB")) {
+					const steps = [
+						{ id: "hub-inbox-list", args: { op: "inbox" } },
+						{ id: "hub-inbox-edit", args: { op: "inbox", inboxAction: "edit", queueId: hubQueueId,
+							expectedRevision: 1, deliveryPayload: "edited through native hub" } },
+						{ id: "hub-inbox-edit-replay", args: { op: "inbox", inboxAction: "edit", queueId: hubQueueId,
+							expectedRevision: 1, deliveryPayload: "edited through native hub" } },
+						{ id: "hub-inbox-defer", args: { op: "inbox", inboxAction: "defer", queueId: hubQueueId,
+							expectedRevision: 2, deliverAt: Date.now() + 50 } },
+					];
+					for (const step of steps) {
+						const result = results.find(message => message.toolCallId === step.id);
+						if (!result) {
+							if (step.id === "hub-inbox-defer")
+								expect(await runtime.store.getInboxItemByQueueId(hubQueueId)).toMatchObject({
+									sourceBody: "broker round trip", deliveryPayload: "edited through native hub", revision: 2,
+								});
+							return { content: [{ type: "toolCall" as const, id: step.id, name: "hub", arguments: step.args }] };
+						}
+						expect(result.isError).toBeFalse();
+						if (step.id === "hub-inbox-list") expect(JSON.stringify(result.content)).toContain("broker round trip");
+					}
+					return { content: ["Inbox updated through native hub"] };
+				}
+				const readResult = results.find(message => message.toolCallId === "read-permit");
+				if (!readResult)
+					return { content: [{ type: "toolCall" as const, id: "read-permit", name: "read", arguments: { path: "permit.txt" } }] };
+				expect(readResult.isError).toBeFalse();
+				expect(JSON.stringify(readResult.content)).toContain("approved through broker");
+				permitExecuted = true;
+				return { content: ["Approved file read completed"] };
+			},
+		});
+		const runtime: EngineRuntime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async (session, input, identity) => {
 				dispatchCount++;
+				// Tracked tools must run through the agent loop so their toolResult is durably persisted.
+				if (session.getAgentId() === engineAgentId("agent-permit") || input === "NATIVE HUB")
+					return session.prompt(input, identity);
 				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-				if (session.getAgentId() === engineAgentId("agent-permit")) {
-					const read = session.getToolByName("read");
-					if (!read) throw new Error("read tool is unavailable");
-					await read.execute("read-permit", { path: "permit.txt" });
-					permitExecuted = true;
+				if (session.getAgentId() === engineAgentId("agent-a") && input === "A") {
+					runningA.resolve();
+					await releaseA.promise;
 				}
 				return true;
 			},
@@ -387,9 +564,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				enableMCP: false,
 				enableLsp: false,
 				modelRegistry,
+				model: toolModel.model,
 			},
 		});
 		const errors: Error[] = [];
+		const reportFailure = new Error("Conflict reporter failed");
+		let failConflictReport = false;
 		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
@@ -400,7 +580,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			authorizeMessage: () => {},
 			resolveLaunchProfile: command =>
 				command.agentInstanceId === "agent-permit" ? { ...profile, toolPolicies: { read: "permit" } } : profile,
-			onError: error => errors.push(error),
+			onError: error => {
+				errors.push(error);
+				if (failConflictReport && error instanceof EngineCommandConflictError) {
+					failConflictReport = false;
+					throw reportFailure;
+				}
+			},
 		});
 		const client = await connect({ servers: broker.url });
 		try {
@@ -425,9 +611,17 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					permitEvents.push(JSON.parse(decoder.decode(message.data)));
 				},
 			});
+			const commandConsumer = `engine_${adapter.engineRoute}`;
+			const terminatedCommands: Array<Record<string, unknown>> = [];
+			const terminatedSub = client.subscribe(
+				`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.${ENGINE_COMMAND_STREAM}.${commandConsumer}`,
+				{ callback: (_error, message) => { terminatedCommands.push(JSON.parse(decoder.decode(message.data))); } },
+			);
+			await client.flush();
 
 			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
 			commandA.agentInstanceRef = "grimoire://tasks/grimoire/nats-test/agents/agent-a";
+			commandA.bindingSnapshot = semanticBinding(commandA.agentInstanceRef);
 			commandA.payload.clientMessageId = "client-message-a";
 			commandA.payload = {
 				...commandA.payload,
@@ -443,6 +637,54 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					msgID: commandB.commandId,
 				}),
 			]);
+			await runningA.promise;
+			await waitFor(async () =>
+				(await runtime.store.admitCommand(engineCommandIdentity(commandA), runtime.engineGeneration)).status === "replay",
+			);
+			const originalAReceipt = await runtime.store.admitCommand(engineCommandIdentity(commandA), runtime.engineGeneration);
+			const originalAIdentity = await runtime.store.getStartConversationIdentity(commandA.commandId);
+			const originalAAttempt = (await runtime.store.getAttempt(commandA.attemptId!))!;
+			expect(originalAAttempt.state).toBe("running");
+			const conflictDelivery = await js.publish(
+				adapter.commandSubject("agent-a", "start"),
+				JSON.stringify({ ...commandA, issuedAt: Date.now(), payload: { ...commandA.payload, input: "CHANGED" } }),
+				{ msgID: "transport-command-a-conflict" },
+			);
+			await waitFor(async () =>
+				terminatedCommands.some(event => event.stream_seq === conflictDelivery.seq) &&
+				(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).num_ack_pending === 0,
+			);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toBeInstanceOf(EngineCommandConflictError);
+			expect(errors[0]).toMatchObject({ reason: "canonical_content" });
+			errors.splice(0, 1);
+			await adapter.flushEvents();
+			await waitFor(() => eventsA.some(event => event.type === "attempt.started"));
+			expect(eventsA.filter(event =>
+				event.type === "command.rejected" || ["attempt.completed", "attempt.failed", "attempt.cancelled", "attempt.interrupted"].includes(String(event.type)),
+			)).toEqual([]);
+			expect((await runtime.store.pendingEventsForSink("test-running-conflict-audit")).events.filter(event =>
+				event.causationCommandId === commandA.commandId &&
+				["rejected", "completed", "failed", "cancelled", "interrupted"].includes(event.kind),
+			)).toEqual([]);
+			expect(await runtime.store.admitCommand(engineCommandIdentity(commandA), runtime.engineGeneration)).toEqual(originalAReceipt);
+			expect(await runtime.store.getStartConversationIdentity(commandA.commandId)).toEqual(originalAIdentity);
+			// The original running Attempt may advance its transcript while the collision is terminated.
+			const retainedAAttempt = (await runtime.store.getAttempt(commandA.attemptId!))!;
+			expect(retainedAAttempt.binding_snapshot).toEqual(originalAAttempt.binding_snapshot);
+			expect(retainedAAttempt).toMatchObject({
+				agent_instance_id: originalAAttempt.agent_instance_id,
+				execution_id: originalAAttempt.execution_id,
+				attempt_id: originalAAttempt.attempt_id,
+				command_id: originalAAttempt.command_id,
+				binding_id: originalAAttempt.binding_id,
+				engine_generation: originalAAttempt.engine_generation,
+				binding_generation: originalAAttempt.binding_generation,
+				authority_generation: originalAAttempt.authority_generation,
+				state: "running",
+				cause: originalAAttempt.cause,
+			});
+			releaseA.resolve();
 			await waitFor(async () =>
 				(await Promise.all([runtime.store.getAttempt("attempt-a"), runtime.store.getAttempt("attempt-b")])).every(
 					attempt => attempt?.state === "completed",
@@ -456,21 +698,35 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			);
 			expect(eventsA.every(event => event.agentInstanceId === "agent-a")).toBeTrue();
 			expect(eventsB.every(event => event.agentInstanceId === "agent-b")).toBeTrue();
-			expect(eventsA.map(event => event.type)).toEqual([
-				"attempt.agent_registered",
-				"command.accepted",
-				"attempt.started",
-				"model.started",
-				"model.settled",
-				"attempt.completed",
-			]);
-			expect(eventsB.map(event => event.type)).toEqual([
-				"command.accepted",
-				"attempt.started",
-				"model.started",
-				"model.settled",
-				"attempt.completed",
-			]);
+			for (const [events, command] of [[eventsA, commandA], [eventsB, commandB]] as const) {
+				// A durable checkpoint may be observed between model lifecycle events.
+				// It must retain this exact occurrence, not masquerade as another lifecycle transition.
+				for (const event of events.filter(event => event.type === "reconcile.snapshot")) {
+					expect(event).toMatchObject({
+						agentInstanceId: command.agentInstanceId,
+						attemptId: command.attemptId,
+						executionId: command.executionId,
+						causationCommandId: command.commandId,
+						bindingSnapshot: command.bindingSnapshot,
+						payload: { transcriptCheckpoint: { sessionPath: expect.stringMatching(/^native:/) } },
+					});
+					const payload = event.payload;
+					if (!payload || typeof payload !== "object" || !("transcriptCheckpoint" in payload))
+						throw new Error("Reconciliation observation has no checkpoint");
+					const checkpoint = payload.transcriptCheckpoint;
+					if (!checkpoint || typeof checkpoint !== "object" || !("revision" in checkpoint))
+						throw new Error("Reconciliation checkpoint has no revision");
+					expect(checkpoint.revision).toBeGreaterThan(0);
+				}
+				expect(events.filter(event => event.type !== "reconcile.snapshot").map(event => event.type)).toEqual([
+					"attempt.agent_registered",
+					"command.accepted",
+					"attempt.started",
+					"model.started",
+					"model.settled",
+					"attempt.completed",
+				]);
+			}
 			expect(dispatchCount).toBe(2);
 			expect(await runtime.sessionHistoryPage("agent-a", "grimoire://tasks/grimoire/nats/agents/a")).toMatchObject({
 				entries: [
@@ -523,7 +779,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await adapter.flushEvents();
 			await waitFor(() => permitEvents.some(event => event.type === "attempt.completed"));
 			expect(permitExecuted).toBeTrue();
-			expect(permitEvents.map(event => event.type)).toEqual([
+			expect(permitEvents.filter(event =>
+				/^(?:command|tool|model)\./.test(String(event.type)) ||
+				/^attempt\.(?:agent_registered|started|completed|failed|cancelled|interrupted)$/.test(String(event.type)),
+			).map(event => event.type)).toEqual([
+				"attempt.agent_registered",
 				"command.accepted",
 				"attempt.started",
 				"model.started",
@@ -544,39 +804,23 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(receipt.outcome).toBe("queued");
 			const rootB = runtime.agentRegistry.get(engineAgentId("agent-b"));
 			if (!rootB?.session) throw new Error("root B session is unavailable");
-			const bindingB = await runtime.store.getBinding("agent-b");
-			if (!bindingB) throw new Error("root B binding is unavailable");
-			await waitFor(async () => (await runtime.listInbox(bindingB)).length === 1);
-			expect(await runtime.listInbox(bindingB)).toMatchObject([
+			const initialBindingB = await runtime.store.getBinding("agent-b");
+			if (!initialBindingB) throw new Error("root B binding is unavailable");
+			await waitFor(async () => (await runtime.listInbox(initialBindingB)).length === 1);
+			expect(await runtime.listInbox(initialBindingB)).toMatchObject([
 				{ sourceType: "agent", sender: "agent-a", deliveryPayload: "broker round trip", disposition: "pending" },
 			]);
 			expect(JSON.stringify(rootB.session.messages)).not.toContain("broker round trip");
 			expect(JSON.stringify(rootB.session.messages)).not.toContain("engine:inbox_changed");
-			const hub = rootB.session.getToolByName("hub");
-			if (!hub) throw new Error("root B hub tool is unavailable");
-			const hubList = await hub.execute("hub-inbox-list", { op: "inbox" });
-			expect(hubList.content[0]?.type === "text" ? hubList.content[0].text : "").toContain("broker round trip");
-			await hub.execute("hub-inbox-edit", {
-				op: "inbox",
-				inboxAction: "edit",
-				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
-				expectedRevision: 1,
-				deliveryPayload: "edited through native hub",
+			hubQueueId = (await runtime.listInbox(initialBindingB))[0]!.queueId;
+			const hubStart = startCommand(runtime.engineGeneration, "agent-b", "native-hub", cwd);
+			hubStart.payload.input = "NATIVE HUB";
+			await js.publish(adapter.commandSubject("agent-b", "start"), JSON.stringify(hubStart), {
+				msgID: hubStart.commandId,
 			});
-			await waitFor(() =>
-				eventsB.some(
-					event =>
-						event.type === "attempt.inbox_changed" &&
-						(event.payload as Record<string, unknown>).action === "edit",
-				),
-			);
-			await hub.execute("hub-inbox-edit-replay", {
-				op: "inbox",
-				inboxAction: "edit",
-				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
-				expectedRevision: 1,
-				deliveryPayload: "edited through native hub",
-			});
+			await waitFor(async () => (await runtime.store.getAttempt(hubStart.attemptId!))?.state === "completed");
+			const bindingB = await runtime.store.getBinding("agent-b");
+			if (!bindingB) throw new Error("Native hub Attempt binding is unavailable");
 			await adapter.flushEvents();
 			expect(
 				eventsB.filter(
@@ -588,14 +832,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect((await runtime.listInbox(bindingB))[0]).toMatchObject({
 				sourceBody: "broker round trip",
 				deliveryPayload: "edited through native hub",
-				revision: 2,
-			});
-			await hub.execute("hub-inbox-defer", {
-				op: "inbox",
-				inboxAction: "defer",
-				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
-				expectedRevision: 2,
-				deliverAt: Date.now() + 50,
 			});
 			await waitFor(() =>
 				eventsB.some(
@@ -634,7 +870,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			]);
 			runtime.agentRegistry.unregister("native-child-b1", rootB.session);
 
-			const commandConsumer = `engine_${adapter.engineRoute}`;
 			const deliveredBefore = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
 				.consumer_seq;
 			const duplicateA = { ...commandA, commandId: "command-a-redelivery", issuedAt: Date.now() };
@@ -646,7 +881,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered.consumer_seq >
 					deliveredBefore,
 			);
-			expect(dispatchCount).toBe(3);
+			expect(dispatchCount).toBe(4);
 
 			const deliveredBeforeReplay = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
 				.consumer_seq;
@@ -657,28 +892,80 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					msgID: "transport-command-a-replay",
 				},
 			);
-			await waitFor(
-				async () =>
-					(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered.consumer_seq >
-					deliveredBeforeReplay,
-			);
-			expect(dispatchCount).toBe(3);
-
-			const deliveredBeforeConflict = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
-				.delivered.consumer_seq;
-			await js.publish(
-				adapter.commandSubject("agent-a", "start"),
-				JSON.stringify({ ...commandA, issuedAt: Date.now(), payload: { ...commandA.payload, input: "CHANGED" } }),
-				{ msgID: "transport-command-a-conflict" },
-			);
 			await waitFor(async () => {
 				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer);
-				return info.delivered.consumer_seq > deliveredBeforeConflict && info.num_ack_pending === 0;
+				return info.delivered.consumer_seq > deliveredBeforeReplay && info.num_pending === 0 && info.num_ack_pending === 0;
 			});
-			const conflict = errors.findIndex(error => error.message.includes("different canonical content"));
-			expect(conflict).toBeGreaterThanOrEqual(0);
-			errors.splice(conflict, 1);
-			expect(dispatchCount).toBe(3);
+			expect(dispatchCount).toBe(4);
+			// Reconcile settles inside commitEvent, before the adapter's final settleCommand call.
+			// Hold dispatch after admission so the known winner is durable before the real loser runs.
+			const settlementCommand: EngineCommandEnvelope = {
+				...commandA, commandId: "command-settlement-race", op: "reconcile", payload: {},
+			};
+			const winningReceipt = { outcome: "rejected" as const, detail: { code: "cancelled" } };
+			const settlementIdentity = engineCommandIdentity(settlementCommand);
+			const settlementEntered = Promise.withResolvers<void>();
+			const releaseSettlement = Promise.withResolvers<void>();
+			const reconcile = runtime.reconcile.bind(runtime);
+			const racingSettlement = spyOn(runtime, "reconcile").mockImplementation(async request => {
+				if (request.commandId === settlementCommand.commandId) {
+					settlementEntered.resolve();
+					await releaseSettlement.promise;
+				}
+				return reconcile(request);
+			});
+			failConflictReport = true;
+			try {
+				const delivery = await js.publish(
+					adapter.commandSubject("agent-a", "reconcile"), JSON.stringify(settlementCommand),
+					{ msgID: settlementCommand.commandId },
+				);
+				await settlementEntered.promise;
+				expect(await runtime.store.admitCommand(settlementIdentity, runtime.engineGeneration)).toEqual({
+					status: "in_progress",
+				});
+				await runtime.store.settleCommand(
+					settlementIdentity.commandId, settlementIdentity.canonicalHash, winningReceipt,
+				);
+				expect(await runtime.store.admitCommand(settlementIdentity, runtime.engineGeneration)).toEqual({
+					status: "replay", receipt: winningReceipt,
+				});
+				releaseSettlement.resolve();
+				await waitFor(async () =>
+					terminatedCommands.some(event => event.stream_seq === delivery.seq) &&
+					(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).num_ack_pending === 0,
+				);
+				await waitFor(() => errors.includes(reportFailure));
+				expect(errors).toHaveLength(2);
+				expect(errors[0]).toBeInstanceOf(EngineCommandConflictError);
+				expect(errors[0]).toMatchObject({ reason: "receipt" });
+				expect(errors[1]).toBe(reportFailure);
+				errors.splice(0, 2);
+				expect(await runtime.store.admitCommand(
+					settlementIdentity, runtime.engineGeneration,
+				)).toEqual({ status: "replay", receipt: winningReceipt });
+				expect((await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).num_redelivered).toBe(0);
+				await adapter.flushEvents();
+				expect(eventsA.filter(event =>
+					event.causationCommandId === settlementCommand.commandId ||
+					(event.type === "command.rejected" && event.causationCommandId === commandA.commandId),
+				)).toEqual([]);
+				expect((await runtime.store.pendingEventsForSink("test-settlement-conflict-audit")).events.filter(event =>
+					event.causationCommandId === settlementCommand.commandId ||
+					(event.kind === "rejected" && event.causationCommandId === commandA.commandId),
+				)).toEqual([]);
+				expect(await runtime.store.admitCommand(engineCommandIdentity(commandA), runtime.engineGeneration)).toEqual(originalAReceipt);
+				expect(await runtime.store.getStartConversationIdentity(commandA.commandId)).toEqual(originalAIdentity);
+				expect(await runtime.store.getAttempt(commandA.attemptId!)).toMatchObject({
+					state: "completed", command_id: commandA.commandId, execution_id: commandA.executionId,
+					binding_id: originalAAttempt.binding_id, binding_generation: originalAAttempt.binding_generation,
+					binding_snapshot: originalAAttempt.binding_snapshot,
+				});
+				expect(dispatchCount).toBe(4);
+			} finally {
+				releaseSettlement.resolve();
+				racingSettlement.mockRestore();
+			}
 
 			const deliveredAfterDuplicate = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
 				.delivered.consumer_seq;
@@ -708,7 +995,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				status: "replay",
 				receipt: { outcome: "rejected", detail: { code: "interrupted", requiresExplicitContinue: true } },
 			});
-			expect(dispatchCount).toBe(3);
+			expect(dispatchCount).toBe(4);
 
 			const invalidHistoryBranch = startCommand(runtime.engineGeneration, "agent-a", "invalid-history", cwd);
 			invalidHistoryBranch.payload.historyEdit = {
@@ -735,12 +1022,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				receipt: { outcome: "rejected", detail: { code: "invalid_request" } },
 			});
 			expect(await runtime.store.getAttempt(invalidHistoryBranch.attemptId!)).toBeUndefined();
-			expect(dispatchCount).toBe(3);
+			expect(dispatchCount).toBe(4);
 
 			const mismatchedIdentityA = {
 				...startCommand(runtime.engineGeneration, "agent-a", "mismatched-identity", cwd),
 				commandId: "command-a-mismatched-identity",
 				agentInstanceRef: "grimoire://tasks/other/task/agents/agent-a",
+				bindingSnapshot: semanticBinding("grimoire://tasks/other/task/agents/agent-a"),
 			};
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(mismatchedIdentityA), {
 				msgID: mismatchedIdentityA.commandId,
@@ -750,7 +1038,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					event => event.type === "command.rejected" && event.causationCommandId === mismatchedIdentityA.commandId,
 				),
 			);
-			expect(dispatchCount).toBe(3);
+			expect(dispatchCount).toBe(4);
 
 			const futureGenerationA = {
 				...startCommand(runtime.engineGeneration + 1, "agent-a", "stale", cwd),
@@ -764,9 +1052,23 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					event => event.type === "command.rejected" && event.causationCommandId === futureGenerationA.commandId,
 				),
 			);
-			expect(dispatchCount).toBe(3);
+			expect(eventsA.find(event => event.causationCommandId === futureGenerationA.commandId &&
+				event.type === "command.rejected")).toMatchObject({
+				agentInstanceId: futureGenerationA.agentInstanceId,
+				attemptId: futureGenerationA.attemptId,
+				executionId: futureGenerationA.executionId,
+				engineGeneration: runtime.engineGeneration,
+				payload: { code: "stale_target" },
+			});
+			expect(await runtime.store.admitCommand(engineCommandIdentity(futureGenerationA), runtime.engineGeneration))
+				.toMatchObject({ status: "replay", receipt: { outcome: "rejected", detail: { code: "stale_target" } } });
+			expect(await runtime.store.getAttempt(futureGenerationA.attemptId!)).toBeUndefined();
+			expect((await runtime.store.getStartConversationIdentity(futureGenerationA.commandId))?.engineGeneration)
+				.toBe(futureGenerationA.engineGeneration);
+			expect(dispatchCount).toBe(4);
 			subA.unsubscribe();
 			subB.unsubscribe();
+			terminatedSub.unsubscribe();
 
 			await adapter.provisionMailbox("agent-c");
 			const message = {
@@ -797,12 +1099,20 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect((await manager.streams.info(AGENT_MESSAGE_STREAM)).config.retention).toBe("workqueue");
 			expect(errors).toEqual([]);
 		} finally {
-			await client.drain();
-			await adapter.dispose();
-			await runtime.dispose();
-			authStorage.close();
-			broker.process.kill();
-			await broker.process.exited;
+			releaseA.resolve();
+			const cleanupErrors: unknown[] = [];
+			for (const close of [
+				() => client.drain(),
+				() => adapter.stopAdmission(),
+				() => runtime.dispose({ closeStore: false }),
+				() => adapter.dispose(),
+				() => runtime.store.close(),
+				() => authStorage.close(),
+				async () => { broker.process.kill(); await broker.process.exited; },
+			]) {
+				try { await close(); } catch (error) { cleanupErrors.push(error); }
+			}
+			if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "NATS route fixture teardown failed");
 		}
 	}, 60000);
 
@@ -1535,6 +1845,8 @@ function startCommand(
 		engineId: "engine-1",
 		engineGeneration,
 		agentInstanceId,
+		agentInstanceRef: `grimoire://tasks/grimoire/nats-test/agents/${agentInstanceId}`,
+		bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/nats-test/agents/${agentInstanceId}`),
 		executionId: `execution-${suffix}`,
 		attemptId: `attempt-${suffix}`,
 		authorityGeneration: 1,

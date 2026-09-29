@@ -30,7 +30,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/types";
+import { canSpawnAtDepth, type StructuredSubagentOutput, type StructuredSubagentSchemaMode } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
@@ -145,11 +145,13 @@ export interface EngineChildProfile {
 	description?: string;
 }
 
+/** Native Attempt result retained independently of bounded assistant text. */
 export interface EngineChildLaunchResult {
 	agentInstanceId: string;
 	agentInstanceRef?: string;
 	status: "completed" | "failed" | "cancelled";
 	assistantFinal?: string;
+	structuredOutput?: StructuredSubagentOutput;
 	transcriptRef?: string;
 	outputTruncated?: boolean;
 	error?: string;

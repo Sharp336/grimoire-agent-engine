@@ -17,6 +17,7 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/session/rocks-native-session-storage";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -89,6 +90,7 @@ it.skipIf(!(executable && runRoot))(
 					commandId: `first-${suffix}`,
 					agentInstanceId,
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					principalId,
 					executionId: `first-execution-${suffix}`,
 					attemptId: `first-attempt-${suffix}`,
@@ -263,6 +265,7 @@ it.skipIf(!(executable && runRoot))(
 					commandId: `stale-${suffix}`,
 					agentInstanceId,
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					principalId,
 					executionId: `stale-execution-${suffix}`,
 					attemptId: `stale-attempt-${suffix}`,
@@ -298,6 +301,7 @@ it.skipIf(!(executable && runRoot))(
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId,
 				agentInstanceRef,
+				bindingSnapshot: semanticBinding(agentInstanceRef),
 				principalId,
 				executionId: `rejected-execution-${suffix}`,
 				attemptId: `rejected-attempt-${suffix}`,
@@ -358,6 +362,7 @@ it.skipIf(!(executable && runRoot))(
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId,
 				agentInstanceRef,
+				bindingSnapshot: semanticBinding(agentInstanceRef),
 				principalId,
 				executionId: `continued-execution-${suffix}`,
 				attemptId: `continued-attempt-${suffix}`,
@@ -409,6 +414,7 @@ it.skipIf(!(executable && runRoot))(
 					commandId: `after-restart-${suffix}`,
 					agentInstanceId,
 					agentInstanceRef,
+					bindingSnapshot: semanticBinding(agentInstanceRef),
 					principalId,
 					executionId: `after-restart-execution-${suffix}`,
 					attemptId: `after-restart-attempt-${suffix}`,

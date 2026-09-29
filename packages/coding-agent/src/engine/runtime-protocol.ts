@@ -1,4 +1,4 @@
-import { EngineTargetError } from "./contracts";
+import { type EngineSemanticBindingSnapshot, EngineTargetError } from "./contracts";
 import {
 	canonicalRuntimeJson,
 	RuntimeProtocolError,
@@ -6,7 +6,7 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:5fde4007be67e50e2db35499d2c0c0b2e55d27749ef887fb012d0ecbd0cd3369";
+export const RUNTIME_PROTOCOL_HASH = "sha256:254c2c6344f1b94c20fea21267e93740a65c04d468cc25f275a19d95bd349a42";
 export const runtimeOriginIdChars = protocol.$defs.id.maxLength;
 export const runtimeLimits = protocol["x-artel"].limits;
 export const runtimeToolPageRecords = protocol.$defs.toolsPage.properties.items.maxItems;
@@ -27,6 +27,68 @@ export interface RuntimeAccess {
 	principalId: string;
 	authorizedAgentInstanceRefs?: string[];
 }
+
+/** Frozen revision-16 shapes. S0 does not activate these S1 admission operations. */
+export interface RuntimeBindingGate {
+	bindingSnapshot: EngineSemanticBindingSnapshot;
+	phase: "open" | "preparing" | "committed_closed";
+	operationId: string | null;
+	proposalHash: string | null;
+	gateRevision: number;
+	censusMutationRevision: number;
+	committedTarget?: EngineSemanticBindingSnapshot;
+}
+
+export interface RuntimeBindingCheckpoint {
+	agent_ref: string;
+	installation_id: string;
+	operation_id: string;
+	proposal_hash: string;
+	binding_revision: number;
+	gate_revision: number;
+	census_mutation_revision: number;
+	runtime_contract_revision: 16;
+	engine_generation?: number;
+	status: "complete" | "busy" | "unknown";
+	nonterminal_starts: number;
+	nonterminal_attempts: number;
+	open_effects: number;
+	unsettled_children: number;
+	mutable_pending_writes: number;
+	next_cursor: string | null;
+}
+
+export interface RuntimeBindingIdleReceipt {
+	schema: "grimoire.agent_binding.idle.v1";
+	agent_ref: string;
+	installation_id: string;
+	operation_id: string;
+	proposal_hash: string;
+	binding_revision: number;
+	ch_checkpoint: RuntimeBindingCheckpoint;
+	engine_checkpoint: RuntimeBindingCheckpoint;
+}
+
+export interface RuntimeBindingOperationResult {
+	agent_ref: string;
+	revision: number;
+	binding_revision: number;
+	task_ref: string | null;
+	work_step_id: string | null;
+	installation_id: string;
+	phase: "active" | "preparing" | "committed_await_adopt";
+	operation_id: string;
+	proposal_hash: string;
+	status: "prepared" | "committed" | "adopted" | "aborted" | "unchanged";
+}
+
+export type RuntimeBindingResult =
+	| { schema: "grimoire.agent_binding.result.v1"; action: "register_installation"; status: "registered"; installation_id: string }
+	| (RuntimeBindingOperationResult & {
+		schema: "grimoire.agent_binding.result.v1";
+		action: "prepare" | "status" | "commit" | "abort" | "adopt";
+		operation_result: RuntimeBindingOperationResult;
+	});
 
 export interface RuntimeWork {
 	bytes: number;

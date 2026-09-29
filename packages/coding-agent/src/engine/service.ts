@@ -4,12 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { StreamAdmissionError } from "@oh-my-pi/pi-ai/utils/stream-admission";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
-import { type EngineLaunchProfile, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES } from "./contracts";
-import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer } from "./control-query";
+import { type EngineLaunchProfile, EngineTargetError, legacyLocalChildBirth, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, validateS0Binding } from "./contracts";
+import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
@@ -17,6 +17,7 @@ import { ProviderAdmissionClient } from "./provider-admission";
 import { ProviderExecutionClient } from "./provider-execution";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineRuntime, type EngineRuntimeOptions } from "./runtime";
+import { EngineCommandConflictError } from "./store";
 
 export interface EngineServiceConfig {
 	deviceId: string;
@@ -35,6 +36,8 @@ export interface EngineServiceConfig {
 		clientVersion?: string;
 		protocolVersion?: string;
 		sourceSignature?: string;
+		/** Actual installed ClientHost package sequence; Core owns the B0/B1 floor. */
+		installedSequence?: number;
 	};
 }
 
@@ -203,47 +206,78 @@ export async function launchLocalEngineChild(
 		throw new Error(`Child assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);
 	}
 	const seed = [request.parentAgentInstanceRef, request.parentAttemptId, request.toolCallId].join("\0");
-	const parent = /^(grimoire:\/\/tasks\/[^/]+\/[^/]+)\/agents\/[^/]+$/.exec(request.parentAgentInstanceRef);
-	if (!parent) throw new Error("Parent AgentInstanceRef must belong to a Task");
-	const agentInstanceRef = `${parent[1]}/agents/agent_${engineRouteToken(seed)}`;
+	const parent = request.parentBindingSnapshot;
+	validateS0Binding(parent, request.parentAgentInstanceRef);
+	const birthId = `agent_${engineRouteToken(seed)}`;
+	const agentInstanceRef = `${parent.taskRef}/agents/${birthId}`;
 	const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
 	const commandId = `cmd_local_${engineRouteToken(`${seed}\0command`)}`;
 	const executionId = `exec_local_${engineRouteToken(`${seed}\0execution`)}`;
 	const attemptId = `attempt_local_${engineRouteToken(`${seed}\0attempt`)}`;
 	const retained = await runtime.store.getStartConversationIdentity(commandId);
 	const prior = retained?.serializedCommand
-		? (JSON.parse(retained.serializedCommand) as EngineCommandEnvelope)
+		? validateEngineCommand(JSON.parse(retained.serializedCommand))
 		: undefined;
+	if (!prior && request.workStepId !== undefined && request.workStepId !== parent.workStepId)
+		throw new EngineTargetError("invalid_request", "Local child must inherit the admitted parent WorkStep");
+	const oldChild = prior?.payload.localChild;
+	if (prior && (
+		prior.commandId !== commandId || prior.op !== "start" ||
+		prior.agentInstanceId !== agentInstanceId || prior.agentInstanceRef !== agentInstanceRef ||
+		prior.parentAgentInstanceId !== request.parentAgentInstanceId ||
+		prior.parentAgentInstanceRef !== request.parentAgentInstanceRef ||
+		prior.executionId !== executionId || prior.attemptId !== attemptId ||
+		prior.authorityGeneration !== request.authorityGeneration || prior.principalId !== request.principalId ||
+		prior.deviceId !== request.deviceId || prior.engineId !== request.engineId ||
+		prior.payload.input !== assignment || prior.payload.cwd !== request.cwd ||
+		!isRecord(oldChild) || oldChild.parentAttemptId !== request.parentAttemptId ||
+		oldChild.toolCallId !== request.toolCallId || oldChild.profileRef !== request.profileRef ||
+		oldChild.maxSpawnDepth !== request.maxSpawnDepth ||
+		(oldChild.workStepId ?? null) !== (prior.bindingSnapshot ? parent.workStepId : request.workStepId ?? null)
+	)) throw new EngineCommandConflictError(commandId);
+	const legacyBindingSnapshot = prior && prior.bindingSnapshot === undefined
+		? legacyLocalChildBirth(prior, parent).bindingSnapshot : undefined;
 	const launchProfile = prior
 		? (prior.payload.launchProfile as EngineLaunchProfile)
 		: await profileResolver.resolveChildLaunchProfile(request.profileRef, request.maxSpawnDepth);
-	const command: EngineCommandEnvelope = {
+	const command: EngineCommandEnvelope = prior ?? {
 		schema: "grimoire.engine.command.v1",
 		commandId,
 		op: "start",
 		deviceId: request.deviceId,
 		engineId: request.engineId,
-		engineGeneration: prior?.engineGeneration ?? runtime.engineGeneration,
+		engineGeneration: runtime.engineGeneration,
 		agentInstanceId,
 		agentInstanceRef,
+		bindingSnapshot: {
+			agentInstanceRef,
+			taskRef: parent.taskRef,
+			workStepId: parent.workStepId,
+			bindingRevision: 0,
+			installationId: null,
+			parentAgentInstanceRef: request.parentAgentInstanceRef,
+			parentAttemptId: request.parentAttemptId,
+			parentBindingRevision: parent.bindingRevision,
+		},
 		parentAgentInstanceId: request.parentAgentInstanceId,
 		parentAgentInstanceRef: request.parentAgentInstanceRef,
 		executionId,
 		attemptId,
 		authorityGeneration: request.authorityGeneration,
 		principalId: request.principalId,
-		issuedAt: prior?.issuedAt ?? Date.now(),
+		issuedAt: Date.now(),
 		payload: {
 			input: assignment,
 			cwd: request.cwd,
 			profileDigest: launchProfile.profileDigest,
 			launchProfile,
 			localChild: {
+				agentInstanceId: birthId,
 				parentAttemptId: request.parentAttemptId,
 				toolCallId: request.toolCallId,
 				profileRef: request.profileRef,
 				maxSpawnDepth: request.maxSpawnDepth,
-				workStepId: request.workStepId,
+				workStepId: parent.workStepId,
 			},
 		},
 	};
@@ -260,6 +294,7 @@ export async function launchLocalEngineChild(
 				runtime,
 				deviceId: request.deviceId,
 				engineId: request.engineId,
+				legacyBindingSnapshot,
 				resolveLaunchProfile: () => {
 					request.signal?.throwIfAborted();
 					return launchProfile;
@@ -278,6 +313,9 @@ export async function launchLocalEngineChild(
 			agentInstanceRef,
 			status: result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed",
 			assistantFinal: typeof result.payload.assistantFinal === "string" ? result.payload.assistantFinal : undefined,
+			...(result.state === "completed" && result.payload.structuredOutput
+				? { structuredOutput: result.payload.structuredOutput as EngineChildLaunchResult["structuredOutput"] }
+				: {}),
 			transcriptRef: typeof result.payload.transcriptRef === "string" ? result.payload.transcriptRef : undefined,
 			...(result.payload.outputTruncated === true ? { outputTruncated: true } : {}),
 			...(result.state === "completed" ? {} : { error: String(result.payload.error ?? result.state) }),
@@ -418,6 +456,9 @@ export function hostedCoreMcpConfig(hosted: NonNullable<EngineServiceConfig["hos
 			"X-Grimoire-Client-Version": hosted.clientVersion ?? "0.4.0",
 			"X-Grimoire-Client-Surface": "agent_engine_bridge",
 			"X-Grimoire-Client-Protocol-Version": hosted.protocolVersion ?? "2026-08-01",
+			"X-Grimoire-Client-Features": '["grimoire.task.v4"]',
+			...(hosted.installedSequence !== undefined
+				? { "X-Grimoire-Client-Installed-Sequence": String(hosted.installedSequence) } : {}),
 			...(hosted.sourceSignature ? { "X-Grimoire-Client-Source-Signature": hosted.sourceSignature } : {}),
 		},
 	};

@@ -1,5 +1,69 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { CreateAgentSessionOptions } from "../sdk";
+import { engineRouteToken } from "./route";
+import { validateRuntimeValue } from "./runtime-protocol";
+
+/** Immutable semantic scope admitted by Core/ClientHost, independent of transport generations. */
+export interface EngineSemanticBindingSnapshot {
+	agentInstanceRef: string;
+	taskRef: string | null;
+	workStepId: string | null;
+	bindingRevision: number;
+	installationId: string | null;
+	parentAgentInstanceRef: string | null;
+	parentAttemptId: string | null;
+	parentBindingRevision: number | null;
+}
+
+export function sameSemanticBinding(
+	left: EngineSemanticBindingSnapshot | undefined,
+	right: EngineSemanticBindingSnapshot | undefined,
+): boolean {
+	return Boolean(left && right &&
+		left.agentInstanceRef === right.agentInstanceRef &&
+		left.taskRef === right.taskRef && left.workStepId === right.workStepId &&
+		left.bindingRevision === right.bindingRevision && left.installationId === right.installationId);
+}
+
+export function validateS0Binding(snapshot: EngineSemanticBindingSnapshot, agentInstanceRef: string): void {
+	validateRuntimeValue("bindingSnapshot", snapshot);
+	if (snapshot.agentInstanceRef !== agentInstanceRef)
+		throw new EngineTargetError("invalid_request", "Binding snapshot belongs to another Agent");
+	if (agentInstanceRef.startsWith("grimoire://agents/") || !snapshot.taskRef || snapshot.taskRef.startsWith("grimoire://tasks/~u/") ||
+		snapshot.bindingRevision !== 0 || snapshot.installationId !== null)
+		throw new EngineTargetError("invalid_request", "Owned, standalone and unbound execution requires agent_binding.v1");
+}
+
+/** Resolve pre-S0 child birth from immutable parent scope and retained delegation, never URI scope. */
+export function legacyLocalChildBirth(
+	command: { agentInstanceRef?: string; parentAgentInstanceRef?: string; payload: Record<string, unknown> },
+	parent: EngineSemanticBindingSnapshot,
+): { agentInstanceId: string; bindingSnapshot: EngineSemanticBindingSnapshot } {
+	validateS0Binding(parent, command.parentAgentInstanceRef ?? "");
+	const child = command.payload.localChild;
+	if (!isRecord(child) || typeof child.parentAttemptId !== "string" || !child.parentAttemptId ||
+		typeof child.toolCallId !== "string" || !child.toolCallId ||
+		(child.workStepId != null && typeof child.workStepId !== "string"))
+		throw new EngineTargetError("source_unavailable", "Legacy child birth provenance is unavailable");
+	const seed = [parent.agentInstanceRef, child.parentAttemptId, child.toolCallId].join("\0");
+	const agentInstanceId = `agent_${engineRouteToken(seed)}`;
+	const agentInstanceRef = `${parent.taskRef}/agents/${agentInstanceId}`;
+	if (command.agentInstanceRef !== agentInstanceRef)
+		throw new EngineTargetError("stale_target", "Legacy child identity differs from its admitted birth");
+	const bindingSnapshot: EngineSemanticBindingSnapshot = {
+		agentInstanceRef,
+		taskRef: parent.taskRef,
+		workStepId: child.workStepId ?? null,
+		bindingRevision: 0,
+		installationId: null,
+		parentAgentInstanceRef: parent.agentInstanceRef,
+		parentAttemptId: child.parentAttemptId,
+		parentBindingRevision: 0,
+	};
+	validateS0Binding(bindingSnapshot, agentInstanceRef);
+	return { agentInstanceId, bindingSnapshot };
+}
 
 export type EngineAttemptState =
 	| "accepted"
@@ -107,6 +171,7 @@ export interface EngineStartRequest {
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	/** Presentation-only name. Identity and routing stay agentInstanceId/ref. */
 	displayName?: string;
 	/** Evidence-backed future delegation hint; never routing authority. */
@@ -198,6 +263,11 @@ export type EngineControlInitiator =
 
 export interface EngineControlRequest extends EngineTarget {
 	commandId: string;
+	/** Resume-only user message; context remains separate non-user instructions. */
+	message?: string;
+	clientMessageId?: string;
+	attachmentUploadIds?: string[];
+	principalId?: string;
 	/** Optional context delivered when resuming the admitted Attempt. */
 	context?: string;
 	initiator: EngineControlInitiator;
@@ -306,6 +376,7 @@ export interface EngineInboxMutation {
 }
 
 export interface EngineBindingSnapshot extends EngineTarget {
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	commandId: string;
 	engineAgentId: string;
 	sessionFile?: string;
@@ -367,6 +438,7 @@ export interface EngineRejectedCommand {
 
 export interface EngineEvent {
 	agentInstanceRef?: string;
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	eventId: number;
 	seq: number;
 	causationCommandId: string;
@@ -437,6 +509,7 @@ export class EngineTargetError extends Error {
 			| "attachment_expired"
 			| "attachment_requires_images"
 			| "command_failed"
+			| "message_accepted_resume_unknown"
 			| "cancelled",
 		message: string,
 	) {
@@ -447,6 +520,11 @@ export class EngineTargetError extends Error {
 
 export function validateStartRequest(request: EngineStartRequest): void {
 	validateCommandContext(request.context);
+	if (request.agentInstanceRef !== undefined || request.bindingSnapshot !== undefined) {
+		if (!request.agentInstanceRef || !request.bindingSnapshot)
+			throw new EngineTargetError("invalid_request", "Hosted Start requires both agentInstanceRef and bindingSnapshot");
+		validateS0Binding(request.bindingSnapshot, request.agentInstanceRef);
+	}
 	if (
 		request.profileSelectionRevision !== undefined &&
 		(!Number.isSafeInteger(request.profileSelectionRevision) || request.profileSelectionRevision < 1)

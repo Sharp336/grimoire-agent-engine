@@ -434,9 +434,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			);
 		}
 		if (status === "success" && !useLastTurn) {
-			if (data === null) {
-				throw new Error("data is required when yield indicates success");
-			}
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				isIncremental
 					? this.#validateIncrementalSection(yieldType as string[], value)

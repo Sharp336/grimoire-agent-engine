@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
-import type { SessionDurabilityCheckpoint } from "../session/session-manager";
+import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
+import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
 import type { StorageDependency, StorageRuntimeMutation } from "../session/storage-protocol";
 import type {
@@ -17,7 +17,7 @@ import type {
 	EngineProfileRouteState,
 	EngineRetryState,
 } from "./contracts";
-import { EngineTargetError } from "./contracts";
+import { EngineTargetError, sameSemanticBinding, validateS0Binding } from "./contracts";
 import {
 	completeRestoreRebind,
 	type RestoreWorkspaceDescriptor,
@@ -728,6 +728,12 @@ export class RocksEngineMutations {
 					return { status: "replay", receipt: boundedReceipt(old.receipt) };
 				}
 				if (old.processor_generation === processorGeneration) return { status: "in_progress" };
+				if (old.processor_generation !== null && old.operation === "resume") {
+					const parsed: unknown = JSON.parse(old.identity.serializedCommand ?? "{}");
+					const payload = parsed && typeof parsed === "object" && "payload" in parsed ? parsed.payload : undefined;
+					if (payload && typeof payload === "object" && "text" in payload && typeof payload.text === "string")
+						throw new EngineTargetError("agent_busy", "Interrupted Resume awaits exact native-history recovery");
+				}
 				if (old.processor_generation !== null || command.engineGeneration < processorGeneration) {
 					return {
 						status: "replay",
@@ -741,9 +747,26 @@ export class RocksEngineMutations {
 				});
 				return { status: "claimed" };
 			}
+			if (command.operation === "start" && command.agentInstanceRef && !command.bindingSnapshot)
+				throw new EngineTargetError("invalid_request", "New Start requires an admitted bindingSnapshot");
 			const lifecycle = await tx.get<RocksIdentity>("identity", command.agentInstanceId);
+			if (command.operation === "start" && lifecycle?.agent_instance_ref && !command.bindingSnapshot)
+				throw new EngineTargetError("invalid_request", "Hosted Agent Start requires its admitted bindingSnapshot");
 			if (lifecycle?.deleted_at || lifecycle?.archived_at)
 				throw new EngineTargetError("stale_target", "Chat is archived or deleted");
+			if (command.bindingSnapshot) {
+				if (command.operation === "start") {
+					validateS0Binding(command.bindingSnapshot, command.agentInstanceRef ?? "");
+					const prior = await tx.get<RocksBinding>("binding", command.agentInstanceId);
+					if (prior?.binding_snapshot?.bindingRevision === 0 &&
+						!sameSemanticBinding(prior.binding_snapshot, command.bindingSnapshot))
+						throw new EngineTargetError("stale_target", "Legacy binding is immutable");
+				} else if (command.attemptId) {
+					const attempt = await tx.get<RocksAttempt>("attempt", command.attemptId);
+					if (attempt?.binding_snapshot && !sameSemanticBinding(attempt.binding_snapshot, command.bindingSnapshot))
+						throw new EngineTargetError("stale_target", "Control snapshot differs from the admitted Attempt");
+				}
+			}
 			const control = ENGINE_CONTROL_OPS.has(command.operation);
 			const bytes = Buffer.byteLength(command.serializedCommand ?? "");
 			await this.pendingBudget(tx, command.agentInstanceId, control, 1, bytes);
@@ -791,15 +814,56 @@ export class RocksEngineMutations {
 			return { status: "claimed" };
 		});
 	}
+	async acceptedResumeMessage(command: RocksCommand): Promise<boolean | "unknown"> {
+		if (command.operation !== "resume" || !command.identity.serializedCommand) return false;
+		const envelope = JSON.parse(command.identity.serializedCommand) as {
+			payload?: { text?: unknown; clientMessageId?: unknown };
+		};
+		if (typeof envelope.payload?.text !== "string" || typeof envelope.payload.clientMessageId !== "string")
+			return false;
+		const binding = await this.getBinding(command.agent_instance_id);
+		if (!binding?.sessionFile || binding.attemptId !== command.identity.attemptId ||
+			binding.bindingId !== command.identity.bindingId ||
+			binding.bindingGeneration !== command.identity.bindingGeneration ||
+			binding.engineGeneration !== command.identity.engineGeneration ||
+			binding.authorityGeneration !== command.identity.authorityGeneration)
+			return "unknown";
+		const { familyId, generationId } = parseNativeSessionLocator(binding.sessionFile);
+		const session = await SessionManager.openNative(
+			new RocksNativeSessionStorage(this.storageClient, familyId, generationId),
+		);
+		return session.getContextBranch().some(entry =>
+			entry.type === "message" && entry.message.role === "user" &&
+				entry.clientMessageId === envelope.payload?.clientMessageId
+		);
+	}
+
 	/** An interrupted command never runs: settle it and publish its rejection like any other refused command. */
-	async settleInterrupted(tx: RuntimeTransaction, id: string, generation: number): Promise<EngineCommandReceipt> {
+	async settleInterrupted(
+		tx: RuntimeTransaction,
+		id: string,
+		generation: number,
+		messageAcceptance: boolean | "unknown" = false,
+	): Promise<EngineCommandReceipt> {
 		const receipt = {
 			outcome: "rejected" as const,
-			detail: {
-				code: "interrupted",
-				message: "Execution was interrupted; explicit Continue is required",
-				requiresExplicitContinue: true,
-			},
+			detail: messageAcceptance === true
+				? {
+						code: "message_accepted_resume_unknown",
+						message: "User message was accepted before interruption; this Attempt cannot resume after restart",
+						requiresExplicitContinue: true,
+					}
+				: messageAcceptance === "unknown"
+					? {
+							code: "resume_message_outcome_unknown",
+							message: "Interrupted Resume message acceptance could not be verified",
+							requiresExplicitContinue: true,
+						}
+					: {
+							code: "interrupted",
+							message: "Execution was interrupted; explicit Continue is required",
+							requiresExplicitContinue: true,
+						},
 		};
 		await this.settle(tx, id, receipt);
 		const { identity: command } = (await tx.get<RocksCommand>("command", id))!;
@@ -1007,7 +1071,7 @@ export class RocksEngineMutations {
 		if (row.state === "settled") {
 			// The owner returns rows with canonically ordered keys; an identical receipt may differ only in order.
 			if (storageCanonicalJson(row.receipt) !== storageCanonicalJson(receipt))
-				throw new EngineCommandConflictError(id);
+				throw new EngineCommandConflictError(id, "receipt");
 			return;
 		}
 		if (row.pending_accounted)
@@ -1089,8 +1153,10 @@ export class RocksEngineMutations {
 		await this.eventReads(tx, target, event);
 		const seq = await this.counter(tx, `agent-seq:${target.agentInstanceId}`, "agent_seq", 1);
 		const eventId = await this.counter(tx, "events", "event_counter", 1);
+		const attempt = target.attemptId ? await tx.get<RocksAttempt>("attempt", target.attemptId) : undefined;
 		const stored: RocksEvent = {
 			eventId,
+			...(attempt?.binding_snapshot ? { bindingSnapshot: attempt.binding_snapshot } : {}),
 			seq,
 			createdAt: Date.now(),
 			causationCommandId: event.causationCommandId ?? target.commandId,
@@ -1175,6 +1241,8 @@ export class RocksEngineMutations {
 	): Promise<EngineEvent> {
 		return this.mutation(target.agentInstanceId, async tx => {
 			// The retained binding belongs to an older Attempt, so validate the claimed Start instead.
+			// A rejected Start may request the wrong generation. Its immutable request generation
+			// must match the command row; the actual rejection writer is fenced by engine + processor.
 			const engine = await tx.get<{ generation: number }>("metadata", "engine");
 			const command = await tx.get<RocksCommand>("command", target.commandId);
 			const identity = command?.identity;
@@ -1190,7 +1258,7 @@ export class RocksEngineMutations {
 				identity.executionId !== target.executionId ||
 				identity.attemptId !== target.attemptId ||
 				identity.authorityGeneration !== target.authorityGeneration ||
-				identity.engineGeneration !== target.engineGeneration ||
+				identity.engineGeneration !== command.engine_generation ||
 				(identity.bindingId ?? "") !== target.bindingId ||
 				(identity.bindingGeneration ?? 0) !== target.bindingGeneration ||
 				target.bindingId !== "" ||
@@ -1235,6 +1303,7 @@ export class RocksEngineMutations {
 			command_id: binding.commandId,
 			engine_agent_id: binding.engineAgentId,
 			session_file: binding.sessionFile ?? null,
+			binding_snapshot: binding.bindingSnapshot,
 			profile_digest: binding.profileDigest,
 			conversation_identity_digest: digest ?? old?.conversation_identity_digest ?? null,
 			state: binding.state,
@@ -1353,6 +1422,7 @@ export class RocksEngineMutations {
 				const row: RocksAttempt = {
 					...bindingTarget(binding),
 					command_id: binding.commandId,
+					binding_snapshot: binding.bindingSnapshot,
 					row_id: old?.row_id ?? Date.now(),
 					created_at: old?.created_at ?? Date.now(),
 					state,
@@ -1455,6 +1525,20 @@ export class RocksEngineMutations {
 		);
 	}
 
+	async branchAgents(tx: RuntimeTransaction, id: string): Promise<string[]> {
+		const agentIds = [id];
+		for (let index = 0; index < agentIds.length; index++) {
+			if (agentIds.length > 64)
+				throw new EngineTargetError("restore_budget", "Branch control exceeds its atomic budget");
+			const children = await tx.query<RocksIdentity>("identity_parent", [agentIds[index]]);
+			for (const child of children) {
+				if (agentIds.includes(child.agent_instance_id)) throw new Error("Agent ancestry cycle");
+				agentIds.push(child.agent_instance_id);
+			}
+		}
+		return agentIds;
+	}
+
 	async changeIntent(
 		tx: RuntimeTransaction,
 		id: string,
@@ -1476,18 +1560,10 @@ export class RocksEngineMutations {
 				command_id: commandId,
 				generation: root.intent_revision + 1,
 			});
-		const agentIds = [id];
+		const agentIds = await this.branchAgents(tx, id);
 		const events: EngineEvent[] = [];
-		for (let index = 0; index < agentIds.length; index++) {
-			if (agentIds.length > 64)
-				throw new EngineTargetError("restore_budget", "Branch control exceeds its atomic budget");
-			const agent = agentIds[index];
+		for (const agent of agentIds) {
 			const row = (await tx.get<RocksIdentity>("identity", agent))!;
-			const children = await tx.query<RocksIdentity>("identity_parent", [agent]);
-			for (const child of children) {
-				if (agentIds.includes(child.agent_instance_id)) throw new Error("Agent ancestry cycle");
-				agentIds.push(child.agent_instance_id);
-			}
 			await tx.put("identity", agent, { ...row, intent_revision: row.intent_revision + 1 });
 			const holds = await this.holds(tx, agent);
 			const binding = await tx.get<RocksBinding>("binding", agent);
@@ -1521,6 +1597,18 @@ export class RocksEngineMutations {
 				const start = action === "stop" ? await this.targetStart(tx, startFence) : undefined;
 				if (!start) throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
 				expected = await this.cancelRevision(tx, startFence, start);
+			}
+			if (action === "resume" && expected !== undefined) {
+				const root = await tx.get<RocksIdentity>("identity", id);
+				const binding = await tx.get<RocksBinding>("binding", id);
+				if (root?.intent_revision === expected + 1 && binding?.intent_command_id === commandId) {
+					const agentIds: string[] = [];
+					for (const agent of await this.branchAgents(tx, id)) {
+						if ((await tx.get<RocksBinding>("binding", agent))?.intent_command_id === commandId)
+							agentIds.push(agent);
+					}
+					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision };
+				}
 			}
 			return this.changeIntent(tx, id, commandId, action, expected);
 		});
@@ -2277,11 +2365,12 @@ export class RocksEngineMutations {
 				const pending = await this.records.query("command_agent_pending", [id], undefined, 1);
 				const command = pending.records[0]?.value as unknown as RocksCommand | undefined;
 				if (!command || command.engine_generation >= generation) break;
+				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
 				await ensureHold();
 				await this.mutation(id, async tx => {
 					const current = await tx.get<RocksCommand>("command", command.command_id);
 					if (current?.state === "received" && current.engine_generation < generation)
-						await this.settleInterrupted(tx, current.command_id, generation);
+						await this.settleInterrupted(tx, current.command_id, generation, messageAcceptance);
 				});
 			}
 			for (const observed of attempts) {

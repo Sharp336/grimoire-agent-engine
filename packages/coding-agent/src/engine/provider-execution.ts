@@ -112,9 +112,7 @@ export class ProviderExecutionClient {
 		const pin = result.executionPin;
 		if (
 			(mode !== "owner_local" && mode !== "hosted_broker") ||
-			(api !== "openai-completions" &&
-				api !== "anthropic-messages" &&
-				!(mode === "owner_local" && api === "openai-responses")) ||
+			(api !== "openai-completions" && api !== "anthropic-messages" && api !== "openai-responses") ||
 			result.executionMode !== "full_agent" ||
 			!providerRuntimeId ||
 			!validProviderBaseUrl(baseUrl, mode) ||

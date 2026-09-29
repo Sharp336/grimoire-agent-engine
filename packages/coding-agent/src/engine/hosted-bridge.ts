@@ -10,7 +10,9 @@ import {
 	ReplayPolicy,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { EngineChildLaunchResult } from "../tools";
+import { type EngineSemanticBindingSnapshot, legacyLocalChildBirth, validateS0Binding } from "./contracts";
 import {
 	type AgentMessageEnvelope,
 	ENGINE_EVENT_STREAM,
@@ -49,6 +51,7 @@ export interface HostedGrimoireRpcOptions {
 	clientVersion?: string;
 	protocolVersion?: string;
 	sourceSignature?: string;
+	installedSequence?: number;
 }
 
 export class HostedGrimoireRpc implements GrimoireRpc {
@@ -94,6 +97,9 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 				"X-Grimoire-Client-Version": this.#options.clientVersion ?? "0.4.0",
 				"X-Grimoire-Client-Surface": "agent_engine_bridge",
 				"X-Grimoire-Client-Protocol-Version": this.#options.protocolVersion ?? "2026-08-01",
+				"X-Grimoire-Client-Features": '["grimoire.task.v4"]',
+				...(this.#options.installedSequence !== undefined
+					? { "X-Grimoire-Client-Installed-Sequence": String(this.#options.installedSequence) } : {}),
 				...(this.#options.sourceSignature
 					? { "X-Grimoire-Client-Source-Signature": this.#options.sourceSignature }
 					: {}),
@@ -144,6 +150,7 @@ export async function projectLocalEngineChild(
 	rpc: GrimoireRpc,
 	command: EngineCommandEnvelope,
 	event: EngineEventEnvelope,
+	admittedParent?: EngineSemanticBindingSnapshot,
 ): Promise<void> {
 	const states: Record<string, string> = {
 		"attempt.started": "active",
@@ -158,26 +165,48 @@ export async function projectLocalEngineChild(
 	const status = states[event.type];
 	if (!status) return;
 	const ref = command.agentInstanceRef;
-	const match = /^grimoire:\/\/tasks\/([^/]+)\/([^/]+)\/agents\/([^/]+)$/.exec(ref ?? "");
-	const child = command.payload.localChild as Record<string, unknown> | undefined;
-	if (
-		!match ||
-		!child ||
-		!command.parentAgentInstanceRef ||
-		command.agentInstanceId !== event.agentInstanceId ||
-		command.attemptId !== event.attemptId ||
-		command.executionId !== event.executionId ||
-		command.authorityGeneration !== event.authorityGeneration
-	) {
+	const child = command.payload.localChild;
+	if (!isRecord(child) || !ref || !command.parentAgentInstanceRef ||
+		command.agentInstanceId !== event.agentInstanceId || command.attemptId !== event.attemptId ||
+		command.executionId !== event.executionId || command.authorityGeneration !== event.authorityGeneration)
 		throw new Error("Local child projection does not match its admitted command");
+	let snapshot = command.bindingSnapshot;
+	let birthId = child.agentInstanceId;
+	if (snapshot === undefined) {
+		let parentSnapshot = admittedParent;
+		if (!parentSnapshot) {
+			const response = await rpc.call("grimoire_agent_instance", {
+				action: "get", agent_instance_ref: command.parentAgentInstanceRef,
+			});
+			const parent = response.agent_instance;
+			if (!isRecord(parent) ||
+				(parent.agent_instance_ref ?? parent.grimoire_uri) !== command.parentAgentInstanceRef ||
+				parent.owner_principal_id !== command.principalId || parent.binding_mode !== "legacy_immutable" ||
+				parent.binding_revision !== 0 || parent.execution_owner_installation_id !== null ||
+				typeof parent.task_ref !== "string" ||
+				(parent.work_step_id !== null && typeof parent.work_step_id !== "string"))
+				throw new Error("Legacy child parent binding is not provably immutable");
+			parentSnapshot = {
+				agentInstanceRef: command.parentAgentInstanceRef,
+				taskRef: parent.task_ref, workStepId: parent.work_step_id,
+				bindingRevision: 0, installationId: null,
+				parentAgentInstanceRef: null, parentAttemptId: null, parentBindingRevision: null,
+			};
+		}
+		const birth = legacyLocalChildBirth(command, parentSnapshot);
+		snapshot = birth.bindingSnapshot;
+		birthId = birth.agentInstanceId;
 	}
+	validateS0Binding(snapshot, ref);
+	if (snapshot.parentAgentInstanceRef !== command.parentAgentInstanceRef ||
+		snapshot.parentAttemptId !== child.parentAttemptId || typeof birthId !== "string")
+		throw new Error("Local child projection differs from its frozen birth");
 	const created = await rpc.call("grimoire_agent_instance", {
 		action: "create",
-		project_id: match[1],
-		task_id: match[2],
-		agent_instance_id: match[3],
+		task_ref: snapshot.taskRef,
+		agent_instance_id: birthId,
 		parent_agent_ref: command.parentAgentInstanceRef,
-		work_step_id: child.workStepId ?? null,
+		work_step_id: snapshot.workStepId,
 		objective: String(command.payload.input).slice(0, 16_000),
 		status,
 		context_refs: [child.profileRef],
@@ -195,6 +224,10 @@ export async function projectLocalEngineChild(
 		(agent.agent_instance_ref ?? agent.grimoire_uri) !== ref ||
 		agent.parent_agent_ref !== command.parentAgentInstanceRef ||
 		agent.owner_principal_id !== command.principalId
+		|| agent.task_ref !== snapshot.taskRef
+		|| (agent.work_step_id ?? null) !== snapshot.workStepId
+		|| agent.binding_revision !== snapshot.bindingRevision
+		|| (agent.execution_owner_installation_id ?? null) !== snapshot.installationId
 	) {
 		throw new Error("Local child projection returned a different identity or owner");
 	}
@@ -203,6 +236,7 @@ export async function projectLocalEngineChild(
 			action: "update",
 			agent_instance_ref: ref,
 			expected_revision: agent.revision,
+			expected_binding_revision: snapshot.bindingRevision,
 			status,
 			current_focus: `Local Engine Attempt ${command.attemptId}: ${status}`,
 		});
@@ -269,6 +303,9 @@ export async function launchHostedEngineChild(
 			agentInstanceRef,
 			status: result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed",
 			assistantFinal: typeof result.payload.assistantFinal === "string" ? result.payload.assistantFinal : undefined,
+			...(result.state === "completed" && result.payload.structuredOutput
+				? { structuredOutput: result.payload.structuredOutput as EngineChildLaunchResult["structuredOutput"] }
+				: {}),
 			transcriptRef: typeof result.payload.transcriptRef === "string" ? result.payload.transcriptRef : undefined,
 			...(result.payload.outputTruncated === true ? { outputTruncated: true } : {}),
 			...(result.state === "completed" ? {} : { error: String(result.payload.error ?? result.state) }),
@@ -619,8 +656,12 @@ export class HostedEngineBridge {
 		const localStart = await this.#options.eventStore?.getStartConversationIdentity(jobId);
 		if (localStart?.serializedCommand) {
 			const command = JSON.parse(localStart.serializedCommand) as EngineCommandEnvelope;
-			if (command.payload.localChild) {
-				if (this.#options.projectionRpc) await projectLocalEngineChild(this.#options.projectionRpc, command, event);
+			if (isRecord(command.payload.localChild)) {
+				const parentAttemptId = command.payload.localChild.parentAttemptId;
+				const parent = typeof parentAttemptId === "string"
+					? await this.#options.eventStore?.getAttempt(parentAttemptId) : undefined;
+				if (this.#options.projectionRpc)
+					await projectLocalEngineChild(this.#options.projectionRpc, command, event, parent?.binding_snapshot);
 				return true;
 			}
 		}

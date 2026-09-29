@@ -1,10 +1,21 @@
-import type { EngineBindingSnapshot } from "../../src/engine/contracts";
+import type { EngineBindingSnapshot, EngineSemanticBindingSnapshot } from "../../src/engine/contracts";
 import { RocksEngineStore } from "../../src/engine/rocks-runtime-store";
 import { engineAgentId, engineAgentInstanceId } from "../../src/engine/route";
 import { type RuntimeScope, runtimeRemainingWork } from "../../src/engine/runtime-protocol";
 import type { EngineCommandIdentity } from "../../src/engine/store";
 import { readStorageBinding, StorageClient } from "../../src/session/storage-client";
 import { bindTestsToStorageWorker } from "./storage-worker-fixture";
+
+export function semanticBinding(
+	agentInstanceRef: string,
+	taskRef = "grimoire://tasks/test/explicit-binding",
+	workStepId: string | null = null,
+): EngineSemanticBindingSnapshot {
+	return {
+		agentInstanceRef, taskRef, workStepId, bindingRevision: 0, installationId: null,
+		parentAgentInstanceRef: null, parentAttemptId: null, parentBindingRevision: null,
+	};
+}
 
 /**
  * Runtime v1 store scenarios on a real Rust owner. Call inside a `describe.skipIf(storageWorkerUnavailable)`
@@ -30,6 +41,7 @@ export function identity(name: string, parent?: string, principalId = "owner") {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-test/agents/${name}`;
 	return {
 		agentInstanceRef,
+		bindingSnapshot: semanticBinding(agentInstanceRef, "grimoire://tasks/grimoire/runtime-test"),
 		agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 		parentAgentInstanceId: parent,
 		principalId,
@@ -41,6 +53,7 @@ export function binding(name: string): EngineBindingSnapshot {
 	const agent = identity(name);
 	return {
 		agentInstanceId: agent.agentInstanceId,
+		bindingSnapshot: semanticBinding(agent.agentInstanceRef, "grimoire://tasks/grimoire/runtime-test"),
 		bindingId: `binding-${name}`,
 		commandId: `start-${name}`,
 		executionId: `execution-${name}`,

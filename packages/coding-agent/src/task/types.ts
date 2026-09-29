@@ -485,6 +485,8 @@ export interface SingleResult {
 	index: number;
 	id: string;
 	agent: string;
+	/** Canonical child identity, when the Engine launched this subagent. */
+	agentInstanceRef?: string;
 	agentSource: AgentSource;
 	task: string;
 	assignment?: string;
@@ -494,9 +496,11 @@ export interface SingleResult {
 	output: string;
 	stderr: string;
 	truncated: boolean;
+	/** Full native transcript reference; output remains the original bounded assistant text. */
+	transcriptRef?: string;
 	/**
-	 * Parsed structured completion and validation metadata, when this invocation
-	 * selected an output schema or strict schema mode.
+	 * Native Engine yield data or schema-bearing subprocess result. `source: "none"`
+	 * carries unvalidated yield data; `status: "valid"` requires schema evidence.
 	 */
 	structuredOutput?: StructuredSubagentOutput;
 	durationMs: number;

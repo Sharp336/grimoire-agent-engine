@@ -20,6 +20,7 @@ import {
 	type StorageRuntimeQueryResponse,
 	type StorageRuntimeRecord,
 } from "../src/session/storage-protocol";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 class Rows extends RuntimeRecords {
 	readonly values = new Map<string, StorageRuntimeRecord>();
@@ -169,6 +170,22 @@ async function append(
 	return event;
 }
 describe("Rocks runtime atomic public projections", () => {
+	test("projects legacy Attempts without retry fields and omits unavailable optional retry timing", async () => {
+		const rows = fixture();
+		const tx = new RuntimeTransaction(rows);
+		await append(tx, "running", {}, 1);
+		const detailId = projectionId("detail", "a", "attempt");
+		const legacy = await tx.get<{ value: Record<string, unknown> }>("projection", detailId);
+		expect(legacy?.value.retry).toBeNull();
+		expect(legacy?.value).not.toHaveProperty("bindingSnapshot");
+		const attempt = (await tx.get<Record<string, unknown>>("attempt", "attempt"))!;
+		await tx.put("attempt", "attempt", {
+			...attempt, retry_attempt: 1, retry_max_attempts: 3, retry_outcome: "waiting",
+		});
+		await append(tx, "retry_scheduled", { attempt: 1, maxAttempts: 3, outcome: "waiting" }, 2);
+		const retry = await tx.get<{ value: Record<string, unknown> }>("projection", detailId);
+		expect(retry?.value.retry).toEqual({ attempt: 1, maxAttempts: 3, outcome: "waiting" });
+	});
 	test("settlement publishes a canonical receipt with the command's frozen identity", async () => {
 		const rows = fixture();
 		const identity: EngineCommandIdentity = {
@@ -276,6 +293,7 @@ describe("Rocks runtime atomic public projections", () => {
 			engineGeneration: 1,
 			agentInstanceId: "a",
 			agentInstanceRef: ref,
+			bindingSnapshot: semanticBinding(ref),
 			executionId: `execution-${name}`,
 			attemptId: `attempt-${name}`,
 			authorityGeneration: 1,
@@ -366,6 +384,7 @@ describe("Rocks runtime atomic public projections", () => {
 			engineGeneration: 1,
 			agentInstanceId: "a",
 			agentInstanceRef: ref,
+			bindingSnapshot: semanticBinding(ref),
 			executionId: "execution-refused",
 			attemptId: "attempt-refused",
 			authorityGeneration: 1,
