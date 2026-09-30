@@ -128,6 +128,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await adapter?.dispose();
 			await executionRuntime.dispose();
 			await client.drain();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
@@ -228,6 +229,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await adapter?.dispose();
 			await runtime.dispose();
 			await client.drain();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
@@ -320,6 +322,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceRef,
 				agentInstanceId: started.agentInstanceId,
+				attemptId: started.attemptId,
 				principalId: "queue-owner",
 				browserPayloadHash: `sha256:${"a".repeat(64)}`,
 				browserTarget: { agentInstanceRef },
@@ -895,8 +898,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 
 			const deliveredBefore = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
 				.consumer_seq;
-			const duplicateA = { ...commandA, commandId: "command-a-redelivery", issuedAt: Date.now() };
-			duplicateA.payload.originReceiptId = "origin:command-a-redelivery";
+			const duplicateA = { ...commandA, commandId: "command-a-redelivery", issuedAt: Date.now(),
+				payload: { ...commandA.payload, originReceiptId: "origin:command-a-redelivery" } };
 			execution.captureCommand(duplicateA);
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(duplicateA), {
 				msgID: duplicateA.commandId,
@@ -912,7 +915,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				.consumer_seq;
 			await js.publish(
 				adapter.commandSubject("agent-a", "start"),
-				JSON.stringify({ ...commandA, issuedAt: Date.now() }),
+				JSON.stringify(commandA),
 				{
 					msgID: "transport-command-a-replay",
 				},
@@ -1155,6 +1158,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const agentDir = path.join(tempDir, "agent");
 		fs.mkdirSync(cwd);
 		const mock = createMockModel({ handler: { content: ["done"] } });
+		const livePrompt = Promise.withResolvers<boolean>();
 		const liveExecution = admittedExecution(mock.model, modelRegistry);
 		const retainedExecution = admittedExecution(mock.model, modelRegistry);
 		const reuseExecution = admittedExecution(mock.model, modelRegistry);
@@ -1173,9 +1177,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const refusingBase = plainExecution.optionsFor({ deviceId: "device-1" });
 		const refusingResolve = refusingBase.resolveExecution!;
 		const refusedExecution = admittedExecution(mock.model, modelRegistry);
-		refusedExecution.optionsFor = () => ({
-			...refusedExecution.optionsFor({ deviceId: "device-1" }),
-			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+		const resolveExecution: typeof refusingResolve = async (config, frozen, attempt, resolverCwd, signal) => {
 				if (attempt.attemptId === "attempt-failed") {
 					const databaseError = new Error(
 						"Failed to open auth database at 'C:/Users/private/.omp/agent/agent.db': database is locked",
@@ -1188,7 +1190,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						),
 					});
 				}
-				if (attempt.attemptId === "attempt-unsafe-error")
+				if (attempt.attemptId === "attempt-unsafe")
 					throw new Error("custom startup failed with raw prompt SUPER_SECRET_PROMPT");
 				if (attempt.attemptId === "attempt-retained-rejected")
 					throw new Error("replacement profile is unavailable");
@@ -1203,8 +1205,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					return refusingResolve(config, frozen, attempt, resolverCwd, signal);
 				}
 				return refusingResolve(config, frozen, attempt, resolverCwd, signal);
-			},
-		});
+		};
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async session =>
@@ -1222,6 +1223,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				enableLsp: false,
 				modelRegistry,
 			} }),
+			resolveExecution,
+			verifyOriginReceipt: async identity => {
+				const selected = [liveExecution, retainedExecution, reuseExecution, refusedExecution]
+					.find(execution => execution.receipts.has(identity.originReceiptId));
+				if (!selected) throw new Error("Unknown fixture command receipt");
+				return selected.optionsFor({ deviceId: "device-1" }).verifyOriginReceipt!(identity);
+			},
 		});
 		const errors: Error[] = [];
 		const adapter = await NatsEngineAdapter.connect({
@@ -1358,6 +1366,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineId: "engine-1",
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId: pending.agentInstanceId,
+				agentInstanceRef: pending.agentInstanceRef, principalId: pending.principalId,
 				executionId: pending.executionId,
 				attemptId: pending.attemptId,
 				authorityGeneration: pending.authorityGeneration,
@@ -1539,6 +1548,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineId: "engine-1",
 				engineGeneration: secondRuntime.engineGeneration,
 				agentInstanceId: oldStart.agentInstanceId,
+				agentInstanceRef: oldStart.agentInstanceRef, principalId: oldStart.principalId,
 				executionId: oldStart.executionId,
 				attemptId: oldStart.attemptId,
 				authorityGeneration: oldStart.authorityGeneration,
@@ -1585,6 +1595,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await client.drain();
 			await adapter.dispose();
 			await secondRuntime.dispose();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
@@ -1593,16 +1604,19 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 	it("settles a command that keeps failing as one terminal failed receipt and replays it on resend", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-failing-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async () => true,
+			...refusedExecutionForCommands.optionsFor({ deviceId: "device-1" }),
 		});
 		let dispatches = 0;
 		const failing = spyOn(runtime, "reconcile").mockImplementation(async () => {
 			dispatches++;
 			throw new Error("ENOENT: reconcile fixture storage is offline");
 		});
-		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -1625,6 +1639,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineId: "engine-1",
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId: "agent-failing",
+				agentInstanceRef: "grimoire://tasks/grimoire/nats-test/agents/agent-failing",
+				attemptId: "attempt-failing", principalId: "owner",
 				authorityGeneration: 1,
 				issuedAt: Date.now(),
 				payload: {},
@@ -1668,6 +1684,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
@@ -1679,9 +1696,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		auth.setRuntimeApiKey("mock", "isolated-test");
+		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async () => true,
+			...refusedExecutionForCommands.optionsFor({ deviceId: "device-1" }),
 		});
 		let dispatches = 0;
 		const failing = spyOn(runtime, "reconcile").mockImplementation(async () => {
@@ -1689,7 +1708,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			throw new Error("ENOENT: reconcile fixture storage is offline");
 		});
 		let releases = 0;
-		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const release = spyOn(runtime.store, "releaseCommand").mockImplementation(async () => {
 			releases++;
 			throw new Error("release fixture storage is offline");
@@ -1717,6 +1735,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineId: "engine-1",
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId: "agent-release-failing",
+				agentInstanceRef: "grimoire://tasks/grimoire/nats-test/agents/agent-release-failing",
+				attemptId: "attempt-release-failing", principalId: "owner",
 				authorityGeneration: 1,
 				issuedAt: Date.now(),
 				payload: {},
@@ -1750,6 +1770,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
@@ -1761,6 +1782,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async () => true,
+			deviceId: "device-1",
 		});
 		let deliveries = 0;
 		let bindingPending = true;
@@ -1820,9 +1842,14 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const broker = await startNatsServer(tempDir);
 		const cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd);
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async () => true,
+			...execution.optionsFor({ deviceId: "device-1" }),
 		});
 		const admit = runtime.store.admitCommand.bind(runtime.store);
 		let admissions = 0;
@@ -1830,10 +1857,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			admissions++;
 			throw new Error("ENOENT: admission fixture storage is offline");
 		});
-		const mock = createMockModel({ handler: { content: ["done"] } });
-		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
-		auth.setRuntimeApiKey("mock", "isolated-test");
-		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd, execution);
 		execution.captureCommand(start);
 		const adapter = await NatsEngineAdapter.connect({
@@ -1884,6 +1907,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();
+			auth.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}

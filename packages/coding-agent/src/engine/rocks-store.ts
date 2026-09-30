@@ -8,6 +8,7 @@ import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRunt
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
+	EngineApprovalResolved,
 	CandidateIdentity,
 	ChoiceTransition,
 	ExecutorChoice,
@@ -2540,6 +2541,13 @@ export class RocksEngineMutations {
 					throw new EngineTargetError("stale_target", "Input revision changed");
 			}
 			const status = outcome === "cancelled" ? "cancelled" : outcome === "deny" ? "denied" : "approved";
+			if (status !== "cancelled" && !record)
+				throw new EngineTargetError("invalid_request", "Approval resolution requires its verified decision");
+			const resolution: EngineApprovalResolved = {
+				request_id: id, decision_revision: request.decision_revision + 1,
+				...(status === "cancelled" ? { outcome: "cancelled", decided_by: record?.decided_by ?? null } :
+					{ outcome: status, decided_by: record!.decided_by }),
+			};
 			const resolved = { ...request, status, decision_revision: request.decision_revision + 1 } as ApprovalRequest;
 			await tx.put("approval", id, {
 				...approval,
@@ -2558,12 +2566,7 @@ export class RocksEngineMutations {
 				await this.append(tx, target, {
 					kind: `${request.kind}_approval_resolved`,
 					causationCommandId: options.causationCommandId,
-					payload: {
-						request_id: id,
-						decision_revision: resolved.decision_revision,
-						outcome: status,
-						decided_by: record?.decided_by ?? null,
-					},
+					payload: resolution,
 				}),
 			];
 			if (effect && status === "approved" && (await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "running") {
@@ -2645,13 +2648,14 @@ export class RocksEngineMutations {
 				!approval.request.expires_at || Date.parse(approval.request.expires_at) > Date.now()) return [];
 			const from = approval.request.addressed_to;
 			const now = new Date().toISOString();
+			const status = to.kind === "human" ? "waiting_human_paused" : "pending";
 			const request = {
 				...approval.request,
 				addressed_to: to,
 				addressed_at: now,
 				expires_at: expiresAt,
 				address_revision: expectedAddressRevision + 1,
-				status: to.kind === "human" ? "waiting_human_paused" : "pending",
+				status,
 			} as ApprovalRequest;
 			await tx.put("approval", id, {
 				...approval,
@@ -2663,7 +2667,7 @@ export class RocksEngineMutations {
 			return [
 				await this.append(tx, target, {
 					kind: "approval_timed_out",
-					payload: { request_id: id, address_revision: expectedAddressRevision, status: request.status },
+					payload: { request_id: id, address_revision: expectedAddressRevision, status },
 				}),
 				await this.append(tx, target, {
 					kind: "approval_escalated",

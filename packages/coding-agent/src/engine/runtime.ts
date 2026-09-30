@@ -2999,7 +2999,7 @@ export class EngineRuntime {
 					allowRetryAfterBeyondMaxDelay: true,
 					deferNestedProviderRetries: true,
 					orderedRouteFallback: {
-						selectors: resolved.selectors.slice(1).filter((selector): selector is string => selector !== undefined),
+						selectors: resolved.selectors.filter((selector): selector is string => selector !== undefined),
 						beforeApply: async (selector, signal) => {
 							const parent = liveBinding;
 							if (!parent || parent.attemptState !== "running") return false;

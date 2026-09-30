@@ -12,6 +12,7 @@ import { Settings, settings as ambientSettings } from "../src/config/settings";
 import { defineCapability, loadCapability, registerProvider } from "../src/capability";
 import { runEngineCommand } from "../src/engine/control-query";
 import type { EngineCommandEnvelope } from "../src/engine/nats-adapter";
+import type { EngineOrdinaryEvent } from "../src/engine/contracts";
 import { type EngineBindingGate, type EngineBindingResult, type EngineStartRequest, type EngineEvent, EngineTargetError } from "../src/engine/contracts";
 import { dispatchEngineCommand, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
@@ -229,7 +230,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		const env = await setup();
 		const prior = await env.start("historical");
 		await env.runtime.drain();
-		const wake = Promise.withResolvers<EngineEvent>();
+		const wake = Promise.withResolvers<EngineOrdinaryEvent>();
 		const unsubscribe = env.runtime.subscribe(event => {
 			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due" && event.payload.queueId === "history-message") {
 				unsubscribe(); wake.resolve(event);
@@ -278,7 +279,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		const release = Promise.withResolvers<boolean>();
 		const env = await setup(undefined, async () => { entered.resolve(); return release.promise; });
 		const events: EngineEvent[] = [];
-		env.runtime.subscribe(event => events.push(event));
+		env.runtime.subscribe(event => { events.push(event); });
 		const started = await env.start("parent-owned");
 		await withTimeout(entered.promise, 5_000, "Controlled parent did not enter its prompt");
 		try {
@@ -303,7 +304,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			const identity = engineCommandIdentity(command);
 			expect(await env.runtime.store.admitCommand(identity, env.runtime.engineGeneration)).toEqual({ status: "binding_pending" });
 			const waiting = env.runtime.store.waitAttemptResult(id, command.commandId, command.attemptId);
-			await env.runtime.cancelAgentInstance(command, "parent aborted");
+			await env.runtime.cancelAgentInstance({ ...request, engineGeneration: env.runtime.engineGeneration }, "parent aborted");
 			expect((await waiting).state).toBe("failed");
 			expect(await env.runtime.store.getAttempt(request.attemptId)).toBeUndefined();
 			expect(await env.runtime.store.admitCommand(identity, env.runtime.engineGeneration))
@@ -446,6 +447,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 
 	it("restores only proven direct-child history, including a retained legacy birth, after restart", async () => {
 		const childIds: string[] = [];
+		const releaseParents = Promise.withResolvers<void>();
 		const mock = createMockModel({ handler: context => context.messages.at(-1)?.role === "toolResult"
 			? { content: ["done"] }
 			: { content: childIds.map(id => ({ type: "toolCall" as const, id: `read-${id}`, name: "read",
@@ -453,15 +455,15 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		const env = await setup(mock.model, async (session, input, identity) => {
 			if (input === "read children") return session.prompt(input);
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+			if (input === "parent" || input === "other-parent") await releaseParents.promise;
 			return true;
 		});
+		try {
 		const execution = admittedExecution(mock.model, env.registry, { continuation: { toolNames: ["read"], restrictToolNames: true } });
 		env.executions.push(execution);
 		const parent = await env.start("history-parent", { input: "parent" }, env.runtime, execution);
-		await env.runtime.drain();
 		const parentRef = `${execution.taskRef}/agents/history-parent`;
 		const other = await env.start("other-parent", {}, env.runtime, execution);
-		await env.runtime.drain();
 		const legacyCall = "unadvertised-child";
 		const legacyRef = `${execution.taskRef}/agents/agent_${engineRouteToken([parentRef, parent.attemptId, legacyCall].join("\0"))}`;
 		const foreign = admittedExecution(mock.model, env.registry, { taskRef: "grimoire://tasks/grimoire/foreign" });
@@ -479,7 +481,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				parentAgentInstanceId: sourceParent.agentInstanceId, parentAgentInstanceRef: sourceRef,
 				bindingSnapshot: { ...semanticBinding(ref, selected.taskRef), parentAgentInstanceRef: sourceRef,
 					parentAttemptId: sourceParent.attemptId, parentBindingRevision: 0 }, input: `private-marker-${name}` }, env.runtime, selected);
-			await env.runtime.drain();
+			expect((await env.runtime.store.waitAttemptResult(child.agentInstanceId, child.commandId, child.attemptId)).state).toBe("completed");
 			if (name === "legacy") await env.runtime.store.mutation(id, async tx => {
 				const row = (await tx.get<RocksCommand>("command", child.commandId))!;
 				const wire = JSON.parse(row.identity.serializedCommand!);
@@ -493,6 +495,8 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				await tx.put("attempt", child.attemptId, attempt);
 			});
 		}
+		releaseParents.resolve();
+		await env.runtime.drain();
 		await env.runtime.dispose();
 		const runtime = await open(env.options);
 		await env.start("history-parent-two", { agentInstanceId: parent.agentInstanceId, agentInstanceRef: parentRef,
@@ -510,6 +514,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect(JSON.stringify(result.content)).not.toContain(`private-marker-${name}`);
 			}
 		}
+		} finally { releaseParents.resolve(); }
 	}, 60_000);
 
 	it("retains owned unbound child history after pre-enrollment and a taskless parent restart", async () => {
@@ -524,11 +529,14 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			{ content: [{ type: "toolCall", id: "read-unbound", name: "read", arguments: { path: `history://${engineAgentId(childId)}` } }] },
 			{ content: ["done"] },
 		] });
+		const releaseParent = Promise.withResolvers<void>();
 		const env = await setup(mock.model, async (session, input, identity) => {
 			if (input === "read retained child") return session.prompt(input);
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+			if (input === "parent") await releaseParent.promise;
 			return true;
 		});
+		try {
 		// Ordinary Dispatch requires a Task. Use the reachable taskless consultation contract.
 		const execution = admittedExecution(mock.model, env.registry, {
 			dispatch: { ...env.execution.config.dispatch, execution_kind: "consultation", target: null,
@@ -540,14 +548,15 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		const snapshot = { ...semanticBinding(parentRef), taskRef: null, workStepId: null, installationId, bindingRevision: 1 };
 		const parent = await env.start("unbound-parent", { agentInstanceId: parentId, agentInstanceRef: parentRef,
 			principalId, bindingSnapshot: snapshot, input: "parent" }, env.runtime, execution);
-		await env.runtime.drain();
 		await env.runtime.store.registerAgent({ agentInstanceId: childId, agentInstanceRef: childRef,
 			parentAgentInstanceId: parentId, parentAgentInstanceRef: parentRef, principalId, authorityGeneration: 1 });
 		const childSnapshot = { ...snapshot, agentInstanceRef: childRef, parentAgentInstanceRef: parentRef,
 			parentAttemptId: parent.attemptId, parentBindingRevision: 1 };
-		await env.start("unbound-child", { agentInstanceId: childId, agentInstanceRef: childRef, principalId,
+		const child = await env.start("unbound-child", { agentInstanceId: childId, agentInstanceRef: childRef, principalId,
 			parentAgentInstanceId: parentId, parentAgentInstanceRef: parentRef, bindingSnapshot: childSnapshot,
 			input: "exact retained unbound transcript" }, env.runtime, execution);
+		expect((await env.runtime.store.waitAttemptResult(child.agentInstanceId, child.commandId, child.attemptId)).state).toBe("completed");
+		releaseParent.resolve();
 		await env.runtime.drain();
 		await env.runtime.dispose();
 		const runtime = await open(env.options);
@@ -560,6 +569,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			.findLast(message => message.role === "toolResult" && message.toolCallId === "read-unbound");
 		expect(result).toMatchObject({ role: "toolResult", isError: false });
 		expect(JSON.stringify(result)).toContain("exact retained unbound transcript");
+		} finally { releaseParent.resolve(); }
 	}, 60_000);
 
 	for (const storage of ["inline", "blob"] as const) it(`retains ${storage} user and tool-result image resources across restart`, async () => {
@@ -600,7 +610,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		]);
 		expect(JSON.stringify(page.entries)).not.toContain(image.toString("base64"));
 		for (const resource of [upload, result]) {
-			const read = await env.runtime.store.runtimeResource({ principalId: "owner", resource, offset: 0, limit: 65_536 });
+			const read = await env.runtime.store.runtimeResource({ principalId: "owner", resource: { ...resource }, offset: 0, limit: 65_536 });
 			expect(Buffer.from(String(read.contentBase64), "base64")).toEqual(image);
 		}
 		await env.runtime.dispose();
@@ -759,7 +769,8 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect(attempt.execution!.executor_choice.rules.map(rule => rule.ref))
 					.toEqual(["gctx:ffffffffffffffff", "gctx:gggggggggggggggg"]);
 				const events = await runtime.store.pendingEvents();
-				const change = events.find(event => event.attemptId === first.attemptId && event.kind === "executor_route_changed")!;
+				const change = events.find((event): event is Extract<EngineEvent, { kind: "executor_route_changed" }> =>
+					event.attemptId === first.attemptId && event.kind === "executor_route_changed")!;
 				expect(change.payload?.event_id).toBe(attempt.execution!.executor_choice.transitions[0].event_id);
 				expect(events.indexOf(change)).toBeLessThan(events.findIndex(event => event.attemptId === first.attemptId &&
 					event.kind === (exhausted ? "failed" : "completed")));

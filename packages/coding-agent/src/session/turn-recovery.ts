@@ -1752,6 +1752,9 @@ export class TurnRecovery {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		if (this.#turnRetryPolicy?.orderedRouteFallback &&
+			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
+			return false;
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
@@ -1778,9 +1781,6 @@ export class TurnRecovery {
 		// listener reading attribution in that window must already see the incoming
 		// candidate as fallback-routed. Attribution itself is safe regardless — it
 		// names the last model that served, which this swap has not changed.
-		if (this.#turnRetryPolicy?.orderedRouteFallback &&
-			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
-			return false;
 		const routedBeforeSwap = this.#fallbackRoutedFor;
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
@@ -1889,6 +1889,11 @@ export class TurnRecovery {
 			if (!candidate) continue;
 			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
 			if (!this.#host.contextFitsModel(candidate, preserveFailedTurn ? undefined : failedMessage)) continue;
+			if (this.#turnRetryPolicy?.orderedRouteFallback) {
+				if (await this.applyRetryFallbackCandidate("executor-route", selector, currentSelector, { pinFallback: true }))
+					return true;
+				continue;
+			}
 			let apiKey: string | undefined;
 			try {
 				apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -1901,7 +1906,7 @@ export class TurnRecovery {
 			}
 			if (!apiKey) continue;
 			if (await this.applyRetryFallbackCandidate(
-				this.#turnRetryPolicy?.orderedRouteFallback ? "executor-route" : "same-model-route",
+				"same-model-route",
 				selector,
 				currentSelector,
 				{ pinFallback: true, apiKey },
