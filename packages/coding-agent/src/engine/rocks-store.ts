@@ -1950,14 +1950,13 @@ export class RocksEngineMutations {
 	async commitBindingEvent(
 		binding: EngineBindingSnapshot,
 		event: EngineTransitionEvent,
-		id: string,
-		receipt: EngineCommandReceipt,
+		settlement?: { commandId: string; receipt: EngineCommandReceipt },
 	): Promise<EngineEvent> {
 		return this.mutation(binding.agentInstanceId, async tx => {
 			await this.assertFence(tx, binding);
 			await this.bind(tx, binding);
 			const result = await this.append(tx, binding, event);
-			await this.settle(tx, id, receipt);
+			if (settlement) await this.settle(tx, settlement.commandId, settlement.receipt);
 			return result;
 		});
 	}

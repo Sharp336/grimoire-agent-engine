@@ -189,7 +189,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 		)
 			return false;
 		const [stored] = await this.eventsAfter(event.attemptId, event.eventId - 1, 1);
-		if (!stored) return false;
+		if (!stored || stored.kind !== "inbox_changed") return false;
 		for (const key of [
 			"eventId",
 			"seq",

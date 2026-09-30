@@ -1423,8 +1423,7 @@ export class EngineRuntime {
 						intentCommandId: request.commandId,
 					},
 					{ kind: "holds_changed", causationCommandId: request.commandId, payload: { action, ...result } },
-					settleCommand ? request.commandId : undefined,
-					{ outcome: "applied", detail: result },
+					settleCommand ? { commandId: request.commandId, receipt: { outcome: "applied", detail: result } } : undefined,
 				);
 			} catch (error) {
 				if (resumeMessage)
@@ -2647,7 +2646,7 @@ export class EngineRuntime {
 			binding = await this.#openBinding(
 				request, openingExecution, continuationDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
-				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings,
+				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings ?? undefined,
 			);
 			this.#assertAttachmentSupport(binding.session, images, originals);
 			if (preparedHistory?.pendingInboxSourceSessionId)
@@ -5634,6 +5633,10 @@ export class EngineRuntime {
 		binding.leaseHeartbeat = undefined;
 		binding.session.beginDispose();
 		const errors: unknown[] = [];
+		let abort: Promise<void> | undefined;
+		await collectFailure(errors, () => {
+			abort = binding.session.abort({ reason });
+		});
 		await collectFailure(errors, binding.unsubscribe);
 		if (retainApproval) {
 			for (const [id, pending] of this.#pendingToolApprovals)
@@ -5646,10 +5649,6 @@ export class EngineRuntime {
 		await collectFailure(errors, () =>
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId }),
 		);
-		let abort: Promise<void> | undefined;
-		await collectFailure(errors, () => {
-			abort = binding.session.abort({ reason });
-		});
 		await collectFailure(errors, () => binding.pauseGate.resume());
 		await collectFailure(errors, () => this.#notifyPauseProgress(binding));
 		if (abort) await collectFailure(errors, () => abort!);

@@ -180,7 +180,10 @@ export class ProviderExecutionClient {
 			typeof oauth.agentDir === "string" && oauth.agentDir.length > 0 &&
 			typeof oauth.accountId === "string" && oauth.accountId.length > 0 &&
 			typeof oauth.credentialId === "number" && Number.isSafeInteger(oauth.credentialId) && oauth.credentialId > 0 &&
-			mode === "owner_local" && credential.startsWith("clientcred://localomp.");
+			mode === "owner_local" && credential.startsWith("clientcred://localomp.")
+			? { method: "oauth" as const, store: "local_omp" as const,
+				agentDir: oauth.agentDir, accountId: oauth.accountId, credentialId: oauth.credentialId }
+			: undefined;
 		if (
 			(mode !== "owner_local" && mode !== "hosted_broker") ||
 			(api !== "openai-completions" && api !== "anthropic-messages" && api !== "openai-responses") ||
@@ -206,10 +209,7 @@ export class ProviderExecutionClient {
 			providerRuntimeId,
 			baseUrl,
 			credential,
-			...(ownedOAuth ? { localOAuth: {
-				method: "oauth" as const, store: "local_omp" as const,
-				agentDir: oauth.agentDir, accountId: oauth.accountId, credentialId: oauth.credentialId,
-			} } : {}),
+			...(ownedOAuth ? { localOAuth: ownedOAuth } : {}),
 			...(typeof pin === "string" ? { executionPin: pin } : {}),
 		};
 	}

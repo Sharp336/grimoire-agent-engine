@@ -30,6 +30,7 @@ export const LEASE_HEARTBEAT_MS = 30_000;
 const FROZEN_CANDIDATES = 8;
 
 const sha256 = (value: string): `sha256:${string}` => `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+const isSha256 = (value: string): value is `sha256:${string}` => /^sha256:[a-f0-9]{64}$/.test(value);
 export const routingStateId = (principalId: string, deviceId: string) =>
 	`routing:${createHash("sha256").update(`${principalId}\0${deviceId}`, "utf8").digest("hex")}`;
 export const leaseId = (attemptId: string) => `slot-lease:${attemptId}`;
@@ -195,7 +196,7 @@ async function census(tx: RuntimeTransaction, principalId: string, deviceId: str
 	}
 }
 
-interface Transition {
+type Transition = {
 	tx: RuntimeTransaction;
 	census: Census;
 	principalId: string;
@@ -203,13 +204,15 @@ interface Transition {
 	commandId: string;
 	agentRef: string;
 	attemptId: string;
-	action: RoutingReceipt["action"];
-	lease: string | null;
 	queue: string | null;
-	candidate: CandidateIdentity | null;
-	leaseRevision: number | null;
-	from?: CandidateIdentity;
-}
+} & (
+	| { action: "acquire" | "renew" | "release"; lease: string; candidate: CandidateIdentity;
+		leaseRevision: number; from?: never }
+	| { action: "transfer"; lease: string; candidate: CandidateIdentity;
+		leaseRevision: number; from: CandidateIdentity }
+	| { action: "enqueue" | "cancel" | "dequeue"; lease: null; queue: string;
+		candidate: null; leaseRevision: null; from?: never }
+);
 
 /** One routing op per mutation: revision bump, receipt on the Attempt start command, typed owner operation. */
 async function commitTransition(t: Transition): Promise<RoutingReceipt> {
@@ -235,8 +238,7 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 	};
 	const receipt = { ...unsigned, receipt_hash: sha256(storageCanonicalJson(unsigned)) } satisfies RoutingReceipt;
 	await t.tx.put("command", t.commandId, { ...command, routing: receipt, updated_at: Date.now() });
-	t.tx.routingAdmission = {
-		action: t.action,
+	const operation = {
 		expected_routing_revision: t.census.revision,
 		command_id: t.commandId,
 		attempt_id: t.attemptId,
@@ -249,8 +251,15 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 		receipt_id: receipt.receipt_id,
 		receipt_hash: receipt.receipt_hash,
 		lease_revision: leaseRevision,
-		...(t.from ? { from_candidate: t.from } : {}),
 	};
+	if (t.action === "enqueue" || t.action === "cancel" || t.action === "dequeue")
+		t.tx.routingAdmission = { ...operation, action: t.action, queue_id: t.queue };
+	else if (t.action === "transfer")
+		t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
+			candidate: t.candidate, lease_revision: t.leaseRevision, from_candidate: t.from };
+	else
+		t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
+			candidate: t.candidate, lease_revision: t.leaseRevision };
 	return receipt;
 }
 
@@ -407,6 +416,9 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 	if (own) return { status: "queued", queueId: queueId(own.sequence) };
 	const sequence = current.revision + 1;
 	const key = queueId(sequence);
+	const rosterRevision = request.rosterRevision;
+	if (!isSha256(rosterRevision))
+		throw new EngineTargetError("admission_state_unknown", "Authorized roster revision is not a SHA256 hash");
 	await tx.create("metadata", key, {
 		schema: "grimoire.slot_queue.v1",
 		subtype: "slot_queue",
@@ -421,7 +433,7 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 		origin_receipt_id: request.originReceiptId,
 		bindingSnapshot: request.bindingSnapshot,
 		auth_context_id: request.authContextId,
-		roster_revision: request.rosterRevision,
+		roster_revision: rosterRevision,
 		candidate_refs: request.candidates.map(candidateRef),
 		requested_at: Date.now(),
 		reason: aheadEligible ? "fifo" : "capacity",
@@ -525,6 +537,9 @@ export async function stageRelease(
 		if (edge.caller_attempt_id === attemptId || edge.waited_admission_id === attemptId)
 			await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
 	const selected = attempt?.execution?.executor_choice;
+	const candidate = selected ? currentIdentity(selected) : start?.candidate;
+	if (!candidate)
+		throw new EngineTargetError("admission_state_unknown", "Leased Attempt has no retained candidate");
 	await commitTransition({
 		tx,
 		census: current,
@@ -536,7 +551,7 @@ export async function stageRelease(
 		action: "release",
 		lease: key,
 		queue: null,
-		candidate: selected ? currentIdentity(selected) : (start?.candidate ?? null),
+		candidate,
 		leaseRevision: lease.lease_revision,
 	});
 	return true;

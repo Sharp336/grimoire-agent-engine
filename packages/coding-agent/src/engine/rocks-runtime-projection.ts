@@ -622,7 +622,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 	if (event.kind.startsWith("input_") || approvalEvent(event.kind)) {
 		const payload = event.payload;
 		const inputId = String(event.kind === "input_requested" || event.kind === "input_resolved"
-			? payload?.inputId
+			? event.payload?.inputId
 			: payload && ("id" in payload ? payload.id : "request_id" in payload ? payload.request_id : undefined));
 		const id = projectionId("input", event.attemptId, inputId);
 		if (event.kind.endsWith("requested")) {

@@ -755,7 +755,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					bindingSnapshot: root.bindingSnapshot, runtimeBindingId: root.bindingId, bindingGeneration: root.bindingGeneration,
 					executionId: root.executionId, attemptId: root.attemptId, authorityGeneration: root.authorityGeneration,
 					principalId: "owner", issuedAt: Date.now(),
-					payload: { originReceiptId: "origin:nested-fifo-resume",
+					payload: { originReceiptId: "origin:nested-fifo-resume", initiator: { kind: "human" },
 						expectedIntentRevision: (await runtime.store.intent(root.agentInstanceId)).intentRevision },
 				};
 				rootExecution.captureCommand(command);
@@ -784,7 +784,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					const approval = (await runtime.store.durableApprovalPause(leaf.attemptId))![0]!;
 					const binding = (await runtime.store.getBinding(leaf.agentInstanceId))!;
 					const decision = approvalDecisionFor(leafExecution, { ...binding, principalId: "owner" },
-						"nested-late-approval", approval.request, "approve");
+						"nested-late-approval", approval, "approve");
 					const approve: EngineCommandEnvelope = {
 						schema: "grimoire.engine.command.v1", op: "resolve_approval", commandId: decision.command_id,
 						deviceId: command.deviceId, engineId: command.engineId, engineGeneration: runtime.engineGeneration,
@@ -990,10 +990,12 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					.toEqual([["settled", "completed"]]);
 				expect(await runtime.store.durableApprovalPause(started.attemptId)).toBeDefined();
 				expect(mock.calls).toHaveLength(2);
-				await runtime.dispose();
+				await withTimeout(runtime.dispose(), 5_000, "Paused approval disposal did not quiesce");
+				expect(mock.calls).toHaveLength(2);
 				runtime = await open(env.options);
 				const binding = (await runtime.store.getBinding(started.agentInstanceId))!;
 				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+				expect(mock.calls).toHaveLength(2);
 				const approval = (await runtime.store.getApproval(requestId))!;
 				const decision = approvalDecisionFor(execution, { ...binding, principalId: "owner" },
 					"usage-late-approval", approval.request, "approve");
@@ -1066,7 +1068,8 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					runtimeBindingId: target.bindingId, bindingGeneration: target.bindingGeneration,
 					executionId: target.executionId, attemptId: target.attemptId,
 					authorityGeneration: target.authorityGeneration, principalId: "owner", issuedAt: Date.now(),
-					payload: { originReceiptId: `origin:${commandId}`, expectedIntentRevision: revision },
+					payload: { originReceiptId: `origin:${commandId}`, expectedIntentRevision: revision,
+						...(op === "cancel" ? {} : { initiator: { kind: "human" } }) },
 				});
 			try {
 				const target = await env.start("fifo-initial", {}, runtime, execution);

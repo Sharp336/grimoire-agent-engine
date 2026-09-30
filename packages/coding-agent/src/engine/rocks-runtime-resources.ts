@@ -68,6 +68,8 @@ export async function runtimeResource(
 		let end = offset;
 		for (const raw of rows.records) {
 			const row = raw.value as unknown as ProjectedEvent;
+			if (row.kind !== "message_updated")
+				throw new EngineTargetError("history_expired", "Message content event is unavailable");
 			if (Number(row.message_revision) > Number(resource.revision) || Number(row.message_end_offset) <= end)
 				continue;
 			if (Number(row.message_offset) > end)
