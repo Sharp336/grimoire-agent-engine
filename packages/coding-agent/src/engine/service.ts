@@ -120,8 +120,10 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 					}
 				: undefined,
 			approvalAncestor: rpc
-				? async identity => await rpc.call("approval_origin", { action: "ancestor", ...identity })
-					as unknown as ApprovalAncestor
+				? async identity => {
+						const ancestor: Record<string, unknown> = await rpc.call("approval_origin", { action: "ancestor", ...identity });
+						return ancestor as unknown as ApprovalAncestor;
+					}
 				: undefined,
 			reserveChild: rpc
 				? async request => {

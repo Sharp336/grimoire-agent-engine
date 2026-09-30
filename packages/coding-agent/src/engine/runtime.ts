@@ -4250,7 +4250,13 @@ export class EngineRuntime {
 				logger.warn("Decided approval awaits same-Attempt FIFO routing", {
 					requestId: id, error: safeEngineErrorDetail(error),
 				});
-				if (!this.#recoveryTimers.has(binding.agentInstanceId)) {
+				if (!this.#transientRecoveryFailure(error)) {
+					await this.#commitEvent(this.#snapshot(binding), "paused", {
+						cause: "approval_recovery_refused",
+						code: error instanceof EngineTargetError ? error.code : "stale_target",
+						reason: safeEngineErrorDetail(error),
+					});
+				} else if (!this.#recoveryTimers.has(binding.agentInstanceId)) {
 					const timer = setTimeout(() => {
 						this.#recoveryTimers.delete(binding.agentInstanceId);
 						this.#trackRun(this.#resumeApprovedTool(binding, id));
@@ -5728,11 +5734,31 @@ export class EngineRuntime {
 		}
 	}
 
+	/** Only unknown availability or capacity is retried; an explicit authority refusal stays visibly paused. */
+	#transientRecoveryFailure(error: unknown): boolean {
+		if (error instanceof EngineBindingPendingError) return true;
+		if (!(error instanceof EngineTargetError)) return true;
+		return ["binding_pending", "source_unavailable", "capacity_unavailable", "admission_state_unknown"]
+			.includes(error.code);
+	}
+
 	#retryPausedRecovery(target: EngineBindingSnapshot, error: unknown): void {
 		logger.warn("Approval Attempt remains paused awaiting revalidation", {
 			attemptId: target.attemptId, error: safeEngineErrorDetail(error),
 		});
-		if (this.#disposed || this.#recoveryTimers.has(target.agentInstanceId)) return;
+		if (this.#disposed) return;
+		if (!this.#transientRecoveryFailure(error)) {
+			// A later decision or control command re-checks; nothing retries a refusal on a timer.
+			this.#trackRun(this.#commitEvent(target, "paused", {
+				cause: "approval_recovery_refused",
+				code: error instanceof EngineTargetError ? error.code : "stale_target",
+				reason: safeEngineErrorDetail(error),
+			}).catch(reason => logger.warn("Approval recovery refusal was not recorded", {
+				attemptId: target.attemptId, error: safeEngineErrorDetail(reason),
+			})));
+			return;
+		}
+		if (this.#recoveryTimers.has(target.agentInstanceId)) return;
 		const timer = setTimeout(() => {
 			this.#recoveryTimers.delete(target.agentInstanceId);
 			this.#trackRun(this.#inLane(target.agentInstanceId, async () => {
