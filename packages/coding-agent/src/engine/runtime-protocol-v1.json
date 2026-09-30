@@ -17810,6 +17810,108 @@
           "type": "object",
           "properties": {
             "kind": {
+              "const": "account"
+            },
+            "action": {
+              "const": "record_metric"
+            },
+            "ref": {
+              "$ref": "#/$defs/artifactRef"
+            },
+            "observation": {
+              "type": "object",
+              "properties": {
+                "metric": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dimension": {
+                  "enum": [
+                    "pool",
+                    "quota_window",
+                    "route"
+                  ]
+                },
+                "dimension_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "value": {
+                  "oneOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "unit": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "observed_at": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "resets_at": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "window_start": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "window_end": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "metric",
+                "dimension",
+                "dimension_id",
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "ref",
+            "observation"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
               "const": "consultant"
             },
             "action": {

@@ -2143,6 +2143,21 @@ export type ExecutorSettingsRequest = {
 	"action": "get";
 	"id": string;
 } | {
+	"kind": "account";
+	"action": "record_metric";
+	"ref": ArtifactRef;
+	"observation": {
+		"metric": string;
+		"dimension": "pool" | "quota_window" | "route";
+		"dimension_id": string;
+		"value": number | string;
+		"unit"?: string | null;
+		"observed_at"?: string;
+		"resets_at"?: string | null;
+		"window_start"?: string | null;
+		"window_end"?: string | null;
+	};
+} | {
 	"kind": "consultant";
 	"action": "list";
 } | {
