@@ -30,13 +30,12 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 import {
-	admitBrokerCommand,
-	admitBrokerStart,
+	admitStart,
 	admittedExecution,
 	approvalDecisionFor,
 	startRequest,
 	type AdmittedExecutionFixture,
-} from "./helpers/engine-nats-admitted-fixture";
+} from "./helpers/engine-runtime-admitted-fixture";
 
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
@@ -288,7 +287,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const releaseDelivery = Promise.withResolvers<void>();
 		try {
 			const agentInstanceRef = "grimoire://tasks/grimoire/queue-boundary/agents/paused";
-			const started = await runtime.start(startRequest(execution, {
+			const started = await admitStart(runtime, execution, startRequest(execution, {
 				commandId: "queue-start",
 				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 				agentInstanceRef,
@@ -411,7 +410,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const client = await connect({ servers: broker.url });
 		try {
 			const agentInstanceRef = "grimoire://tasks/grimoire/resume-boundary/agents/paused";
-			const started = await runtime.start(startRequest(execution, {
+			const started = await admitStart(runtime, execution, startRequest(execution, {
 				commandId: "nats-resume-start",
 				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 				agentInstanceRef,
@@ -777,7 +776,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				issuedAt: Date.now(),
 				payload: { approvalDecision: decision, expectedInputRevision: 0 },
 			};
-			admitBrokerCommand(execution, resolveApproval, decision.origin_receipt_id);
+			resolveApproval.payload.originReceiptId = decision.origin_receipt_id;
+			execution.captureCommand(resolveApproval);
 			await js.publish(
 				adapter.commandSubject("agent-permit", "resolve_approval"),
 				JSON.stringify(resolveApproval),
@@ -1888,9 +1888,17 @@ function startCommand(
 		authorityGeneration: 1,
 		principalId: "owner",
 		issuedAt: Date.now(),
-		payload: { cwd, input: suffix.toUpperCase() },
+		payload: execution ? {
+			cwd, input: suffix.toUpperCase(),
+			executionConfiguration: execution.config,
+			dispatchRef: execution.dispatchRef,
+			dispatchHash: execution.dispatchHash,
+			executionKind: "ordinary",
+			specialRef: null,
+			originReceiptId: "origin:command-" + suffix,
+		} : { cwd, input: suffix.toUpperCase() },
 	};
-	if (execution) admitBrokerStart(execution, command);
+	if (execution) execution.captureCommand(command);
 	return command;
 }
 
