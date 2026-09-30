@@ -1,8 +1,10 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding, validateStartRequest } from "../src/engine/contracts";
-import { engineCommandIdentity } from "../src/engine/nats-adapter";
+import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding, validateStartRequest } from "../src/engine/contracts";
+import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
+import type { RocksEffect } from "../src/engine/rocks-runtime-rows";
+import { type EngineApprovalRow, EngineCommandConflictError } from "../src/engine/store";
 import {
 	RUNTIME_PROTOCOL_HASH,
 	type RuntimeScope,
@@ -93,6 +95,145 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			}),
 		);
 	}
+
+	for (const appliedBeforeRestart of [false, true]) it(
+		appliedBeforeRestart
+			? "replays an applied old-generation approval and its lost hosted acknowledgement without another decision"
+			: "prepares only never-admitted approvals on the adopted destination generation",
+		async () => {
+			const store = await createStore();
+			const principalId = "grimoire:user:approval-delivery";
+			const installationId = `install_${"a".repeat(32)}`;
+			const owner = new Bun.CryptoHasher("sha256").update(principalId).digest("hex");
+			const agentInstanceRef = `grimoire://agents/~u/${owner}/requester`;
+			const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+			const snapshot = { ...semanticBinding(agentInstanceRef), bindingRevision: 1, installationId };
+			store.verifyInstallation(installationId, principalId);
+			await store.checkSemanticStart(agentInstanceId, snapshot, principalId);
+			const target = { ...binding("approval"), agentInstanceId, bindingSnapshot: snapshot };
+			const start: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1", op: "start", commandId: target.commandId,
+				deviceId: "device", engineId: "engine", engineGeneration: 1, principalId,
+				agentInstanceId, agentInstanceRef, bindingSnapshot: snapshot, runtimeBindingId: target.bindingId,
+				bindingGeneration: 1, authorityGeneration: 1, executionId: target.executionId, attemptId: target.attemptId,
+				issuedAt: 1, payload: { expectedIntentRevision: 0 },
+			};
+			await store.admitCommand(engineCommandIdentity(start), 1);
+			await store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
+				requireNew: true, settleCommandId: start.commandId,
+			});
+			const hash = `sha256:${"a".repeat(64)}`;
+			const request: ApprovalRequest = {
+				schema: "grimoire.approval_request.v1", id: "approval-effect", effect_id: "approval-effect",
+				principal_id: principalId, requester_agent_ref: agentInstanceRef, requester_attempt_id: target.attemptId,
+				requester_binding_revision: 1, dispatch_hash: hash, kind: "tool", name: "bash",
+				subject: { tool_name: "bash", call_hash: hash, ceiling_hash: hash },
+				requires_human: true, reason: "fixture decision", created_at: "2026-09-30T00:00:00Z",
+				addressed_to: { kind: "human", principal_id: principalId }, addressed_at: "2026-09-30T00:00:00Z",
+				expires_at: null, address_revision: 1, decision_revision: 0, status: "waiting_human_paused",
+				timeout_seconds: 300, settings_revision: 0, settings_hash: hash,
+			};
+			// Seed the retained paused effect, not a provider or a mock approval implementation.
+			const effect: RocksEffect = {
+				effect_id: request.effect_id, command_id: start.commandId, agent_instance_id: agentInstanceId,
+				execution_id: target.executionId, attempt_id: target.attemptId, binding_id: target.bindingId,
+				engine_generation: 1, binding_generation: 1, authority_generation: 1,
+				effect_kind: "tool", tool_call_id: "call", tool_name: "bash", input_hash: hash, policy: "permit",
+				assistant_message_id: null, assistant_block_id: null, state: "planned", outcome: null,
+				created_at: 1, updated_at: 1, runtime_event_id: 0,
+			};
+			await store.mutation(agentInstanceId, async tx => {
+				await tx.put("effect", effect.effect_id, effect);
+				await tx.put("approval", request.id, {
+					approval_id: request.id, effect_id: request.effect_id, state: "pending", decision: null,
+					decision_record: null, timed_out_attempt_ids: [], request, updated_at: 1,
+				} satisfies EngineApprovalRow);
+			});
+			await store.appendEvent({ ...target, causationCommandId: start.commandId,
+				kind: "tool_approval_requested", payload: request });
+			await store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
+			const inputRevision = (await store.getAttempt(target.attemptId))!.input_revision;
+			const decision: ApprovalDecision = {
+				schema: "grimoire.approval_decision.v1", request_id: request.id, command_id: "approval-command",
+				expected_address_revision: 1, expected_decision_revision: 0, decision: "approve", reason: null,
+				origin_receipt_id: "origin-fixture", decided_by: { kind: "human", principal_id: principalId },
+				authority: { ceiling_hash: hash, subject_hash: hash, dispatch_hash: hash },
+				decided_at: "2026-09-30T00:01:00Z",
+			};
+			const envelope: EngineCommandEnvelope = { ...start, op: "resolve_approval", commandId: decision.command_id,
+				payload: { originReceiptId: decision.origin_receipt_id, approvalDecision: decision, expectedInputRevision: inputRevision } };
+			const original = engineCommandIdentity(envelope);
+			if (appliedBeforeRestart) {
+				await store.admitCommand(original, 1);
+				await store.resolveApproval(target, request.id, "approve", decision, {
+					settleCommandId: original.commandId, causationCommandId: original.commandId, expectedInputRevision: inputRevision,
+				});
+			}
+			const restarted = reopen();
+			restarted.verifyInstallation(installationId, principalId);
+			const generation = await restarted.nextEngineGeneration();
+			const current = { ...target, engineGeneration: generation };
+			// The existing recovery owner adopts this fence. This case tests delivery after that adoption,
+			// not the separate runtime/session rehydration path.
+			await restarted.mutation(agentInstanceId, async tx => {
+				const nativeBinding = await tx.get<Record<string, unknown>>("binding", agentInstanceId);
+				const nativeAttempt = await tx.get<Record<string, unknown>>("attempt", target.attemptId);
+				await tx.put("binding", agentInstanceId, { ...nativeBinding, engine_generation: generation });
+				await tx.put("attempt", target.attemptId, { ...nativeAttempt, engine_generation: generation });
+				await tx.put("effect", effect.effect_id, { ...effect, engine_generation: generation });
+			});
+			const foreign = reopen();
+			foreign.verifyInstallation(`install_${"b".repeat(32)}`, principalId);
+			await expect(foreign.approvalDelivery(original, decision, inputRevision, generation))
+				.rejects.toMatchObject({ code: "stale_target" });
+			let delivered = original;
+			if (!appliedBeforeRestart) {
+				await expect(restarted.approvalDelivery(original, decision, inputRevision + 1, generation))
+					.rejects.toMatchObject({ code: "stale_target" });
+				await expect(restarted.approvalDelivery(original, { ...decision, expected_address_revision: 2 }, inputRevision, generation))
+					.rejects.toMatchObject({ code: "stale_target" });
+				await restarted.mutation(agentInstanceId, tx => tx.put("effect", effect.effect_id, {
+					...effect, engine_generation: generation, state: "unknown", outcome: "unknown",
+				}));
+				await expect(restarted.approvalDelivery(original, decision, inputRevision, generation))
+					.rejects.toMatchObject({ code: "stale_target" });
+				await restarted.mutation(agentInstanceId, tx => tx.put("effect", effect.effect_id, {
+					...effect, engine_generation: generation,
+				}));
+				expect(await restarted.approvalDelivery(original, decision, inputRevision, generation)).toEqual({ status: "absent" });
+				await expect(store.admitCommand(original, 1)).rejects.toMatchObject({ code: "stale_target" });
+				await expect(restarted.admitCommand(original, generation)).rejects.toMatchObject({ code: "stale_target" });
+				await expect(restarted.rejectUnadmittedCommand(original, { outcome: "rejected" }, generation))
+					.rejects.toMatchObject({ code: "stale_target" });
+				expect(await restarted.getStartConversationIdentity(original.commandId)).toBeUndefined();
+				delivered = engineCommandIdentity({ ...envelope, engineGeneration: generation });
+				expect(delivered.canonicalHash).not.toBe(original.canonicalHash);
+				await restarted.admitCommand(delivered, generation);
+				await expect(restarted.approvalDelivery(delivered, decision, inputRevision, generation))
+					.rejects.toMatchObject({ code: "admission_state_unknown" });
+				await restarted.resolveApproval(current, request.id, "approve", decision, {
+					settleCommandId: delivered.commandId, causationCommandId: delivered.commandId, expectedInputRevision: inputRevision,
+				});
+			}
+			const retained = await restarted.approvalDelivery(delivered, decision, inputRevision, generation);
+			expect(retained).toEqual({ status: "settled", identity: delivered, receipt: { outcome: "applied" } });
+			if (appliedBeforeRestart)
+				await expect(restarted.approvalDelivery(engineCommandIdentity({ ...envelope, engineGeneration: generation }),
+					decision, inputRevision, generation)).rejects.toBeInstanceOf(EngineCommandConflictError);
+			expect(await restarted.admitCommand(delivered, generation)).toEqual({ status: "replay", receipt: { outcome: "applied" } });
+			expect((await restarted.getApproval(request.id))?.request.decision_revision).toBe(1);
+			expect((await restarted.getEffect(request.effect_id))?.state).toBe("planned");
+			const resolved = (await restarted.pendingEventsForSink("hosted-binding")).filter(event =>
+				event.causationCommandId === delivered.commandId && event.kind === "tool_approval_resolved");
+			expect(resolved.map(event => event.payload)).toEqual([{
+				request_id: request.id, decision_revision: 1, outcome: "approved", decided_by: decision.decided_by,
+			}]);
+			await restarted.mutation(agentInstanceId, tx => tx.delete("command", delivered.commandId));
+			await expect(restarted.approvalDelivery(delivered, decision, inputRevision, generation))
+				.rejects.toMatchObject({ code: "admission_state_unknown" });
+			expect((await restarted.getApproval(request.id))?.request.decision_revision).toBe(1);
+		},
+	);
 
 	it("keeps owned admission closed across restart, certifies exact idle and adopts only the committed successor", async () => {
 		const store = await createStore();

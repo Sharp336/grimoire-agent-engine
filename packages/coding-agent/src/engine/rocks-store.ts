@@ -931,6 +931,74 @@ export class RocksEngineMutations {
 	async getStartConversationIdentity(id: string): Promise<EngineCommandIdentity | undefined> {
 		return ((await this.records.get("command", id)).value as unknown as RocksCommand | null)?.identity;
 	}
+
+	/** Destination-only delivery proof. Public outcome_unknown is deliberately not evidence of absence. */
+	async approvalDelivery(
+		command: EngineCommandIdentity,
+		decision: ApprovalDecision,
+		expectedInputRevision: number | undefined,
+		processorGeneration: number,
+	): Promise<{ status: "absent" } | { status: "settled"; identity: EngineCommandIdentity; receipt: EngineCommandReceipt }> {
+		validateRuntimeValue("approvalDecision", decision);
+		if (command.operation !== "resolve_approval" || decision.command_id !== command.commandId ||
+			!command.attemptId || !command.principalId || decision.decided_by.principal_id !== command.principalId ||
+			(expectedInputRevision !== undefined && (!Number.isSafeInteger(expectedInputRevision) || expectedInputRevision < 0)))
+			throw new EngineTargetError("invalid_request", "Approval delivery requires its exact decision and input revision");
+		return this.mutation(command.agentInstanceId, async tx => {
+			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
+				throw new EngineTargetError("stale_target", "Approval delivery processor generation changed");
+			const agent = await tx.get<RocksIdentity>("identity", command.agentInstanceId);
+			const binding = await tx.get<RocksBinding>("binding", command.agentInstanceId);
+			const attempt = await tx.get<RocksAttempt>("attempt", command.attemptId!);
+			if (!this.#installation || this.#installation.principalId !== command.principalId ||
+				!agent || agent.principal_id !== command.principalId || agent.agent_instance_ref !== command.agentInstanceRef ||
+				agent.deleted_at || agent.archived_at || !binding || !attempt ||
+				binding.binding_snapshot?.installationId !== this.#installation.installationId ||
+				binding.binding_snapshot.agentInstanceRef !== command.agentInstanceRef ||
+				!attempt.binding_snapshot || !sameSemanticBinding(attempt.binding_snapshot, binding.binding_snapshot) ||
+				binding.attempt_id !== command.attemptId || attempt.agent_instance_id !== command.agentInstanceId ||
+				binding.execution_id !== command.executionId || attempt.execution_id !== command.executionId ||
+				binding.binding_id !== command.bindingId || attempt.binding_id !== command.bindingId ||
+				binding.binding_generation !== command.bindingGeneration || attempt.binding_generation !== command.bindingGeneration ||
+				binding.authority_generation !== command.authorityGeneration || attempt.authority_generation !== command.authorityGeneration ||
+				(command.bindingSnapshot && !sameSemanticBinding(command.bindingSnapshot, binding.binding_snapshot)))
+				throw new EngineTargetError("stale_target", "Approval delivery is not on its current destination installation and Attempt");
+			const admitted = await tx.get<RocksCommand>("command", command.commandId);
+			if (admitted) {
+				if (admitted.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
+				if (admitted.state !== "settled" || !admitted.receipt || !admitted.identity.serializedCommand)
+					throw new EngineTargetError("admission_state_unknown", "Approval command admission is not settled");
+				return { status: "settled", identity: admitted.identity, receipt: admitted.receipt };
+			}
+			if (await tx.revision("command", command.commandId) !== 0)
+				throw new EngineTargetError("admission_state_unknown", "Approval command history was removed");
+			// Reclaim/restore or a missing history row alone cannot prove never-admitted. Reconcile with
+			// the retained applied Start and the still-undecided effect, whose decision settles atomically.
+			const start = await tx.get<RocksCommand>("command", attempt.command_id);
+			const approval = await tx.get<EngineApprovalRow>("approval", decision.request_id);
+			const effect = approval && await tx.get<RocksEffect>("effect", approval.request.effect_id);
+			if (binding.engine_generation !== processorGeneration || attempt.engine_generation !== processorGeneration ||
+				terminal.has(attempt.state) || start?.operation !== "start" || start.state !== "settled" ||
+				start.receipt?.outcome !== "applied" || start.identity.attemptId !== command.attemptId ||
+				start.identity.principalId !== command.principalId ||
+				start.identity.agentInstanceId !== command.agentInstanceId || !start.identity.bindingSnapshot ||
+				!sameSemanticBinding(start.identity.bindingSnapshot, binding.binding_snapshot) ||
+				!approval || approval.state !== "pending" || approval.decision_record ||
+				!["pending", "waiting_human_paused"].includes(approval.request.status) ||
+				approval.request.requester_attempt_id !== command.attemptId ||
+				approval.request.requester_agent_ref !== command.agentInstanceRef ||
+				approval.request.principal_id !== command.principalId ||
+				approval.request.requester_binding_revision !== binding.binding_snapshot.bindingRevision ||
+				approval.request.address_revision !== decision.expected_address_revision ||
+				approval.request.decision_revision !== decision.expected_decision_revision ||
+				(expectedInputRevision !== undefined && attempt.input_revision !== expectedInputRevision) ||
+				!effect || effect.command_id !== attempt.command_id || effect.attempt_id !== command.attemptId ||
+				!this.sameFence(effect, bindingSnapshot(binding)) ||
+				effect.state !== (approval.request.kind === "escalation" ? "started" : "planned"))
+				throw new EngineTargetError("stale_target", "Approval absence cannot be reconciled with its pending native effect");
+			return { status: "absent" };
+		});
+	}
 	async agentInstanceIdForEngineAgent(id: string): Promise<string | undefined> {
 		return (await this.records.query("binding_engine_agent", [id])).records[0]?.value?.agent_instance_id as
 			| string
@@ -1207,6 +1275,10 @@ export class RocksEngineMutations {
 				});
 				return { status: "claimed" };
 			}
+			// Never let an old envelope win the gap between destination lookup and Core rebind.
+			// Settled exact replays above retain their original generation.
+			if (command.operation === "resolve_approval" && command.engineGeneration !== processorGeneration)
+				throw new EngineTargetError("stale_target", "Unadmitted approval requires the current Engine generation");
 			if (command.operation === "start" && command.agentInstanceRef && !command.bindingSnapshot)
 				throw new EngineTargetError("invalid_request", "New Start requires an admitted bindingSnapshot");
 			const lifecycle = await tx.get<RocksIdentity>("identity", command.agentInstanceId);
@@ -1488,6 +1560,8 @@ export class RocksEngineMutations {
 			if (old && old.processor_generation !== null)
 				throw new Error(`Command ${command.commandId} is being processed`);
 			if (!old) {
+				if (command.operation === "resolve_approval" && command.engineGeneration !== processorGeneration)
+					throw new EngineTargetError("stale_target", "Old approval delivery cannot create a rejection receipt");
 				// Never admitted: it holds no pending budget, so settling releases nothing.
 				await tx.put("command", command.commandId, {
 					command_id: command.commandId,

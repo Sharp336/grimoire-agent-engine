@@ -12,7 +12,7 @@ import {
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { EngineTargetError } from "./contracts";
+import { type ApprovalDecision, EngineTargetError } from "./contracts";
 import { storageCanonicalJson } from "../session/storage-client";
 import {
 	type AgentMessageEnvelope,
@@ -414,6 +414,40 @@ export class HostedEngineBridge {
 			Number(command.engineGeneration) > this.#options.engineGeneration
 		) {
 			throw new Error("Agent Engine command claim has an invalid stored Engine generation");
+		}
+		if (command.op === "resolve_approval") {
+			const store = this.#options.eventStore;
+			if (!store || !installationId || command.deviceId !== this.#options.deviceId ||
+				command.engineId !== this.#options.engineId)
+				throw new EngineTargetError("stale_target", "Approval delivery requires its verified destination Engine");
+			let delivery = await store.approvalDelivery(
+				engineCommandIdentity(command as EngineCommandEnvelope), command.payload.approvalDecision as ApprovalDecision,
+				command.payload.expectedInputRevision as number | undefined, this.#options.engineGeneration,
+			);
+			if (delivery.status === "absent" && command.engineGeneration !== this.#options.engineGeneration) {
+				const rebound = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+					action: "rebind_approval", job_id: claim.jobId, lease_token: claim.leaseToken,
+					installation_id: installationId, device_id: this.#options.deviceId,
+					engine_id: this.#options.engineId, engine_generation: this.#options.engineGeneration,
+				});
+				const work = isRecord(rebound.work) ? rebound.work : undefined;
+				const next = work && isRecord(work.command) ? work.command as unknown as EngineCommandEnvelope : undefined;
+				if (rebound.status !== "rebound" || work?.kind !== "command" || !next ||
+					storageCanonicalJson(next) !== storageCanonicalJson({
+						...command, engineGeneration: this.#options.engineGeneration,
+					}))
+					throw new EngineTargetError("stale_target", "Approval rebind changed its immutable decision envelope");
+				command = next;
+				claim.work.command = next;
+				// A restart or concurrent admission during the hosted CAS invalidates the proof.
+				delivery = await store.approvalDelivery(
+					engineCommandIdentity(next), next.payload.approvalDecision as ApprovalDecision,
+					next.payload.expectedInputRevision as number | undefined, this.#options.engineGeneration,
+				);
+			}
+			if (delivery.status === "settled")
+				command = JSON.parse(delivery.identity.serializedCommand!) as EngineCommandEnvelope;
+			claim.work.command = command;
 		}
 		const envelope = command as EngineCommandEnvelope;
 		await js.publish(commandSubject(envelope), encode(envelope), {

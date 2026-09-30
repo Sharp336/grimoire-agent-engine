@@ -555,6 +555,15 @@ export class NatsEngineAdapter {
 				}
 				return;
 			}
+			if (!claimed && command?.op === "resolve_approval" &&
+				command.engineGeneration < this.runtime.engineGeneration &&
+				error instanceof EngineTargetError && error.code === "stale_target") {
+				// The destination bridge must prepare a never-admitted delivery. Do not let an old
+				// broker envelope create a terminal receipt that races its absent-only rebind.
+				message.term("stale_approval_delivery");
+				this.#report(error);
+				return;
+			}
 			if (error instanceof EngineTargetError && error.code === "agent_busy" && !command?.browserPayloadHash) {
 				if (claimed && identity) await this.#releaseClaim(identity);
 				message.nak(1_000);
