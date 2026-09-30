@@ -14,6 +14,7 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -81,7 +82,7 @@ it.skipIf(!(executable && runRoot))(
 				engineGeneration: generation,
 				agentInstanceId,
 				agentInstanceRef,
-				bindingSnapshot: semanticBinding(agentInstanceRef),
+				bindingSnapshot: semanticBinding(agentInstanceRef, "grimoire://tasks/grimoire/queue-fixture"),
 				executionId: `execution-${suffix}`,
 				attemptId: `attempt-${suffix}`,
 				authorityGeneration: 1,

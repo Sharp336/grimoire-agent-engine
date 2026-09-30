@@ -12,7 +12,6 @@ import { SessionManager } from "../src/session/session-manager";
 import * as storage from "../src/session/storage-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { admittedExecution, admitRequest, startRequest, type AdmittedExecutionFixture } from "./helpers/engine-runtime-admitted-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN_ROOT)(
 	"branches and edits real Rocks history before compaction, across inherited prefixes and restart",

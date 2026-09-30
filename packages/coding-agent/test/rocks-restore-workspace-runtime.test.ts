@@ -16,6 +16,7 @@ import { EngineAttachmentUploads } from "../src/engine/runtime-attachments";
 import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/session/rocks-native-session-storage";
+import { storageCanonicalJson } from "../src/session/storage-client";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { admittedExecution, admitRequest, startRequest, startEnvelope } from "./helpers/engine-runtime-admitted-fixture";
 
@@ -85,6 +86,7 @@ it.skipIf(!(executable && runRoot))(
 					enableMCP: false,
 					enableLsp: false,
 				},
+				...execution.optionsFor({}),
 			});
 			const first = await admitRequest(
 				runtime,
@@ -236,6 +238,16 @@ it.skipIf(!(executable && runRoot))(
 					return { content: ["continued answer"] };
 				},
 			});
+			const targetExecution = admittedExecution(targetModel.model, modelRegistry, {
+				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+			});
+			// The refused queue delivery has a separate admitted execution without the read tool.
+			const deniedExecution = admittedExecution(targetModel.model, modelRegistry, {
+				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+				continuation: { toolNames: ["bash", "task"], restrictToolNames: true },
+			});
+			const targetOptions = targetExecution.optionsFor({});
+			const deniedOptions = deniedExecution.optionsFor({});
 			const createTargetRuntime = async () =>
 				EngineRuntime.create({
 					databasePath: path.join(targetRoot, "engine.sqlite"),
@@ -254,7 +266,21 @@ it.skipIf(!(executable && runRoot))(
 						enableMCP: false,
 						enableLsp: false,
 					},
-					...execution.optionsFor({}),
+					...targetOptions,
+					resolveExecution: (config, frozen, attempt, cwd, signal) => {
+						if (storageCanonicalJson(config) === storageCanonicalJson(targetExecution.config))
+							return targetOptions.resolveExecution!(config, frozen, attempt, cwd, signal);
+						if (storageCanonicalJson(config) === storageCanonicalJson(deniedExecution.config))
+							return deniedOptions.resolveExecution!(config, frozen, attempt, cwd, signal);
+						throw new Error("Unregistered restore execution");
+					},
+					verifyOriginReceipt: identity => {
+						if (targetExecution.receipts.has(identity.originReceiptId))
+							return targetOptions.verifyOriginReceipt!(identity);
+						if (deniedExecution.receipts.has(identity.originReceiptId))
+							return deniedOptions.verifyOriginReceipt!(identity);
+						throw new Error("Unknown restore origin");
+					},
 				});
 			runtime = await createTargetRuntime();
 			const cold = await runtime.store.nativeSessionHeader(first);
@@ -264,7 +290,7 @@ it.skipIf(!(executable && runRoot))(
 			const stale = await admitRequest(
 				runtime,
 				startRequest(
-					execution,
+					targetExecution,
 					{
 						commandId: `stale-${suffix}`,
 						agentInstanceId,
@@ -291,11 +317,6 @@ it.skipIf(!(executable && runRoot))(
 			await runtime.drain();
 			expect((await runtime.store.getAttempt(stale.attemptId))?.state).toBe("cancelled");
 			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
-			// A separately admitted execution whose tool ceiling omits `read`: its queued attachment Start must be fenced.
-			const deniedExecution = admittedExecution(targetModel.model, modelRegistry, {
-				taskRef: "grimoire://tasks/grimoire/restore-fixture",
-				continuation: { toolNames: ["bash", "task"], restrictToolNames: true },
-			});
 			const rejectedRequest = startRequest(
 				deniedExecution,
 				{
@@ -352,9 +373,9 @@ it.skipIf(!(executable && runRoot))(
 			});
 			const command = startEnvelope(
 				runtime,
-				execution,
+				targetExecution,
 				startRequest(
-					execution,
+					targetExecution,
 					{
 						commandId: `continue-${suffix}`,
 						agentInstanceId,
@@ -405,7 +426,7 @@ it.skipIf(!(executable && runRoot))(
 			const afterRestart = await admitRequest(
 				runtime,
 				startRequest(
-					execution,
+					targetExecution,
 					{
 						commandId: `after-restart-${suffix}`,
 						agentInstanceId,

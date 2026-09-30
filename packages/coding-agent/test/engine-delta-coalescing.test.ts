@@ -5,10 +5,13 @@ import type { StreamAdmissionLimits } from "@oh-my-pi/pi-ai/utils/stream-admissi
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EngineOrdinaryEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
+import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
+
+const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
+const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
 
 const frame = (content: string, finishReason: string | null = null) =>
 	`data: ${JSON.stringify({
@@ -145,12 +148,9 @@ async function runFlood(
 		);
 		await runtime.drain();
 		const attempt = await runtime.store.getAttempt(started.attemptId);
-		// message_updated/assistant_snapshot are ordinary kinds: selecting that union arm keeps payload a plain record.
 		const updates = (await runtime.store.pendingEvents()).filter(
-			event =>
-				event.attemptId === started.attemptId &&
-				event.kind === "message_updated",
-		) as EngineOrdinaryEvent[];
+			event => event.attemptId === started.attemptId && event.kind === "message_updated",
+		);
 		const history = await runtime.sessionHistoryPage(
 			started.agentInstanceId,
 			"grimoire://tasks/grimoire/flood/agents/flood-agent",

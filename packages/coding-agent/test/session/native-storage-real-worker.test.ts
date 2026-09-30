@@ -7,23 +7,16 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import {
-	type EngineBindingSnapshot,
-	type EngineOrdinaryEvent,
-	type EngineExecutionConfiguration,
-	type EngineSemanticBindingSnapshot,
-	type EngineStartRequest,
-	EngineTargetError,
-} from "../../src/engine/contracts";
+import { type EngineBindingSnapshot, type EngineStartRequest } from "../../src/engine/contracts";
 import { runEngineCommand } from "../../src/engine/control-query";
-import type { EngineCommandEnvelope } from "../../src/engine/nats-adapter";
 import { EngineRuntime, type EngineRuntimeOptions } from "../../src/engine/runtime";
 import { BlobStore } from "../../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
-import { StorageClient, storageCanonicalJson } from "../../src/session/storage-client";
+import { StorageClient } from "../../src/session/storage-client";
 import { STORAGE_PROTOCOL_SCHEMA_HASH } from "../../src/session/storage-protocol";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { admittedExecution, startEnvelope, startRequest } from "../helpers/engine-runtime-admitted-fixture";
 
 interface StorageRuntimeManifest {
 	schema: string;
@@ -57,146 +50,36 @@ interface StorageTrace {
 async function hashFile(file: string): Promise<string> {
 	return Bun.SHA256.hash(await Bun.file(file).arrayBuffer(), "hex");
 }
-/** The native-storage tests use a real Engine command/admission path with a local deterministic provider. */
+/** Native owner scenarios retain the full captured Start receipt and go through the real command adapter. */
 function nativeEngineHarness(
 	model: Model, modelRegistry: ModelRegistry, settings: Settings,
-	taskRef: WorkTarget["task_ref"], agentInstanceRef: string,
+	taskRef: string, agentInstanceRef: string,
 ) {
-	const accountRef = "gctx:aaaaaaaaaaaaaaaa";
-	const routeRef = "gctx:bbbbbbbbbbbbbbbb";
-	const dispatchRef = "gctx:cccccccccccccccc";
-	const hash = (value: unknown) => `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
-	const spawn = { allowed: "no", max_depth: 0, max_children: 0, on_exceed: "deny" } as const;
-	const limits = { timeout_seconds: null, max_iterations: null };
-	const dispatch: EngineExecutionConfiguration["dispatch"] = {
-		schema: "grimoire.dispatch.v2",
-		execution_kind: "ordinary",
-		special_ref: null,
-		dispatch_id: "native-worker-fixture",
-		target: { task_ref: taskRef, work_step_id: null },
-		prompt: "Native worker fixture",
-		instructions: "",
-		skill_refs: [],
-		display_name: null,
-		preset: null,
-		tools: null,
-		tools_permit: [],
-		tools_on_request: "none",
-		spawn,
-		requirement: {
-			min_tier: 0, required: [], required_tags: [], preferred_tags: [], models: null,
-			exclude: { models: [], families: [], agent_instances: [] },
-			min_context: null, min_output: null, latency_ceiling_ms: null, min_effort: null,
-			service_tier: "standard", downgrade: "forbidden", pin: null,
-			require_trusted_provider: true, fallback_mode: "none",
-		},
-		output_schema: null,
-		limits,
-	};
-	const config: EngineExecutionConfiguration = {
-		dispatch,
-		routes: { routes: [{
-			model_id: model.id, route_ref: routeRef, account_ref: accountRef,
-			effort: "none", service_tier: "standard", billing_pool_id: "native-fixture-pool",
-			billing_pool_basis: "expected", tier: 0, provider_id: model.provider,
-			quota_window_ids: [], shadow_cost: null, price_source: "unknown", estimated: false,
-			record_revisions: {}, provider: model.provider, modelId: model.id,
-			billing_pools: [{
-				pool_id: "native-fixture-pool", kind: "payg", valuation: 1, reserve: 0, price_multiplier: 1,
-				service_tier_multipliers: { standard: 1, priority: 1, flex: 1 },
-				quota_windows: [], window_seconds: null, cap: null,
-			}], quota_windows: [],
-			// The first case materializes the mock API locally; its frozen route only supplies admission capacity.
-			execution: {
-				api: "openai-completions", base_url: model.api === "mock" ? "http://127.0.0.1:1/v1" : model.baseUrl,
-				provider_model_id: model.id, context_window: model.contextWindow,
-				max_output_tokens: model.maxTokens, input_modalities: ["text"],
-				supports_tools: true, supports_reasoning: false, header_refs: [], compat: null,
-				route_content_hash: hash("native-route"), account_content_hash: hash("native-account"),
-				display_name: "Native fixture route", efforts: ["none"], trusted: true,
-				credential: { method: "none", local_ref: null, hosted_ref: null, generation: 1 },
-				account_binding_id: null,
-			},
-			family: null, tags: [], efforts: ["none"], hard_quota_window_ids: [], order_match: null,
-		}] },
-		continuationPolicy: "exact",
-		continuationConfiguration: {
-			systemPrompt: "", toolNames: [], restrictToolNames: true, toolPolicies: {},
-			enableMCP: false, enableLsp: false, lspShared: false,
-			disabledCapabilityProviders: [], outputSchema: null, requireYieldTool: false,
-			spawn, limits, tools_permit: [], tools_on_request: "none", providerPromptCacheKey: null,
-		},
-		stableDependencyDigest: hash("native-dependency"),
-		sessionDefaults: {},
-		instruction_sources: {
-			facts: { binding: "task", scope: [taskRef], os: null, runtime: "artel-engine", engine_version: null },
-			rules: [], skills: [],
-		},
-		record_revisions: {},
-		routingLimits: {
-			scopes: [{ scope_ref: taskRef, agents: 1, by_tier: [], consultations: null }],
-			accounts: { [accountRef]: 1 }, providers: { [model.provider]: 1 },
-		},
-		scope_revision: hash("native-scope"), roster_revision: hash("native-roster"), roster_complete: true,
-	};
-	const bindingSnapshot: EngineSemanticBindingSnapshot = {
-		agentInstanceRef, taskRef, workStepId: null, bindingRevision: 0, installationId: null,
-		parentAgentInstanceRef: null, parentAttemptId: null, parentBindingRevision: null,
-	};
-	const dispatchHash = hash(dispatch);
-	const receipts = new Map<string, Pick<EngineCommandEnvelope, "commandId" | "agentInstanceRef" | "attemptId" | "principalId">>();
-	const options: Pick<EngineRuntimeOptions, "deviceId" | "resolveExecution" | "verifyOriginReceipt"> = {
+	const execution = admittedExecution(model, modelRegistry, {
+		taskRef, scopeAgents: 1, continuation: { restrictToolNames: true },
+	});
+	const options = execution.optionsFor({
 		deviceId: "native-fixture-device",
-		resolveExecution: async (execution, frozen) => {
-			if (hash(execution.dispatch) !== dispatchHash || frozen.length !== 1 || frozen[0]?.route_ref !== routeRef)
-				throw new EngineTargetError("stale_target", "Fixture route differs from admitted execution");
-			return {
-				options: { model, modelRegistry, settings },
-				selectors: ["native-fixture-route"],
-				verifyCandidate: async index => {
-					if (index !== 0) throw new EngineTargetError("stale_target", "Unknown fixture route");
-					return { billing_pool_id: "native-fixture-pool", billing_pool_basis: "expected" };
-				},
-				activateCandidate: () => {},
-				setBillingPoolChanged: () => {}, // Local deterministic provider has no hosted billing admission.
-				dispose: () => {},
-			};
-		},
-		verifyOriginReceipt: async identity => {
-			const receipt = receipts.get(identity.originReceiptId);
-			if (!receipt || receipt.commandId !== identity.commandId ||
-				receipt.agentInstanceRef !== identity.agentInstanceRef ||
-				receipt.attemptId !== identity.attemptId || receipt.principalId !== identity.principalId)
-				throw new EngineTargetError("stale_target", "Fixture Start origin differs from exact command");
-			return {
-				verified: true, dispatchHash, bindingSnapshot, authContextId: "native-fixture-auth",
-				approvalSettings: null, specialApproval: null,
-			};
-		},
-	};
+		sessionDefaults: { settings },
+	});
 	async function start(runtime: EngineRuntime, request:
 		Pick<EngineStartRequest, "commandId" | "agentInstanceId" | "executionId" | "attemptId" | "cwd"> &
 		{ input: string; expectedIntentRevision?: number; explicitContinue?: boolean },
 	): Promise<EngineBindingSnapshot> {
-		const originReceiptId = `origin:${request.commandId}`;
-		const command: EngineCommandEnvelope = {
-			schema: "grimoire.engine.command.v1", op: "start", commandId: request.commandId,
+		const typed = startRequest(execution, {
+			commandId: request.commandId, agentInstanceId: request.agentInstanceId, agentInstanceRef,
+			executionId: request.executionId, attemptId: request.attemptId,
+		}, {
+			cwd: request.cwd, principalId: "owner", input: request.input,
+			...(request.expectedIntentRevision === undefined ? {} :
+				{ expectedIntentRevision: request.expectedIntentRevision }),
+			...(request.explicitContinue ? { explicitContinue: true } : {}),
+		});
+		const command = startEnvelope(runtime, execution, typed, {
 			deviceId: "native-fixture-device", engineId: "native-fixture-engine",
-			engineGeneration: runtime.engineGeneration, agentInstanceId: request.agentInstanceId,
-			agentInstanceRef, bindingSnapshot, executionId: request.executionId,
-			attemptId: request.attemptId, authorityGeneration: 1, principalId: "owner",
-			issuedAt: Date.now(),
-			payload: {
-				cwd: request.cwd, input: request.input,
-				...(request.expectedIntentRevision === undefined ? {} : { expectedIntentRevision: request.expectedIntentRevision }),
-				...(request.explicitContinue ? { explicitContinue: true } : {}),
-				executionConfiguration: config, dispatchRef, dispatchHash,
-				executionKind: "ordinary", specialRef: null, originReceiptId,
-			},
-		};
-		receipts.set(originReceiptId, command);
+		});
 		const result = await runEngineCommand({
-			runtime, deviceId: "native-fixture-device", engineId: "native-fixture-engine",
+			runtime, deviceId: command.deviceId, engineId: command.engineId,
 		}, command);
 		if (result.outcome !== "applied") throw new Error("Native fixture Start was not applied");
 		const binding = await runtime.store.getBinding(request.agentInstanceId);
@@ -401,10 +284,9 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 				});
 				await runtime.drain();
 				unsubscribe();
-				// assistant_snapshot is an ordinary kind: payload is the plain record the Engine wrote.
 				const ordinarySnapshots = events.filter(
 					event => event.kind === "assistant_snapshot" && event.attemptId === attemptId,
-				) as EngineOrdinaryEvent[];
+				);
 				const snapshot = ordinarySnapshots.findLast(
 					event => typeof event.payload?.stopReason === "string",
 				);
@@ -810,8 +692,7 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 			expect(interrupted?.state).toBe("interrupted");
 			expect(requests).toBe(1);
 			expect(firstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);
-			// model_settled is an ordinary kind: payload is the plain record the Engine wrote.
-			const settled = firstEvents.filter(event => event.kind === "model_settled") as EngineOrdinaryEvent[];
+			const settled = firstEvents.filter(event => event.kind === "model_settled");
 			expect(settled[0]?.payload?.status).toBe("failed");
 			expect(firstEvents.some(event => event.kind === "completed")).toBe(false);
 			const interruptedHistory = await runtime.sessionHistoryPage(
