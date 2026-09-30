@@ -2670,6 +2670,7 @@ export class RocksEngineMutations {
 		reason: "route_fallback" | "billing_pool_exhausted" | "billing_pool_observed",
 		toExecutionDigest: string,
 		limits: RoutingLimits,
+		ruleDelta?: ReadonlyArray<{ ref: string; revision: number; content_hash: string }>,
 	): Promise<EngineEvent | undefined> {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
@@ -2733,7 +2734,12 @@ export class RocksEngineMutations {
 				...row,
 				execution: {
 					...row.execution,
-					executor_choice: { ...choice, execution_digest: toExecutionDigest, transitions: [...choice.transitions, transition] },
+					executor_choice: {
+						...choice,
+						execution_digest: toExecutionDigest,
+						transitions: [...choice.transitions, transition],
+						...(ruleDelta && ruleDelta.length > 0 ? { rules: [...choice.rules, ...ruleDelta] } : {}),
+					},
 				},
 				executor_route_state: JSON.stringify(state),
 			});

@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type ApprovalRequest,
 	type EngineExecutionConfiguration,
@@ -912,6 +912,7 @@ export async function runEngineCommand(
 async function capabilities(options: ServerOptions): Promise<Record<string, unknown>> {
 	return {
 		runtimeProtocol: runtimeCapabilities(),
+		engineVersion: VERSION,
 		contractVersion: ENGINE_CONTROL_QUERY_VERSION,
 		compatibleVersions: [ENGINE_CONTROL_QUERY_VERSION],
 		storeEpoch: await options.runtime.store.getStoreEpoch(),

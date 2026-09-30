@@ -1144,7 +1144,8 @@
                       "slot_lease",
                       "slot_queue",
                       "wait_edge",
-                      "routing_state"
+                      "routing_state",
+                      "usage_probe_binding"
                     ]
                   }
                 }
@@ -1313,6 +1314,20 @@
                 "$ref": "#/$defs/routingState"
               }
             }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": { "const": "metadata" },
+              "value": {
+                "properties": { "subtype": { "const": "usage_probe_binding" } },
+                "required": ["subtype"]
+              }
+            }
+          },
+          "then": {
+            "properties": { "value": { "$ref": "#/$defs/usageProbeBinding" } }
           }
         },
         {
@@ -3092,9 +3107,16 @@
           "minLength": 1
         },
         "revision": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "content_hash": {
           "$ref": "#/$defs/hash"
@@ -5202,6 +5224,20 @@
         "routing_revision"
       ],
       "additionalProperties": false
+    },
+    "usageProbeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subtype", "principal_id", "device_id", "account_ref", "module_path", "revision", "updated_at"],
+      "properties": {
+        "subtype": { "const": "usage_probe_binding" },
+        "principal_id": { "type": "string", "minLength": 1 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "account_ref": { "type": "string", "minLength": 1 },
+        "module_path": { "type": ["string", "null"] },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "updated_at": { "type": "string", "minLength": 1 }
+      }
     },
     "routingReceipt": {
       "type": "object",

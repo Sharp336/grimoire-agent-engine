@@ -11,7 +11,7 @@ export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
 export const STORAGE_PROTOCOL_REVISION = 21 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:d003e36c00c85cb57656c5a93742a5785975ff1d348010e5e6d45abf71db49ab" as const;
+	"sha256:15f275adaac386a2da91b1a1b40526b1d8db686b16bd71fbe91befef3d3c496b" as const;
 
 export type StorageOperation =
 	| "write"
@@ -514,6 +514,15 @@ export interface StorageExecutionProvenance {
 	executor_choice: ExecutorChoice;
 	lease_id: string | null;
 	queue_id: string | null;
+}
+export interface StorageUsageProbeBinding {
+	subtype: "usage_probe_binding";
+	principal_id: string;
+	device_id: string;
+	account_ref: string;
+	module_path: string | null;
+	revision: number;
+	updated_at: string;
 }
 export interface StorageApprovalMetadata {
 	request: ApprovalRequest;

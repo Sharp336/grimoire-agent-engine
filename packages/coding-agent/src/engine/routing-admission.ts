@@ -6,6 +6,7 @@ import {
 	type EngineExecutionConfiguration,
 	type EngineSemanticBindingSnapshot,
 	EngineTargetError,
+	type InstructionRule,
 	type RoutingLimits,
 } from "./contracts";
 import type {
@@ -616,4 +617,26 @@ export async function staleLeaseAttempts(
 ): Promise<string[]> {
 	const current = await census(tx, principalId, deviceId);
 	return current.leases.filter(lease => lease.engine_generation !== engineGeneration).map(lease => lease.attempt_id);
+}
+
+/** L1 instructions for one route: null-route rules plus rules whose route_refs include it, in array order. */
+export function l1For(sources: { rules: readonly InstructionRule[] }, route: CandidateIdentity): InstructionRule[] {
+	const ref = candidateRef(route);
+	return sources.rules.filter(rule => rule.route_refs === null || rule.route_refs.includes(ref));
+}
+
+/** Rules not yet applied under (ref, content_hash); a same-route pool change yields an empty delta. */
+export function ruleDelta(
+	sources: { rules: readonly InstructionRule[] },
+	applied: readonly { ref: string; content_hash: string }[],
+	route: CandidateIdentity,
+): InstructionRule[] {
+	const seen = new Set(applied.map(rule => `${rule.ref}\0${rule.content_hash}`));
+	return l1For(sources, route).filter(rule => !seen.has(`${rule.ref}\0${rule.content_hash}`));
+}
+
+/** Renders L1 rule text before L2/L3: one block, array order preserved, no dedup of distinct rules. */
+export function renderRules(rules: readonly InstructionRule[]): string {
+	if (rules.length === 0) return "";
+	return `<executor-rules>\n${rules.map(rule => rule.content).join("\n\n")}\n</executor-rules>`;
 }

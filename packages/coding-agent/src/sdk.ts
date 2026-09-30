@@ -558,6 +558,11 @@ export interface CreateAgentSessionOptions {
 	turnRetryPolicy?: import("./session/agent-session-types").TurnRetryPolicy;
 	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
 	engineMode?: boolean;
+	/**
+	 * Engine-only provider-context projection applied after extension context emission.
+	 * Rejected without engineMode; never relaxes the Engine extension/custom-tool bans.
+	 */
+	engineContextProjection?: (messages: AgentMessage[]) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Exact paused Engine approval recovery retains unpaired native tool calls, not an aborted replacement. */
 	recoverPendingApprovalTools?: boolean;
 	/** Optional host-owned tracking/approval boundary around native tool execution. */
@@ -1233,6 +1238,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (options.customTools?.length || options.preloadedCustomToolPaths?.length) {
 			throw new Error("Engine mode does not allow in-process custom tools");
 		}
+		// Omitted Engine instruction arrays mean none, not ambient discovery.
+		options = {
+			...options,
+			contextFiles: options.contextFiles ?? [],
+			skills: options.skills ?? [],
+			promptTemplates: options.promptTemplates ?? [],
+			slashCommands: options.slashCommands ?? [],
+			rules: options.rules ?? [],
+		};
+	}
+	if (options.engineContextProjection && !options.engineMode) {
+		throw new Error("engineContextProjection requires engineMode");
 	}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
@@ -3285,7 +3302,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
-			return withContext;
+			return options.engineContextProjection ? await options.engineContextProjection(withContext) : withContext;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames. Clamp

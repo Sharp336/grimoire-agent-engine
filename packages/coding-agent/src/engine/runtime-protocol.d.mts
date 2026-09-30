@@ -338,8 +338,64 @@ export type ChoiceTransition = {
 
 export type ChoiceProvenance = {
 	"ref": string;
+	"revision": number | null;
+	"content_hash": Hash;
+};
+
+export type InstructionRule = {
+	"ref": ArtifactRef;
 	"revision": number;
 	"content_hash": Hash;
+	"content": string;
+	"route_refs": Array<ArtifactRef> | null;
+};
+
+export type InstructionFacts = {
+	"binding": "task" | "step" | "consultation" | "automation";
+	"scope": Array<string>;
+	"os": "windows" | "linux" | "darwin" | null;
+	"runtime": "artel-engine";
+	"engine_version": string | null;
+	"provider"?: string | null;
+	"family"?: string | null;
+	"model"?: string | null;
+};
+
+export type InstructionSources = {
+	"facts": InstructionFacts;
+	"rules": Array<InstructionRule>;
+	"skills": Array<ChoiceProvenance>;
+};
+
+export type UsageProbeBindingGet = {
+	"principalId": string;
+	"accountRef": string;
+};
+
+export type UsageProbeBindingSet = {
+	"principalId": string;
+	"accountRef": string;
+	"expectedRevision": number;
+	"modulePath": string | null;
+};
+
+export type UsageProbeBindingResult = {
+	"accountRef": string;
+	"modulePath": string | null;
+	"revision": number;
+};
+
+export type UsageProbeRun = {
+	"principalId": string;
+	"accountRef": string;
+	"kind": "builtin" | "module";
+	"account": Record<string, unknown>;
+	"credential": Record<string, unknown> | null;
+};
+
+export type UsageProbeRunResult = {
+	"status": string;
+	"observations": Array<unknown>;
 };
 
 export type ActualCost = {
@@ -695,6 +751,7 @@ export type EngineExecutionConfiguration = {
 	"continuationPolicy": "exact" | "fresh";
 	"continuationConfiguration": ContinuationConfiguration;
 	"stableDependencyDigest": Hash;
+	"instruction_sources": InstructionSources;
 	"sessionDefaults": SessionDefaults;
 	"record_revisions": RecordRevisions;
 	"routingLimits": RoutingLimits;
