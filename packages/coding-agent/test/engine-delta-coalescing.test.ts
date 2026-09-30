@@ -5,12 +5,10 @@ import type { StreamAdmissionLimits } from "@oh-my-pi/pi-ai/utils/stream-admissi
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { EngineOrdinaryEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
-
-const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
-const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
+import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
 
 const frame = (content: string, finishReason: string | null = null) =>
 	`data: ${JSON.stringify({
@@ -78,6 +76,21 @@ async function runFlood(
 	await fs.mkdir(cwd);
 	const auth = await AuthStorage.create(path.join(root, "auth.db"));
 	auth.setRuntimeApiKey("delta-flood", "fixture-key");
+	const floodModel = buildModel({
+		id: "delta-flood",
+		name: "Delta flood",
+		api: "openai-completions",
+		provider: "delta-flood",
+		baseUrl: `${server.url}v1`,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_000,
+		maxTokens: 16_000,
+	});
+	const execution = admittedExecution(floodModel, new ModelRegistry(auth, path.join(root, "models.yml")), {
+		taskRef: "grimoire://tasks/grimoire/flood",
+	});
 	const runtime = await EngineRuntime.create({
 		databasePath: path.join(root, "engine.sqlite"),
 		streamAdmissionLimits: options.streamAdmissionLimits,
@@ -104,19 +117,9 @@ async function runFlood(
 			enableMCP: false,
 			enableLsp: false,
 			modelRegistry: new ModelRegistry(auth, path.join(root, "models.yml")),
-			model: buildModel({
-				id: "delta-flood",
-				name: "Delta flood",
-				api: "openai-completions",
-				provider: "delta-flood",
-				baseUrl: `${server.url}v1`,
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 32_000,
-				maxTokens: 16_000,
-			}),
+			model: floodModel,
 		},
+		...execution.optionsFor({}),
 	});
 	const append = runtime.store.appendEvent.bind(runtime.store);
 	let updateWrites = 0;
@@ -126,29 +129,31 @@ async function runFlood(
 		return append(event);
 	});
 	try {
-		const started = await runtime.start(
-			{
-				commandId: "flood-command",
-				agentInstanceId: "flood-agent",
-				executionId: "flood-execution",
-				attemptId: "flood-attempt",
-				authorityGeneration: 1,
-				cwd,
-				input: "long answer",
-			},
-			{ spawns: "", profileDigest: "flood-profile", enableMCP: false, enableLsp: false },
+		const started = await admitRequest(
+			runtime,
+			startRequest(
+				execution,
+				{
+					commandId: "flood-command",
+					agentInstanceId: "flood-agent",
+					agentInstanceRef: "grimoire://tasks/grimoire/flood/agents/flood-agent",
+					executionId: "flood-execution",
+					attemptId: "flood-attempt",
+				},
+				{ cwd, principalId: "owner", input: "long answer" },
+			),
 		);
 		await runtime.drain();
 		const attempt = await runtime.store.getAttempt(started.attemptId);
+		// message_updated/assistant_snapshot are ordinary kinds: selecting that union arm keeps payload a plain record.
 		const updates = (await runtime.store.pendingEvents()).filter(
 			event =>
 				event.attemptId === started.attemptId &&
-				event.kind === "message_updated" &&
-				event.payload?.stream === "assistant",
-		);
+				event.kind === "message_updated",
+		) as EngineOrdinaryEvent[];
 		const history = await runtime.sessionHistoryPage(
 			started.agentInstanceId,
-			"grimoire://tasks/grimoire/flood/agents/flood",
+			"grimoire://tasks/grimoire/flood/agents/flood-agent",
 		);
 		const answer = history.entries
 			.filter(entry => entry.role === "assistant")

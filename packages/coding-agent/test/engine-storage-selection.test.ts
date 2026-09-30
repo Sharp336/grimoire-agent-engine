@@ -11,15 +11,15 @@ const spies: Array<{ mockRestore(): void }> = [];
 it("refuses to start without a valid, reachable native storage binding", async () => {
 	const binding = spyOn(storage, "readStorageBinding").mockReturnValue(undefined);
 	spies.push(binding);
-	await expect(EngineRuntime.create({ databasePath: "must-not-be-created.sqlite" })).rejects.toThrow(
-		"storage binding",
-	);
+	await expect(
+		EngineRuntime.create({ databasePath: "must-not-be-created.sqlite", deviceId: "storage-selection-device" }),
+	).rejects.toThrow("storage binding");
 	binding.mockImplementation(() => {
 		throw new Error("Invalid ClientHost storage binding");
 	});
-	await expect(EngineRuntime.create({ databasePath: "must-not-be-created.sqlite" })).rejects.toThrow(
-		"Invalid ClientHost",
-	);
+	await expect(
+		EngineRuntime.create({ databasePath: "must-not-be-created.sqlite", deviceId: "storage-selection-device" }),
+	).rejects.toThrow("Invalid ClientHost");
 	binding.mockReturnValue({
 		url: "http://127.0.0.1:12345",
 		token: "0123456789012345",
@@ -30,7 +30,7 @@ it("refuses to start without a valid, reachable native storage binding", async (
 		new Error("Owner unavailable"),
 	);
 	spies.push(unavailable);
-	await expect(EngineRuntime.create({ databasePath: "must-not-be-created.sqlite" })).rejects.toThrow(
-		"Owner unavailable",
-	);
+	await expect(
+		EngineRuntime.create({ databasePath: "must-not-be-created.sqlite", deviceId: "storage-selection-device" }),
+	).rejects.toThrow("Owner unavailable");
 });

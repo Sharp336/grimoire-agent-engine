@@ -9,11 +9,10 @@ import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import {
 	type EngineBindingSnapshot,
-	type EngineEvent,
+	type EngineOrdinaryEvent,
 	type EngineExecutionConfiguration,
 	type EngineSemanticBindingSnapshot,
 	type EngineStartRequest,
-	type WorkTarget,
 	EngineTargetError,
 } from "../../src/engine/contracts";
 import { runEngineCommand } from "../../src/engine/control-query";
@@ -402,14 +401,16 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 				});
 				await runtime.drain();
 				unsubscribe();
-				const snapshot = events.findLast(
-					event =>
-						event.kind === "assistant_snapshot" &&
-						event.attemptId === attemptId &&
-						typeof event.payload?.stopReason === "string",
+				// assistant_snapshot is an ordinary kind: payload is the plain record the Engine wrote.
+				const ordinarySnapshots = events.filter(
+					event => event.kind === "assistant_snapshot" && event.attemptId === attemptId,
+				) as EngineOrdinaryEvent[];
+				const snapshot = ordinarySnapshots.findLast(
+					event => typeof event.payload?.stopReason === "string",
 				);
-				const historyEntryId =
-					typeof snapshot?.payload?.historyEntryId === "string" ? snapshot.payload.historyEntryId : null;
+				const historyEntryId = typeof snapshot?.payload?.historyEntryId === "string"
+					? snapshot.payload.historyEntryId
+					: null;
 				const attempt = await runtime.store.getAttempt(attemptId);
 				if (!attempt?.transcript_path) throw new Error("Attempt did not retain its native session locator");
 				locator ??= String(attempt.transcript_path);
@@ -809,7 +810,9 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 			expect(interrupted?.state).toBe("interrupted");
 			expect(requests).toBe(1);
 			expect(firstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);
-			expect(firstEvents.find(event => event.kind === "model_settled")?.payload?.status).toBe("failed");
+			// model_settled is an ordinary kind: payload is the plain record the Engine wrote.
+			const settled = firstEvents.filter(event => event.kind === "model_settled") as EngineOrdinaryEvent[];
+			expect(settled[0]?.payload?.status).toBe("failed");
 			expect(firstEvents.some(event => event.kind === "completed")).toBe(false);
 			const interruptedHistory = await runtime.sessionHistoryPage(
 				agentInstanceId,

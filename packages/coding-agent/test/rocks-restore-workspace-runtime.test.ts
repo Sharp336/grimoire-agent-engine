@@ -7,7 +7,7 @@ import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import type { EngineAttachmentDescriptor } from "../src/engine/contracts";
 import { runEngineCommand } from "../src/engine/control-query";
-import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
+import { dispatchEngineCommand, engineCommandIdentity } from "../src/engine/nats-adapter";
 import type { RestoreWorkspacePlan } from "../src/engine/rocks-restore-workspace";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { engineAgentInstanceId } from "../src/engine/route";
@@ -17,11 +17,11 @@ import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/session/rocks-native-session-storage";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { admittedExecution, admitRequest, startRequest, startEnvelope } from "./helpers/engine-runtime-admitted-fixture";
+
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
-const digest = (value: unknown) => new Bun.CryptoHasher("sha256").update(stableStringifyJson(value)).digest("hex");
 
 it.skipIf(!(executable && runRoot))(
 	"continues a queued attachment after isolated restore in the same native session without replay",
@@ -62,8 +62,10 @@ it.skipIf(!(executable && runRoot))(
 			process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
 			process.env.GRIMOIRE_ENGINE_WORK_ROOT = sourceCwd;
 			delete process.env.GRIMOIRE_STORAGE_RESTORE_ID;
-			delete process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND;
 			const sourceModel = createMockModel({ handler: () => ({ content: ["retained answer"] }) });
+			const execution = admittedExecution(sourceModel.model, modelRegistry, {
+				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+			});
 			const sourceBlobs = new BlobStore(storageBlobsDir(sourceRoot));
 			process.env.PI_BLOBS_DIR = sourceBlobs.dir;
 			runtime = await EngineRuntime.create({
@@ -84,21 +86,19 @@ it.skipIf(!(executable && runRoot))(
 					enableLsp: false,
 				},
 			});
-			const profile = { spawns: "" as const, profileDigest: "fixture-profile", enableMCP: false, enableLsp: false };
-			const first = await runtime.start(
-				{
-					commandId: `first-${suffix}`,
-					agentInstanceId,
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					principalId,
-					executionId: `first-execution-${suffix}`,
-					attemptId: `first-attempt-${suffix}`,
-					authorityGeneration: 1,
-					cwd: sourceCwd,
-					input: "retained question",
-				},
-				profile,
+			const first = await admitRequest(
+				runtime,
+				startRequest(
+					execution,
+					{
+						commandId: `first-${suffix}`,
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: `first-execution-${suffix}`,
+						attemptId: `first-attempt-${suffix}`,
+					},
+					{ cwd: sourceCwd, principalId, input: "retained question" },
+				),
 			);
 			await runtime.drain();
 			expect(sourceModel.calls).toHaveLength(1);
@@ -254,28 +254,32 @@ it.skipIf(!(executable && runRoot))(
 						enableMCP: false,
 						enableLsp: false,
 					},
+					...execution.optionsFor({}),
 				});
 			runtime = await createTargetRuntime();
 			const cold = await runtime.store.nativeSessionHeader(first);
 			expect(cold).toEqual({ sessionId, cwd: targetCwd });
 			expect(targetModel.calls).toHaveLength(0);
 			const intent = await runtime.store.intent(agentInstanceId);
-			const stale = await runtime.start(
-				{
-					commandId: `stale-${suffix}`,
-					agentInstanceId,
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					principalId,
-					executionId: `stale-execution-${suffix}`,
-					attemptId: `stale-attempt-${suffix}`,
-					authorityGeneration: 1,
-					cwd: targetCwd,
-					input: "stale turn",
-					expectedIntentRevision: intent.intentRevision,
-					explicitContinue: true,
-				},
-				profile,
+			const stale = await admitRequest(
+				runtime,
+				startRequest(
+					execution,
+					{
+						commandId: `stale-${suffix}`,
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: `stale-execution-${suffix}`,
+						attemptId: `stale-attempt-${suffix}`,
+					},
+					{
+						cwd: targetCwd,
+						principalId,
+						input: "stale turn",
+						expectedIntentRevision: intent.intentRevision,
+						explicitContinue: true,
+					},
+				),
 			);
 			await staleTurnStarted.promise;
 			const cancelled = await runtime.cancel({
@@ -287,44 +291,37 @@ it.skipIf(!(executable && runRoot))(
 			await runtime.drain();
 			expect((await runtime.store.getAttempt(stale.attemptId))?.state).toBe("cancelled");
 			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
-			const unsupportedProfile = {
-				...profile,
-				profileDigest: "fixture-profile-without-read",
-				toolNames: ["bash", "task"],
-			};
-			const rejectedStart: EngineCommandEnvelope = {
-				schema: "grimoire.engine.command.v1",
-				commandId: `rejected-${suffix}`,
-				op: "start",
-				deviceId: "fixture-device",
-				engineId: "fixture-engine",
-				engineGeneration: runtime.engineGeneration,
-				agentInstanceId,
-				agentInstanceRef,
-				bindingSnapshot: semanticBinding(agentInstanceRef),
-				principalId,
-				executionId: `rejected-execution-${suffix}`,
-				attemptId: `rejected-attempt-${suffix}`,
-				authorityGeneration: 1,
-				issuedAt: Date.now(),
-				payload: {
+			// A separately admitted execution whose tool ceiling omits `read`: its queued attachment Start must be fenced.
+			const deniedExecution = admittedExecution(targetModel.model, modelRegistry, {
+				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+				continuation: { toolNames: ["bash", "task"], restrictToolNames: true },
+			});
+			const rejectedRequest = startRequest(
+				deniedExecution,
+				{
+					commandId: `rejected-${suffix}`,
+					agentInstanceId,
+					agentInstanceRef,
+					executionId: `rejected-execution-${suffix}`,
+					attemptId: `rejected-attempt-${suffix}`,
+				},
+				{
 					cwd: targetCwd,
+					principalId,
 					queueId: queued.item.queueId,
 					expectedRevision: queued.item.revision,
 					mutationId: `reject-deliver-${suffix}`,
 					expectedIntentRevision: cancelled.intentRevision,
 					explicitContinue: true,
-					profileDigest: unsupportedProfile.profileDigest,
-					launchProfile: unsupportedProfile,
 				},
-			};
+			);
+			const rejectedStart = startEnvelope(runtime, deniedExecution, rejectedRequest);
 			const rejectedIdentity = engineCommandIdentity(rejectedStart);
 			expect((await runtime.store.admitCommand(rejectedIdentity, runtime.engineGeneration)).status).toBe("claimed");
 			await expect(
 				dispatchEngineCommand({
 					runtime,
 					command: rejectedStart,
-					resolveLaunchProfile: () => unsupportedProfile,
 					provisionMailbox: async () => {},
 				}),
 			).rejects.toMatchObject({
@@ -353,38 +350,34 @@ it.skipIf(!(executable && runRoot))(
 			expect((await runtime.store.runtimeSummary({ principalId, agentInstanceRef })).summary).toMatchObject({
 				pendingStart: null,
 			});
-			const command: EngineCommandEnvelope = {
-				schema: "grimoire.engine.command.v1",
-				commandId: `continue-${suffix}`,
-				op: "start",
-				deviceId: "fixture-device",
-				engineId: "fixture-engine",
-				engineGeneration: runtime.engineGeneration,
-				agentInstanceId,
-				agentInstanceRef,
-				bindingSnapshot: semanticBinding(agentInstanceRef),
-				principalId,
-				executionId: `continued-execution-${suffix}`,
-				attemptId: `continued-attempt-${suffix}`,
-				authorityGeneration: 1,
-				issuedAt: Date.now(),
-				payload: {
-					cwd: targetCwd,
-					queueId: queued.item.queueId,
-					expectedRevision: queued.item.revision,
-					mutationId: `deliver-${suffix}`,
-					expectedIntentRevision: cancelled.intentRevision,
-					explicitContinue: true,
-					profileDigest: profile.profileDigest,
-					launchProfile: profile,
-				},
-			};
+			const command = startEnvelope(
+				runtime,
+				execution,
+				startRequest(
+					execution,
+					{
+						commandId: `continue-${suffix}`,
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: `continued-execution-${suffix}`,
+						attemptId: `continued-attempt-${suffix}`,
+					},
+					{
+						cwd: targetCwd,
+						principalId,
+						queueId: queued.item.queueId,
+						expectedRevision: queued.item.revision,
+						mutationId: `deliver-${suffix}`,
+						expectedIntentRevision: cancelled.intentRevision,
+						explicitContinue: true,
+					},
+				),
+			);
 			const receipt = await runEngineCommand(
 				{
 					runtime,
 					deviceId: command.deviceId,
 					engineId: command.engineId,
-					resolveLaunchProfile: () => profile,
 					provisionMailbox: async () => {},
 				},
 				command,
@@ -409,21 +402,24 @@ it.skipIf(!(executable && runRoot))(
 			delete process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND;
 			runtime = await createTargetRuntime();
 			expect(await runtime.store.nativeSessionHeader(continued)).toEqual({ sessionId, cwd: targetCwd });
-			const afterRestart = await runtime.start(
-				{
-					commandId: `after-restart-${suffix}`,
-					agentInstanceId,
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					principalId,
-					executionId: `after-restart-execution-${suffix}`,
-					attemptId: `after-restart-attempt-${suffix}`,
-					authorityGeneration: 1,
-					cwd: targetCwd,
-					input: "second target question",
-					explicitContinue: true,
-				},
-				profile,
+			const afterRestart = await admitRequest(
+				runtime,
+				startRequest(
+					execution,
+					{
+						commandId: `after-restart-${suffix}`,
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: `after-restart-execution-${suffix}`,
+						attemptId: `after-restart-attempt-${suffix}`,
+					},
+					{
+						cwd: targetCwd,
+						principalId,
+						input: "second target question",
+						explicitContinue: true,
+					},
+				),
 			);
 			await runtime.drain();
 			expect(afterRestart.sessionFile).toBe(sourceBinding!.sessionFile);

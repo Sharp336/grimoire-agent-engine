@@ -11,6 +11,7 @@ import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../src/ses
 import { SessionManager } from "../src/session/session-manager";
 import * as storage from "../src/session/storage-client";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { admittedExecution, admitRequest, startRequest, type AdmittedExecutionFixture } from "./helpers/engine-runtime-admitted-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN_ROOT)(
@@ -87,6 +88,10 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 		auth.setRuntimeApiKey("mock", "test-key");
 		const cwd = path.join(root, "workspace");
 		await fs.mkdir(cwd, { recursive: true });
+		const modelRegistry = new ModelRegistry(auth);
+		const execution: AdmittedExecutionFixture = admittedExecution(model.model, modelRegistry, {
+			taskRef: "grimoire://tasks/grimoire/history-test",
+		});
 		const options: EngineRuntimeOptions = {
 			databasePath: path.join(root, "unused.sqlite"),
 			sessionDefaults: {
@@ -102,81 +107,74 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				contextFiles: [],
 				promptTemplates: [],
 				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				modelRegistry: new ModelRegistry(auth),
+				modelRegistry,
 				model: model.model,
 			},
+			...execution.optionsFor({}),
 		};
-		const profile = { spawns: "", profileDigest: "native-history-real", enableMCP: false, enableLsp: false };
 		let runtime = await EngineRuntime.create(options);
 		try {
 			const id = `engine-history-${crypto.randomUUID()}`;
 			const agentInstanceRef = `grimoire://tasks/grimoire/history-test/agents/${id}`;
-			const started = await runtime.start(
-				{
-					commandId: `${id}-start`,
-					agentInstanceId: id,
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					executionId: `${id}-execution`,
-					attemptId: `${id}-attempt`,
-					authorityGeneration: 1,
-					cwd,
-					input: "ORIGINAL",
-				},
-				profile,
+			const identity = (suffix: string, ref: string) => ({
+				commandId: `${id}-${suffix}`,
+				agentInstanceId: `${id}-${suffix === "start" ? "" : suffix}`,
+				agentInstanceRef: ref,
+				executionId: `${id}-${suffix}-execution`,
+				attemptId: `${id}-${suffix}-attempt`,
+			});
+			const started = await admitRequest(
+				runtime,
+				startRequest(execution, identity("start", agentInstanceRef), {
+					cwd, principalId: "owner", input: "ORIGINAL",
+				}),
 			);
 			await runtime.drain();
-			const history = await runtime.sessionHistoryPage(id, agentInstanceRef);
+			const history = await runtime.sessionHistoryPage(started.agentInstanceId, agentInstanceRef);
 			const user = history.entries.find(entry => entry.role === "user")!;
 			const assistant = history.entries.find(entry => entry.role === "assistant")!;
-			const request = {
-				commandId: `${id}-branch`,
-				agentInstanceId: `${id}-branch`,
-				agentInstanceRef: `${agentInstanceRef}-branch`,
-				bindingSnapshot: semanticBinding(`${agentInstanceRef}-branch`),
-				executionId: `${id}-branch-execution`,
-				attemptId: `${id}-branch-attempt`,
-				authorityGeneration: 1,
-				cwd,
-				input: "BRANCH",
-				historyEdit: {
-					mode: "branch" as const,
-					source: started,
-					sourceSessionId: history.sessionId,
-					expectedLeafEntryId: history.anchor!,
-					entryId: user.entryId,
+			const request = startRequest(
+				execution,
+				identity("branch", `${agentInstanceRef}-branch`),
+				{
+					cwd, principalId: "owner", input: "BRANCH",
+					historyEdit: {
+						mode: "branch" as const,
+						source: started,
+						sourceSessionId: history.sessionId,
+						expectedLeafEntryId: history.anchor!,
+						entryId: user.entryId,
+					},
 				},
-			};
-			const branch = await runtime.start(request, profile);
+			);
+			const branch = await admitRequest(runtime, request);
 			await runtime.drain();
 			expect(contexts[1]).toContain("ORIGINAL");
 			expect(contexts[1]).not.toContain("ANSWER-1");
-			expect((await runtime.sessionHistoryPage(id, agentInstanceRef)).entries.map(entry => entry.text)).toEqual(
+			expect((await runtime.sessionHistoryPage(started.agentInstanceId, agentInstanceRef)).entries.map(entry => entry.text)).toEqual(
 				history.entries.map(entry => entry.text),
 			);
-			expect((await runtime.start(request, profile)).attemptId).toBe(branch.attemptId);
+			expect((await admitRequest(runtime, request)).attemptId).toBe(branch.attemptId);
 			expect(contexts).toHaveLength(2);
-			const edited = await runtime.start(
-				{
-					...request,
-					commandId: `${id}-edit`,
-					agentInstanceId: id,
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					executionId: `${id}-edit-execution`,
-					attemptId: `${id}-edit-attempt`,
-					input: undefined,
-					expectedIntentRevision: started.intentRevision,
-					historyEdit: {
-						...request.historyEdit,
-						mode: "edit",
-						entryId: assistant.entryId,
-						replacementText: "EDITED",
+			const edited = await admitRequest(
+				runtime,
+				startRequest(
+					execution,
+					identity("edit", agentInstanceRef),
+					{
+						cwd, principalId: "owner",
+						input: undefined,
+						expectedIntentRevision: started.intentRevision,
+						historyEdit: {
+							mode: "edit" as const,
+							source: started,
+							sourceSessionId: history.sessionId,
+							expectedLeafEntryId: history.anchor!,
+							entryId: assistant.entryId,
+							replacementText: "EDITED",
+						},
 					},
-				},
-				profile,
+				),
 			);
 			await runtime.drain();
 			expect(contexts[2]).toContain("EDITED");
@@ -213,20 +211,17 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			expect(JSON.stringify((await oldStore.readContext()).entries)).toContain("ANSWER-1");
 			await runtime.dispose();
 			runtime = await EngineRuntime.create(options);
-			await runtime.start(
-				{
-					commandId: `${id}-continue`,
-					agentInstanceId: branch.agentInstanceId,
-					agentInstanceRef: request.agentInstanceRef,
-					bindingSnapshot: request.bindingSnapshot,
-					attemptId: `${id}-continue-attempt`,
-					executionId: `${id}-continue-execution`,
-					authorityGeneration: 1,
-					expectedIntentRevision: branch.intentRevision,
-					cwd,
-					explicitContinue: true,
-				},
-				profile,
+			await admitRequest(
+				runtime,
+				startRequest(
+					execution,
+					identity("continue", request.agentInstanceRef),
+					{
+						cwd, principalId: "owner",
+						expectedIntentRevision: branch.intentRevision,
+						explicitContinue: true,
+					},
+				),
 			);
 			await runtime.drain();
 			expect((await runtime.store.getAttempt(`${id}-continue-attempt`))?.state).toBe("completed");

@@ -119,16 +119,16 @@ describe("structured native SessionManager", () => {
 		const storage = new StructuredStore();
 		const manager = SessionManager.createNative("/native", storage);
 		const launch: SessionLaunchSnapshot = {
-			schema: "engine.launch_snapshot.v1",
+			schema: "engine.launch_snapshot.v2",
 			agentInstanceId: "agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/manager-test/agents/agent",
 			executionId: "execution",
 			attemptId: "attempt",
-			profileRef: null,
-			profileDigest: "profile",
-			selectionRevision: 7,
-			thinkingLevel: null,
-			model: null,
-			routes: [],
+			dispatchRef: "gctx:cccccccccccccccc",
+			dispatchHash: `sha256:${"1".repeat(64)}`,
+			executionDigest: `sha256:${"2".repeat(64)}`,
+			continuationDigest: `sha256:${"3".repeat(64)}`,
+			selectedRouteRef: "gctx:bbbbbbbbbbbbbbbb",
 		};
 		const archived = manager.appendMessage(
 			{ role: "user", content: "prior launch", timestamp: 1 },
@@ -140,7 +140,10 @@ describe("structured native SessionManager", () => {
 		manager.appendCompaction("summary", undefined, "outside-active-branch", 100);
 		await manager.flush();
 		const reopened = await SessionManager.openNative(storage);
-		expect(reopened.getLastUserLaunchSnapshot("agent")?.selectionRevision).toBe(7);
+		expect(reopened.getLastUserLaunchSnapshot("agent")?.schema).toBe("engine.launch_snapshot.v2");
+		expect(
+			reopened.getLastUserLaunchSnapshot("agent")?.selectedRouteRef,
+		).toBe("gctx:bbbbbbbbbbbbbbbb");
 		expect(storage.readIds).not.toContain(archived);
 		expect(storage.archiveReads).toBe(0);
 		reopened.appendMessage({ role: "user", content: "unannotated steer", timestamp: 2 });

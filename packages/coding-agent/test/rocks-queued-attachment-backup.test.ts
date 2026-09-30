@@ -13,7 +13,7 @@ import type { EngineCommandIdentity } from "../src/engine/store";
 import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
 
 const executable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const runRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -98,7 +98,10 @@ it.skipIf(!(executable && runRoot))(
 				attemptId: command.attemptId!,
 				bindingId: `binding-${suffix}`,
 				engineAgentId: `family-${suffix}`,
-				profileDigest: "fixture-profile",
+				executionDigest: `sha256:${"a".repeat(64)}`,
+				continuationDigest: `sha256:${"b".repeat(64)}`,
+				dispatchRef: "gctx:cccccccccccccccc",
+				dispatchHash: `sha256:${"c".repeat(64)}`,
 				state: "running",
 				engineGeneration: generation,
 				bindingGeneration: 1,
@@ -214,6 +217,9 @@ it.skipIf(!(executable && runRoot))(
 				const mock = createMockModel();
 				mock.input.push("image");
 				const delivered: Array<{ input: string; imageData?: string }> = [];
+				const execution = admittedExecution(mock.model, new ModelRegistry(new AuthStorage(":memory:")), {
+					taskRef: "grimoire://tasks/grimoire/queue-fixture",
+				});
 				runtime = await EngineRuntime.create({
 					databasePath: path.join(freshRoot, "engine.sqlite"),
 					attachmentBlobStore: restoredBlobs,
@@ -234,26 +240,30 @@ it.skipIf(!(executable && runRoot))(
 						delivered.push({ input, imageData: images?.[0]?.data });
 						return true;
 					},
+					...execution.optionsFor({}),
 				});
 				const intent = await runtime.store.intent(agentInstanceId);
-				await runtime.start(
-					{
-						commandId: `continue-${suffix}`,
-						agentInstanceId,
-						agentInstanceRef,
-						bindingSnapshot: semanticBinding(agentInstanceRef),
-						principalId,
-						executionId: `continued-execution-${suffix}`,
-						attemptId: `continued-attempt-${suffix}`,
-						authorityGeneration: 1,
-						cwd: freshRoot,
-						queueId: queued.item.queueId,
-						expectedRevision: queued.item.revision,
-						mutationId: `deliver-${suffix}`,
-						expectedIntentRevision: intent.intentRevision,
-						explicitContinue: true,
-					},
-					{ spawns: "", profileDigest: "fixture-profile", enableMCP: false, enableLsp: false },
+				await admitRequest(
+					runtime,
+					startRequest(
+						execution,
+						{
+							commandId: `continue-${suffix}`,
+							agentInstanceId,
+							agentInstanceRef,
+							executionId: `continued-execution-${suffix}`,
+							attemptId: `continued-attempt-${suffix}`,
+						},
+						{
+							cwd: freshRoot,
+							principalId,
+							queueId: queued.item.queueId,
+							expectedRevision: queued.item.revision,
+							mutationId: `deliver-${suffix}`,
+							expectedIntentRevision: intent.intentRevision,
+							explicitContinue: true,
+						},
+					),
 				);
 				await runtime.drain();
 				expect(delivered).toContainEqual({ input: "Read my file", imageData: image.toString("base64") });
@@ -287,6 +297,10 @@ it.skipIf(!(executable && runRoot))(
 			auth.setRuntimeApiKey("mock", "test-key");
 			const mock = createMockModel({ handler: { content: ["seen"] } });
 			mock.input.push("image");
+			const modelRegistry = new ModelRegistry(auth, path.join(root, "models.yml"));
+			const execution = admittedExecution(mock.model, modelRegistry, {
+				taskRef: "grimoire://tasks/grimoire/direct-fixture",
+			});
 			runtime = await EngineRuntime.create({
 				databasePath: path.join(root, "engine.sqlite"),
 				attachmentBlobStore: new BlobStore(storageBlobsDir(root)),
@@ -302,11 +316,10 @@ it.skipIf(!(executable && runRoot))(
 					slashCommands: [],
 					enableMCP: false,
 					enableLsp: false,
-					modelRegistry: new ModelRegistry(auth, path.join(root, "models.yml")),
+					modelRegistry,
 				},
 				dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
-				resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
-				resolveSessionContinuation: async launch => `test:${launch.profileDigest}`,
+				...execution.optionsFor({}),
 			});
 			const suffix = crypto.randomUUID();
 			const principalId = `owner-${suffix}`;
@@ -331,23 +344,24 @@ it.skipIf(!(executable && runRoot))(
 			const row = async () =>
 				(await records.get("metadata", `blob-upload:${attachmentUploadKey(principalId, uploadId).key}`)).value;
 			expect(await row()).not.toBeNull();
-			await runtime.start(
+			const request = startRequest(
+				execution,
 				{
 					commandId: `start-${suffix}`,
 					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
 					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					principalId,
-					clientMessageId,
-					attachmentUploadIds: [uploadId],
 					executionId: `execution-${suffix}`,
 					attemptId: `attempt-${suffix}`,
-					authorityGeneration: 1,
+				},
+				{
 					cwd: root,
+					principalId,
+					clientMessageId,
 					input: "What is in the picture?",
 				},
-				{ spawns: "", profileDigest: "fixture-profile", enableMCP: false, enableLsp: false },
 			);
+			request.attachmentUploadIds = [uploadId];
+			await admitRequest(runtime, request);
 			const result = await runtime.store.waitAttemptResult(
 				engineAgentInstanceId(agentInstanceRef),
 				`start-${suffix}`,
