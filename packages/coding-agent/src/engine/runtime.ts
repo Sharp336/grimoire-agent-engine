@@ -2384,6 +2384,8 @@ export class EngineRuntime {
 		if (request.restoreCheckpoint) throw nativeArchiveUnsupported();
 		const preparedHistory = await this.#prepareHistoryStart(request);
 		const preparedSession = preparedHistory?.sessionManager;
+		let ownsPreparedSession = true;
+		try {
 		audit?.mark("binding_prepare");
 
 		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
@@ -2441,7 +2443,6 @@ export class EngineRuntime {
 			}
 		}
 		if (preview.status === "queued") {
-			if (preparedSession) await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
 			return {
 				bindingId: `${engineRouteToken(request.agentInstanceId)}:${(admitted?.bindingGeneration ?? 0) + 1}`,
 				commandId: request.commandId,
@@ -2529,7 +2530,6 @@ export class EngineRuntime {
 			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 		};
 		// Nothing requests a credential or issues an effect until the owner's one atomic acceptance.
-		try {
 			const events = await this.store.commitAttemptTransition(initial, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				routingAdmission: { request: admission, preview },
 				execution: {
@@ -2567,10 +2567,6 @@ export class EngineRuntime {
 					: {}),
 			});
 			this.#notifyEvents(events);
-		} catch (error) {
-			if (preparedSession) await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
-			throw error;
-		}
 		let leaseError: unknown;
 		let renewing = false;
 		const heartbeat = setInterval(() => {
@@ -2603,12 +2599,14 @@ export class EngineRuntime {
 				originReceiptId: request.originReceiptId,
 			};
 			resolved = await this.#resolveExecution(config, preview.frozen, attempt, request.cwd, pendingStartSignal);
+			const openingExecution = resolved;
+			resolved = undefined;
+			ownsPreparedSession = false;
 			binding = await this.#openBinding(
-				request, resolved, continuationDigest,
+				request, openingExecution, continuationDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
 				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings,
 			);
-			resolved = undefined;
 			this.#assertAttachmentSupport(binding.session, images, originals);
 			if (preparedHistory?.pendingInboxSourceSessionId)
 				binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
@@ -2683,6 +2681,10 @@ export class EngineRuntime {
 			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 			...(queuedItem ? { queueId: queuedItem.queueId, queueRevision: queuedItem.revision + 1 } : {}),
 		};
+		} finally {
+			if (ownsPreparedSession && preparedSession)
+				await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
+		}
 	}
 
 	async #discardPreparedSession(agentInstanceId: string, sessionManager: SessionManager): Promise<void> {
@@ -3433,11 +3435,10 @@ export class EngineRuntime {
 			}
 			const createdMcpManager = mcpManager;
 			if (createdMcpManager) await collectFailure(cleanupErrors, () => createdMcpManager.disconnectAll());
-			// Failed native generations are unbound immutable data; never delete their inherited source.
+			// Only the unbound prepared generation is reclaimed, never its inherited source.
 			if (uncommittedForkSessionFile && sessionManager) {
 				const forkSessionManager = sessionManager;
-				forkSessionManager.seal();
-				await collectFailure(cleanupErrors, () => forkSessionManager.close());
+				await collectFailure(cleanupErrors, () => this.#discardPreparedSession(request.agentInstanceId, forkSessionManager));
 			}
 			if (disposeResolved) await collectFailure(cleanupErrors, disposeResolved);
 			if (cleanupErrors.length > 0) {
