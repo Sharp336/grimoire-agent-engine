@@ -37,7 +37,7 @@ export interface AdmittedExecutionFixture {
 		sessionDefaults?: EngineRuntimeOptions["sessionDefaults"];
 	}): Pick<
 		EngineRuntimeOptions,
-		"deviceId" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
+		"deviceId" | "sessionDefaults" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
 	>;
 }
 
@@ -181,9 +181,10 @@ export function admittedExecution(
 		sessionDefaults?: EngineRuntimeOptions["sessionDefaults"];
 	}): Pick<
 		EngineRuntimeOptions,
-		"deviceId" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
+		"deviceId" | "sessionDefaults" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
 	> => ({
 		deviceId: runtimeOptions.deviceId ?? "engine-runtime-test-device",
+		...(runtimeOptions.sessionDefaults ? { sessionDefaults: runtimeOptions.sessionDefaults } : {}),
 		resolveExecution: async (execution, frozen): Promise<ResolvedEngineExecution> => {
 			if (hash(execution.dispatch) !== dispatchHash ||
 				frozen.some(candidate => !routes.some(route => candidate.route_ref === route.route_ref)))
