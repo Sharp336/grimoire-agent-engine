@@ -3531,6 +3531,279 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await expect(local.runtime.sweepExpiredChildHistory()).rejects.toMatchObject({ code: "invalid_request" });
 		await local.runtime.dispose();
 	}, 60000);
+
+	it("seals cwd, settings, provider policy and tools across one root plus six concurrent children", async () => {
+		const capabilityId = `engine-policy-${Snowflake.next()}`;
+		const providers = Array.from({ length: 7 }, (_, index) => `${capabilityId}-${index}`);
+		const webProviders = ["perplexity", "gemini", "anthropic", "codex", "xai", "zai", "exa"] as const;
+		defineCapability<{ name: string }>({
+			id: capabilityId,
+			displayName: capabilityId,
+			description: capabilityId,
+			key: item => item.name,
+		});
+		for (const provider of providers) {
+			registerProvider(capabilityId, {
+				id: provider,
+				displayName: provider,
+				description: provider,
+				priority: 1,
+				load: async ctx => ({
+					items: [
+						{
+							name: provider,
+							_source: { provider, providerName: provider, path: ctx.cwd, level: "project" as const },
+						},
+					],
+				}),
+			});
+		}
+
+		const settingsByCwd = new Map<string, Settings>();
+		const entered = Promise.withResolvers<void>();
+		const providerResults = new Map<string, string[]>();
+		const webProviderResults = new Map<string, string>();
+		const toolResults = new Map<string, string[]>();
+		let enteredCount = 0;
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry, { scopeAgents: 8 });
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			expect(session.settings.isReadOnly()).toBe(true);
+			expect(ambientSettings.getCwd()).toBe(session.settings.getCwd());
+			expect(() => session.settings.override("task.maxRecursionDepth", 99)).toThrow(
+				"Settings snapshot is read-only",
+			);
+			expect(() => session.settings.get("disabledProviders").push("ambient-mutation")).toThrow();
+			await expect(session.settings.reloadForCwd(process.cwd())).rejects.toThrow(
+				"Settings snapshot is read-only",
+			);
+			enteredCount++;
+			if (enteredCount === 7) entered.resolve();
+			await entered.promise;
+			const loaded = await loadCapability<{ name: string }>(capabilityId, { cwd: session.settings.getCwd() });
+			providerResults.set(
+				session.settings.getCwd(),
+				loaded.items.map(item => item.name),
+			);
+			webProviderResults.set(session.settings.getCwd(), resolveProviderCandidates()[0]!.id);
+			toolResults.set(session.settings.getCwd(), session.getEnabledToolNames());
+			return true;
+		});
+		const processCwd = process.cwd();
+		const workspaces = await Promise.all(
+			providers.map(async (provider, index) => {
+				const sessionCwd = path.join(path.dirname(cwd), `workspace-${index}`);
+				fs.mkdirSync(sessionCwd);
+				settingsByCwd.set(
+					sessionCwd,
+					await Settings.loadReadOnly({
+						cwd: sessionCwd,
+						overrides: {
+							disabledProviders: providers.filter(candidate => candidate !== provider),
+							"providers.webSearchOrder": [webProviders[index]!],
+						},
+					}),
+				);
+				return sessionCwd;
+			}),
+		);
+		// Each child consumes the admitted execution's settings; the per-workspace seals come from
+		// the session defaults the resolver applies per Start.
+		const starts = await Promise.all(
+			workspaces.map((sessionCwd, index) =>
+				runtime.start({
+					...startRequest(execution, {
+						commandId: `command-policy-${index}`, agentInstanceId: `agent-policy-${index}`,
+						agentInstanceRef: `grimoire://tasks/grimoire/runtime-test/agents/agent-policy-${index}`,
+						executionId: `execution-policy-${index}`, attemptId: `attempt-policy-${index}`,
+					}, { cwd: sessionCwd, principalId: "owner", input: String(index) }),
+					...(index > 0 ? { parentAgentInstanceId: "agent-policy-0" } : {}),
+				}),
+			),
+		);
+		await runtime.drain();
+		for (let index = 0; index < workspaces.length; index++) {
+			expect(providerResults.get(workspaces[index]!)).toEqual([providers[index]!]);
+			expect(webProviderResults.get(workspaces[index]!)).toBe(webProviders[index]!);
+		}
+		expect(process.cwd()).toBe(processCwd);
+		await Promise.all(starts.map(target => runtime.release(target)));
+		expect(runtime.agentRegistry.list()).toHaveLength(0);
+		expect(runtime.asyncJobManager.getRunningJobs()).toHaveLength(0);
+		await runtime.dispose();
+	});
+
+	it("allows only read-only inbox access through an exact historical target for the same session", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const setup = await createRuntime(execution, (session, input) => session.prompt(input));
+		const prior = await setup.runtime.start(startRequest(execution, {
+			commandId: "command-historical-inbox-a", agentInstanceId: "agent-historical-inbox",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-historical-inbox",
+			executionId: "execution-historical-inbox-a", attemptId: "attempt-historical-inbox-a",
+		}, { cwd: setup.cwd, principalId: "owner", input: "first" }));
+		await setup.runtime.drain();
+		const queued = await setup.runtime.enqueueInbox(prior, {
+			sourceEventId: "historical-inbox-source",
+			sourceType: "user",
+			body: "queued for the next Attempt",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		let wake: EngineEvent | undefined;
+		for (let remaining = 50; !wake && remaining > 0; remaining--) {
+			wake = (await setup.runtime.store.pendingEvents()).find(
+				event =>
+					event.kind === "inbox_changed" &&
+					event.payload?.action === "wake_due" &&
+					event.payload?.queueId === queued.item.queueId,
+			);
+			if (!wake) await Bun.sleep(25);
+		}
+		if (!wake) throw new Error("Historical inbox wake was not claimed");
+		const current = await setup.runtime.start(startRequest(execution, {
+			commandId: "command-historical-inbox-b", agentInstanceId: prior.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-historical-inbox",
+			executionId: "execution-historical-inbox-b", attemptId: "attempt-historical-inbox-b",
+		}, {
+			cwd: setup.cwd, principalId: "owner",
+			queueId: queued.item.queueId,
+			expectedRevision: Number(wake.payload?.revision),
+			mutationId: `wake:${queued.item.queueId}:${wake.payload?.revision}`,
+			expectedIntentRevision: prior.intentRevision!,
+		}));
+		await setup.runtime.drain();
+
+		expect(await setup.runtime.listInbox(prior, true)).toContainEqual(
+			expect.objectContaining({
+				queueId: queued.item.queueId,
+				sourceEventId: "historical-inbox-source",
+				disposition: "acknowledged",
+				revision: 3,
+			}),
+		);
+		expect(await setup.runtime.readInbox(prior, queued.item.queueId)).toMatchObject({
+			sourceEventId: "historical-inbox-source",
+			disposition: "acknowledged",
+			revision: 3,
+		});
+
+		await expect(
+			setup.runtime.enqueueInbox(prior, {
+				sourceEventId: "historical-write-rejected",
+				sourceType: "user",
+				body: "must not enqueue",
+				createdAt: Date.now(),
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await expect(
+			setup.runtime.mutateInbox(prior, {
+				mutationId: "historical-mutation-rejected",
+				queueId: queued.item.queueId,
+				expectedRevision: 3,
+				op: "drop",
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await expect(setup.runtime.reorderInbox(prior, "historical-reorder-rejected", [], [])).rejects.toMatchObject({
+			code: "stale_target",
+		});
+
+		const tamperedTargets = [
+			{ target: { ...prior, agentInstanceId: "agent-historical-inbox-other" }, code: "agent_not_found" },
+			{ target: { ...prior, executionId: "execution-historical-inbox-other" }, code: "stale_target" },
+			{ target: { ...prior, attemptId: current.attemptId }, code: "stale_target" },
+			{ target: { ...prior, bindingId: "binding-historical-inbox-other" }, code: "stale_target" },
+			{ target: { ...prior, engineGeneration: prior.engineGeneration + 1 }, code: "stale_target" },
+			{ target: { ...prior, bindingGeneration: prior.bindingGeneration + 1 }, code: "stale_target" },
+			{ target: { ...prior, authorityGeneration: prior.authorityGeneration + 1 }, code: "stale_target" },
+		];
+		for (const { target, code } of tamperedTargets) {
+			await expect(setup.runtime.listInbox(target, true)).rejects.toMatchObject({ code });
+		}
+
+		await setup.runtime.dispose();
+		const restarted = await openRuntime(setup.options);
+		expect(await restarted.listInbox(prior, true)).toContainEqual(
+			expect.objectContaining({
+				queueId: queued.item.queueId,
+				sourceEventId: "historical-inbox-source",
+				disposition: "acknowledged",
+			}),
+		);
+		expect(await restarted.readInbox(prior, queued.item.queueId)).toMatchObject({
+			sourceEventId: "historical-inbox-source",
+			disposition: "acknowledged",
+		});
+		await expect(
+			restarted.mutateInbox(prior, {
+				mutationId: "historical-retained-mutation-rejected",
+				queueId: queued.item.queueId,
+				expectedRevision: 3,
+				op: "drop",
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+
+		const fresh = await restarted.start(startRequest(execution, {
+			commandId: "command-historical-inbox-fresh", agentInstanceId: prior.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-historical-inbox",
+			executionId: "execution-historical-inbox-fresh", attemptId: "attempt-historical-inbox-fresh",
+		}, { cwd: setup.cwd, principalId: "owner", input: "fresh session" }));
+		await restarted.drain();
+		expect(fresh.sessionFile).not.toBe(current.sessionFile);
+		await expect(restarted.listInbox(prior, true)).rejects.toMatchObject({ code: "stale_target" });
+		await restarted.dispose();
+	}, 60_000);
+
+	it("rejects malformed or over-budget native command context before admission and accepts the exact UTF-8 bound", async () => {
+		let dispatches = 0;
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async () => {
+			dispatches++;
+			return true;
+		});
+		try {
+			const request = startRequest(execution, {
+				commandId: "context-bound", agentInstanceId: "context-bound-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/context-bound-agent",
+				executionId: "context-bound-execution", attemptId: "context-bound-attempt",
+			}, { cwd, principalId: "owner", input: "B" });
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1", op: "start", commandId: request.commandId,
+				deviceId: "context-device", engineId: "context-engine",
+				engineGeneration: runtime.engineGeneration, agentInstanceId: request.agentInstanceId,
+				agentInstanceRef: request.agentInstanceRef, bindingSnapshot: request.bindingSnapshot,
+				executionId: request.executionId, attemptId: request.attemptId, authorityGeneration: 1,
+				principalId: request.principalId, issuedAt: Date.now(),
+				payload: {
+					cwd, input: "B",
+					executionConfiguration: execution.config,
+					dispatchRef: execution.dispatchRef,
+					dispatchHash: execution.dispatchHash,
+					executionKind: "ordinary", specialRef: null,
+					originReceiptId: request.originReceiptId,
+				},
+			};
+			for (const context of [null, [], {}, 42, "\u20ac".repeat(21_846)]) {
+				await expect(
+					dispatchEngineCommand({
+						runtime,
+						command: { ...command, payload: { ...command.payload, context } },
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			expect(dispatches).toBe(0);
+			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
+			await dispatchEngineCommand({
+				runtime,
+				command: { ...command, payload: { ...command.payload, context: "\u00e9".repeat(32_768) } },
+			});
+			await runtime.drain();
+			expect(dispatches).toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
