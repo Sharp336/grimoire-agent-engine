@@ -1230,6 +1230,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			onError: error => errors.push(error),
 		});
 		const client = await connect({ servers: broker.url });
+		const failures: unknown[] = [];
 		try {
 			const js = jetstream(client);
 			const decoder = new TextDecoder();
@@ -1437,6 +1438,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				...cancel,
 				commandId: "command-cancel-live-without-binding",
 				agentInstanceId: live.agentInstanceId,
+				agentInstanceRef: live.agentInstanceRef,
+				bindingSnapshot: live.bindingSnapshot,
 				executionId: live.executionId,
 				attemptId: live.attemptId,
 				issuedAt: Date.now(),
@@ -1466,21 +1469,26 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			liveSubscription.unsubscribe();
 			reuseSubscription.unsubscribe();
 			retainedSubscription.unsubscribe();
+		} catch (error) {
+			failures.push(error);
 		} finally {
-			const stopping = adapter.stopAdmission();
-			const disposing = runtime.dispose({ closeStore: false });
+			const stopping = Promise.allSettled([adapter.stopAdmission(), runtime.dispose({ closeStore: false })]);
 			livePrompt.resolve(true);
 			pendingOrigin.resolve();
 			reuseOrigin.resolve();
-			await stopping;
-			await disposing;
-			await client.drain();
-			await adapter.dispose();
-			await runtime.store.close();
-			authStorage.close();
-			broker.process.kill();
-			await broker.process.exited;
+			for (const result of await stopping)
+				if (result.status === "rejected") failures.push(result.reason);
+			for (const close of [
+				() => client.drain(),
+				() => adapter.dispose(),
+				() => runtime.store.close(),
+				async () => { authStorage.close(); },
+				async () => { broker.process.kill(); await broker.process.exited; },
+			]) {
+				try { await close(); } catch (error) { failures.push(error); }
+			}
 		}
+		if (failures.length) throw new AggregateError(failures, "NATS receipt fixture failed");
 	}, 30000);
 
 	it("keeps a received pre-start command interrupted across an Engine generation upgrade without launching it", async () => {
