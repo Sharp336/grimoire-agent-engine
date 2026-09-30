@@ -19,6 +19,7 @@ export type {
 	ExecutorRouteState as EngineExecutorRouteState, ImmutableAttemptStart, EngineCommandPayload,
 	ContinuationConfiguration, ContinuationDigestInput, ExecutionDigestInput, RoutingLimits,
 	NativeCompatibility, RosterRequest, ExecutorSettingsRequest, AutomationExecution,
+	ChoiceProvenance, InstructionRule, InstructionSources,
 } from "./runtime-protocol.mjs";
 
 /** Immutable semantic scope admitted by Core/ClientHost, independent of transport generations. */

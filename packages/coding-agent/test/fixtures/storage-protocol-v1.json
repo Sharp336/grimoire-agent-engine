@@ -3092,9 +3092,16 @@
           "minLength": 1
         },
         "revision": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "content_hash": {
           "$ref": "#/$defs/hash"

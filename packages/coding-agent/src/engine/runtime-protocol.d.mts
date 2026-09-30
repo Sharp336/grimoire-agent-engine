@@ -338,8 +338,33 @@ export type ChoiceTransition = {
 
 export type ChoiceProvenance = {
 	"ref": string;
+	"revision": number | null;
+	"content_hash": Hash;
+};
+
+export type InstructionRule = {
+	"ref": ArtifactRef;
 	"revision": number;
 	"content_hash": Hash;
+	"content": string;
+	"route_refs": Array<ArtifactRef> | null;
+};
+
+export type InstructionFacts = {
+	"binding": Array<"task" | "step" | "consultation" | "automation">;
+	"scope": Array<string>;
+	"os": "windows" | "linux" | "darwin" | null;
+	"runtime": "artel-engine";
+	"engine_version": string | null;
+	"provider"?: string | null;
+	"family"?: string | null;
+	"model"?: string | null;
+};
+
+export type InstructionSources = {
+	"facts": InstructionFacts;
+	"rules": Array<InstructionRule>;
+	"skills": Array<ChoiceProvenance>;
 };
 
 export type ActualCost = {
@@ -695,6 +720,7 @@ export type EngineExecutionConfiguration = {
 	"continuationPolicy": "exact" | "fresh";
 	"continuationConfiguration": ContinuationConfiguration;
 	"stableDependencyDigest": Hash;
+	"instruction_sources": InstructionSources;
 	"sessionDefaults": SessionDefaults;
 	"record_revisions": RecordRevisions;
 	"routingLimits": RoutingLimits;
