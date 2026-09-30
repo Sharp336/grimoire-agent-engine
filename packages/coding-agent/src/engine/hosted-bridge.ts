@@ -154,6 +154,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		const text = content.find(
 			item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text",
 		) as Record<string, unknown> | undefined;
+		const structured = result.structuredContent as Record<string, unknown> | undefined;
 		if (result.isError === true)
 			throw new EngineTargetError("stale_target", `Grimoire Host refused ${tool}`);
 		if (structured && typeof structured === "object") return structured;
