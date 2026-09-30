@@ -76,6 +76,11 @@ describe("Engine SDK instruction isolation", () => {
 				asyncJobManager: manager,
 				ircBus,
 			};
+			await expect(createAgentSession({
+				...base,
+				sessionManager: SessionManager.inMemory(cwd),
+				engineContextProjection: messages => messages,
+			})).rejects.toThrow();
 
 			managed = (await createAgentSession({
 				...base,
