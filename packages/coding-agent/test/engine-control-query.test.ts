@@ -21,6 +21,7 @@ import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/sto
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
+import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	bindTestsToStorageWorker();
@@ -758,6 +759,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			engineGeneration: runtime.engineGeneration,
 			agentInstanceId: target.agentInstanceId,
 			agentInstanceRef,
+			bindingSnapshot: semanticBinding(agentInstanceRef, "grimoire://tasks/grimoire/control-tools"),
 			executionId: target.executionId,
 			attemptId: target.attemptId,
 			authorityGeneration: 1,
