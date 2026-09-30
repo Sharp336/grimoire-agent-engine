@@ -4391,7 +4391,7 @@ export class EngineRuntime {
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
-			const events: EngineTransitionEvent[] = [...binding.pauseRequests].map(([commandId, initiator]) => ({
+			const events: EngineTransitionEvent<EngineOrdinaryEvent>[] = [...binding.pauseRequests].map(([commandId, initiator]) => ({
 				kind: "paused" as const,
 				payload: controlPayload(initiator, "paused", false, binding),
 				causationCommandId: commandId,
@@ -4546,7 +4546,8 @@ export class EngineRuntime {
 	): Promise<EngineEvent | undefined> {
 		const effect = binding.modelEffect;
 		if (!effect) return;
-		const checkpoint = await this.#effectCheckpoint(binding);
+		const checkpoint = outcome === "failed" && binding.messageWriteError
+			? undefined : await this.#effectCheckpoint(binding);
 		const event = await this.store.settleModelEffect(
 			this.#snapshot(binding), effect, outcome, error?.slice(0, 2_048), checkpoint,
 		);
@@ -4607,6 +4608,8 @@ export class EngineRuntime {
 						),
 					audit,
 				);
+				await binding.session.settleInFlightMessagePersistence();
+				await binding.traceWriteTail;
 				binding.streamAdmission?.check();
 				if (binding.messageWriteError) throw binding.messageWriteError;
 				const current = binding.session.getLastAssistantMessage();
@@ -4616,14 +4619,15 @@ export class EngineRuntime {
 			} catch (error) {
 				audit?.mark("model_failed");
 				const message = error instanceof Error ? error.message : String(error);
-				await binding.session.settleInFlightMessagePersistence();
+				try {
+					await binding.session.settleInFlightMessagePersistence();
+				} catch (persistenceError) {
+					binding.messageWriteError ??= persistenceError;
+				}
 				await binding.traceWriteTail;
-				if (!binding.messageWriteError) await this.#settleActiveModelEffect(binding, "failed", message);
+				await this.#settleActiveModelEffect(binding, "failed", message);
 				throw error;
 			}
-			await binding.session.settleInFlightMessagePersistence();
-			await binding.traceWriteTail;
-			if (binding.messageWriteError) throw binding.messageWriteError;
 			const settled = await this.#settleActiveModelEffect(binding, "completed");
 			audit?.mark("model_completed", { eventId: settled?.eventId });
 			return dispatched;
@@ -5443,7 +5447,7 @@ export class EngineRuntime {
 				...(request.reason ? { reason: request.reason } : {}),
 				...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
 			};
-			const events: EngineTransitionEvent[] = [
+			const events: EngineTransitionEvent<EngineOrdinaryEvent>[] = [
 				{ kind: "cancelled", payload, causationCommandId: request.commandId },
 			];
 			try {
@@ -6067,7 +6071,7 @@ export class EngineRuntime {
 	async #commitAttemptTransition(
 		binding: LiveBinding,
 		state: EngineAttemptState,
-		events: readonly EngineTransitionEvent[],
+		events: readonly EngineTransitionEvent<EngineOrdinaryEvent>[],
 		options: {
 			cause?: string;
 			terminalResult?: Record<string, unknown>;

@@ -1952,7 +1952,7 @@ export class RocksEngineMutations {
 	async commitAttemptTransition(
 		binding: EngineBindingSnapshot,
 		state: EngineAttemptState,
-		events: readonly EngineTransitionEvent[],
+		events: readonly EngineTransitionEvent<EngineOrdinaryEvent>[],
 		options: RocksTransitionOptions = {},
 	): Promise<EngineEvent[]> {
 		const native = options.transcriptCheckpoint?.native;
@@ -2149,9 +2149,9 @@ export class RocksEngineMutations {
 					);
 					if (result.event) committed.push(result.event);
 				}
-				for (const event of events.length || !checkpoint
-					? events
-					: [{ kind: "reconciled" } as EngineTransitionEvent])
+				const transitionEvents: readonly EngineTransitionEvent<EngineOrdinaryEvent>[] =
+					events.length || !checkpoint ? events : [{ kind: "reconciled" }];
+				for (const event of transitionEvents)
 					committed.push(
 						await this.append(tx, binding, {
 							...event,

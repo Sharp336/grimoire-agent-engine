@@ -491,6 +491,8 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				await tx.put("command", row.command_id, { ...row, identity: retained, canonical_hash: retained.canonicalHash,
 					payload_bytes: Buffer.byteLength(retained.serializedCommand!) });
 				const attempt = (await tx.get<RocksAttempt>("attempt", child.attemptId))!;
+				const effects = await tx.get<{ count: number }>("metadata", `effects:${attempt.attempt_id}:${attempt.binding_id}`);
+				expect(effects?.count ?? 0).toBe(0);
 				delete attempt.binding_snapshot;
 				await tx.put("attempt", child.attemptId, attempt);
 			});

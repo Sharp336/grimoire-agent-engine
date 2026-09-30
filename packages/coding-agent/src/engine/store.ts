@@ -143,10 +143,9 @@ export interface EnginePendingStartCancellation {
 	intentRevision?: number;
 }
 
-type TransitionEvent<T extends EngineEvent> = T extends EngineEvent
+export type EngineTransitionEvent<T extends EngineEvent = EngineEvent> = T extends EngineEvent
 	? Pick<T, "kind" | "payload"> & { causationCommandId?: string }
 	: never;
-export type EngineTransitionEvent = TransitionEvent<EngineEvent>;
 
 export interface EngineTranscriptCheckpoint extends SessionDurabilityCheckpoint {
 	revision: number;

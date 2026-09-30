@@ -110,7 +110,7 @@ export function admittedExecution(
 			provider_model_id: candidate.id,
 			context_window: candidate.contextWindow,
 			max_output_tokens: candidate.maxTokens,
-			input_modalities: ["text"] as ["text"],
+			input_modalities: [...candidate.input],
 			supports_tools: true, supports_reasoning: false, header_refs: [], compat: null,
 			route_content_hash: hash({ route: routeRef }), account_content_hash: hash({ account: routeRef }),
 			display_name: `Engine runtime test route ${routeRef}`, efforts: ["none"] as ["none"], trusted: true,
