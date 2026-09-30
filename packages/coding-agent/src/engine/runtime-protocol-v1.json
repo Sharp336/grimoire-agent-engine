@@ -346,7 +346,7 @@
       "required": ["status", "observations"],
       "properties": {
         "status": { "type": "string" },
-        "observations": { "type": "array" }
+        "observations": { "type": "array", "items": {} }
       }
     },
     "attachmentUploadIds": {
