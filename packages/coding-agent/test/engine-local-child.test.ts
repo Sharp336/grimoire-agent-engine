@@ -162,7 +162,9 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			},
 		});
 		const directParentExecution = admittedExecution(directParentModel.model, modelRegistry, {
-			taskRef: parentTaskRef, continuation: { systemPrompt: "Direct parent admission" },
+			taskRef: parentTaskRef,
+			spawn: { allowed: "yes", max_depth: 1, max_children: 1, on_exceed: "deny" },
+			continuation: { systemPrompt: "Direct parent admission" },
 		});
 		const executions = [execution, directParentExecution];
 		const fixtureOptionsFor = (deviceId: string): Pick<
