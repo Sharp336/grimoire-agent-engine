@@ -60,6 +60,12 @@ import type { ResolvedEngineExecution } from "@oh-my-pi/pi-coding-agent/engine/e
 import type { Model } from "@oh-my-pi/pi-ai";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import {
+	admittedExecution,
+	approvalDecisionFor,
+	startRequest,
+	type AdmittedExecutionFixture,
+} from "./helpers/engine-runtime-admitted-fixture";
 
 const storageExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const storageRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -125,286 +131,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	const spawnOff = { allowed: "no", max_depth: 0, max_children: 0, on_exceed: "deny" } as const;
 	const unlimitedLimits = { timeout_seconds: null, max_iterations: null };
 
-	/** Continuation configuration derived from one admitted dispatch; per-Start knobs live here. */
-	function continuation(
-		overrides: Partial<EngineExecutionConfiguration["continuationConfiguration"]> = {},
-	): EngineExecutionConfiguration["continuationConfiguration"] {
-		return {
-			systemPrompt: "",
-			toolNames: [],
-			restrictToolNames: false,
-			toolPolicies: {},
-			enableMCP: false,
-			enableLsp: false,
-			lspShared: false,
-			disabledCapabilityProviders: [],
-			outputSchema: null,
-			requireYieldTool: false,
-			spawn: spawnOff,
-			limits: unlimitedLimits,
-			tools_permit: [],
-			tools_on_request: "none",
-			providerPromptCacheKey: null,
-			...overrides,
-		};
-	}
-
-	interface AdmittedExecutionFixture {
-		config: EngineExecutionConfiguration;
-		dispatchRef: string;
-		dispatchHash: string;
-		taskRef: string;
-		receipts: Map<string, EngineCommandEnvelope>;
-		decisions: Map<string, ApprovalDecision>;
-		setModelOverride(override: Record<string, unknown>): void;
-		optionsFor(runtimeOptions: Pick<EngineRuntimeOptions, "deviceId" | "sessionDefaults">): Pick<
-			EngineRuntimeOptions,
-			"deviceId" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
-		>;
-	}
-
-	/**
-	 * One admitted typed execution for an ordinary Agent on a Task: a frozen single-route roster
-	 * materialized locally by the test resolver, origin receipts captured per Start command, and
-	 * canonical instruction_sources. Mirrors the common native proof fixture without reading it.
-	 */
-	function admittedExecution(
-		model: Model,
-		options: {
-			taskRef?: string;
-			continuation?: Partial<EngineExecutionConfiguration["continuationConfiguration"]>;
-			spawn?: EngineExecutionConfiguration["dispatch"]["spawn"];
-			continuationPolicy?: "exact" | "fresh";
-			scopeAgents?: number;
-			fallbackModel?: { provider: string; id: string } | null;
-		} = {},
-	) {
-		const taskRef = options.taskRef ?? "grimoire://tasks/grimoire/runtime-test";
-		const dispatchRef = "gctx:cccccccccccccccc";
-		const primaryRouteRef = "gctx:bbbbbbbbbbbbbbbb";
-		const fallbackRouteRef = options.fallbackModel ? "gctx:dddddddddddddddd" : primaryRouteRef;
-		type FixtureRoute = EngineExecutionConfiguration["routes"]["routes"][number];
-		const route = (routeRef: string, modelId: string, provider: string): FixtureRoute => ({
-			model_id: modelId, route_ref: routeRef, account_ref: "gctx:aaaaaaaaaaaaaaaa",
-			effort: "none", service_tier: "standard", billing_pool_id: "engine-runtime-test-pool",
-			billing_pool_basis: "expected", tier: 0, provider_id: provider, quota_window_ids: [],
-			shadow_cost: null, price_source: "unknown", estimated: false, record_revisions: {},
-			provider, modelId, billing_pools: [], quota_windows: [],
-			execution: {
-				api: "openai-completions",
-				base_url: model.api === "mock" ? "http://127.0.0.1:1/v1" : model.baseUrl ?? "http://127.0.0.1:1/v1",
-				provider_model_id: modelId,
-				context_window: model.contextWindow ?? 200_000,
-				max_output_tokens: model.maxTokens ?? 8_192,
-				input_modalities: ["text"] as ["text"],
-				supports_tools: true, supports_reasoning: false, header_refs: [], compat: null,
-				route_content_hash: hash({ route: routeRef }), account_content_hash: hash({ account: routeRef }),
-				display_name: `Engine runtime test route ${routeRef}`, efforts: ["none"] as ["none"], trusted: true,
-				credential: { method: "none", local_ref: null, hosted_ref: null, generation: 1 },
-				account_binding_id: null,
-			},
-			family: null, tags: [], efforts: ["none"] as ["none"], hard_quota_window_ids: [], order_match: null,
-		});
-		const routes: EngineExecutionConfiguration["routes"]["routes"] = [route(primaryRouteRef, model.id, model.provider)];
-		if (options.fallbackModel)
-			routes.push(route(fallbackRouteRef, options.fallbackModel.id, options.fallbackModel.provider));
-		const scopeAgents = options.scopeAgents ?? 4;
-		const spawn = options.spawn ?? spawnOff;
-		const config: EngineExecutionConfiguration = {
-			dispatch: {
-				schema: "grimoire.dispatch.v2", execution_kind: "ordinary", special_ref: null,
-				dispatch_id: "engine-runtime-test-dispatch",
-				target: { task_ref: taskRef, work_step_id: null },
-				prompt: "Engine runtime test", instructions: "", skill_refs: [],
-				display_name: null, preset: null, tools: null, tools_permit: [],
-				tools_on_request: "none", spawn,
-				requirement: {
-					min_tier: 0, required: [], required_tags: [], preferred_tags: [], models: null,
-					exclude: { models: [], families: [], agent_instances: [] },
-					min_context: null, min_output: null, latency_ceiling_ms: null, min_effort: null,
-					service_tier: "standard", downgrade: "forbidden", pin: null,
-					require_trusted_provider: true,
-					fallback_mode: options.fallbackModel ? "same_model" : "none",
-				},
-				output_schema: null, limits: unlimitedLimits,
-			},
-			routes: { routes },
-			continuationPolicy: options.continuationPolicy ?? "exact",
-			continuationConfiguration: continuation({ spawn, limits: unlimitedLimits, ...options.continuation }),
-			stableDependencyDigest: hash("engine-runtime-test-dependency"),
-			sessionDefaults: {},
-			instruction_sources: {
-				facts: { binding: "task", scope: [taskRef], os: null, runtime: "artel-engine", engine_version: null },
-				rules: [], skills: [],
-			},
-			record_revisions: {},
-			routingLimits: {
-				scopes: [{ scope_ref: taskRef, agents: scopeAgents, by_tier: [], consultations: null }],
-				accounts: { "gctx:aaaaaaaaaaaaaaaa": scopeAgents },
-				providers: { [model.provider]: scopeAgents },
-			},
-			scope_revision: hash("engine-runtime-test-scope"),
-			roster_revision: hash("engine-runtime-test-roster"),
-			roster_complete: true,
-		};
-		const dispatchHash = hash(config.dispatch);
-		const receipts = new Map<string, EngineCommandEnvelope>();
-		const decisions = new Map<string, ApprovalDecision>();
-		let modelOverride: Record<string, unknown> = {};
-		const optionsFor = (runtimeOptions: Pick<EngineRuntimeOptions, "deviceId" | "sessionDefaults">): Pick<
-			EngineRuntimeOptions,
-			"deviceId" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
-		> => ({
-			deviceId: "engine-runtime-test-device",
-			resolveExecution: async (execution, frozen, _attempt, _cwd, _signal): Promise<ResolvedEngineExecution> => {
-				if (hash(execution.dispatch) !== dispatchHash ||
-					frozen.length !== routes.length ||
-					frozen.some((candidate, index) => candidate.route_ref !== routes[index]!.route_ref))
-					throw new EngineTargetError("stale_target", "Fixture route differs from admitted execution");
-				return {
-					options: { model, modelRegistry, ...(runtimeOptions.sessionDefaults?.settings
-						? { settings: runtimeOptions.sessionDefaults.settings }
-						: {}), ...modelOverride },
-					selectors: routes.map(candidate => `${candidate.provider}/${candidate.modelId}`),
-					verifyCandidate: async index => {
-						if (index >= routes.length) throw new EngineTargetError("stale_target", "Unknown fixture route");
-					},
-					activateCandidate: () => {},
-					dispose: () => {},
-				};
-			},
-			verifyOriginReceipt: async identity => {
-				const command = receipts.get(identity.originReceiptId);
-				if (!command || command.commandId !== identity.commandId ||
-					command.agentInstanceRef !== identity.agentInstanceRef ||
-					command.attemptId !== identity.attemptId || command.principalId !== identity.principalId)
-					throw new EngineTargetError("stale_target", "Origin differs from the exact fixture command");
-				// Return the exact captured binding snapshot, never a synthesized one: owned
-				// installation/bindingRevision/workStep/parent provenance must survive verification.
-				if (!command.bindingSnapshot)
-					throw new EngineTargetError("invalid_request", "Fixture Start command has no captured binding snapshot");
-				return {
-					verified: true, dispatchHash, bindingSnapshot: command.bindingSnapshot,
-					authContextId: "engine-runtime-test-auth", approvalSettings: null, specialApproval: null,
-				};
-			},
-			verifyApprovalReceipt: async identity => {
-				const decision = decisions.get(identity.originReceiptId);
-				if (!decision || decision.command_id !== identity.commandId)
-					throw new EngineTargetError("stale_target", "Approval decision differs from its submitted command");
-				return { verified: true, approvalDecision: decision, expectedInputRevision: null };
-			},
-		});
-		const fixtureResult: AdmittedExecutionFixture = {
-			config,
-			dispatchRef,
-			dispatchHash,
-			taskRef,
-			receipts,
-			decisions,
-			setModelOverride: (override: Record<string, unknown>) => {
-				modelOverride = override;
-			},
-			optionsFor,
-		};
-		return fixtureResult;
-	}
-
-	const fixture = (model: Model, taskRef: string): AdmittedExecutionFixture => admittedExecution(model, { taskRef });
-
-	/** A typed Start request against one admitted execution. */
-	function startRequest(
-		execution: AdmittedExecutionFixture,
-		identity: {
-			commandId: string;
-			agentInstanceId: string;
-			agentInstanceRef: string;
-			executionId: string;
-			attemptId: string;
-		},
-		payload: {
-			cwd: string;
-			principalId: string;
-			input?: string;
-			parentAgentInstanceId?: string;
-			historyEdit?: EngineStartRequest["historyEdit"];
-			attachmentUploadIds?: string[];
-			clientMessageId?: string;
-			context?: string;
-			displayName?: string;
-			delegationHint?: string;
-			queueId?: string;
-			expectedRevision?: number;
-			mutationId?: string;
-			expectedIntentRevision?: number;
-			explicitContinue?: boolean;
-		},
-	): EngineStartRequest {
-		const originReceiptId = `origin:${identity.commandId}`;
-		const command: EngineCommandEnvelope = {
-			schema: "grimoire.engine.command.v1", op: "start", commandId: identity.commandId,
-			deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
-			engineGeneration: 0, agentInstanceId: identity.agentInstanceId,
-			agentInstanceRef: identity.agentInstanceRef,
-			bindingSnapshot: semanticBinding(identity.agentInstanceRef, execution.taskRef),
-			executionId: identity.executionId, attemptId: identity.attemptId, authorityGeneration: 1,
-			principalId: payload.principalId, issuedAt: Date.now(),
-			payload: { cwd: payload.cwd },
-		};
-		execution.receipts.set(originReceiptId, command);
-		const { principalId: _p, cwd: _c, ...rest } = payload;
-		return {
-			...rest,
-			commandId: identity.commandId,
-			principalId: payload.principalId,
-			executionConfiguration: execution.config,
-			dispatchRef: execution.dispatchRef,
-			dispatchHash: execution.dispatchHash,
-			executionKind: "ordinary",
-			specialRef: null,
-			originReceiptId,
-			agentInstanceId: identity.agentInstanceId,
-			agentInstanceRef: identity.agentInstanceRef,
-			bindingSnapshot: semanticBinding(identity.agentInstanceRef, execution.taskRef),
-			executionId: identity.executionId,
-			attemptId: identity.attemptId,
-			authorityGeneration: 1,
-			cwd: payload.cwd,
-		};
-	}
-
-	/** An approval decision carrying the exact command identity the fixture verifier captured. */
-	function approvalDecision(
-		execution: ReturnType<typeof admittedExecution>,
-		target: EngineTarget & { principalId?: string },
-		commandId: string,
-		requestId: string,
-		decision: "approve" | "deny",
-		reason?: string,
-	): { target: EngineTarget; commandId: string; approvalDecision: ApprovalDecision } {
-		const approvalDecisionValue: ApprovalDecision = {
-			schema: "grimoire.approval_decision.v1",
-			request_id: requestId,
-			expected_address_revision: 1,
-			expected_decision_revision: 0,
-			command_id: commandId,
-			decision,
-			reason: reason ?? null,
-			origin_receipt_id: `origin:${commandId}`,
-			decided_by: { kind: "human", principal_id: target.principalId ?? "owner" },
-			authority: {
-				ceiling_hash: hash({ tools_permit: [] }),
-				subject_hash: hash({ request_id: requestId }),
-				dispatch_hash: execution.dispatchHash,
-			},
-			decided_at: new Date().toISOString(),
-		};
-		execution.decisions.set(approvalDecisionValue.origin_receipt_id, approvalDecisionValue);
-		return { target, commandId, approvalDecision: approvalDecisionValue };
-	}
-
 	async function createRuntime(
-		execution: ReturnType<typeof admittedExecution>,
+		execution: AdmittedExecutionFixture,
 		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true,
 		overrides: Partial<EngineRuntimeOptions> = {},
 	) {
@@ -436,7 +164,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				enableLsp: false,
 				modelRegistry,
 			},
-			...execution.optionsFor({ deviceId: "engine-runtime-test-device", sessionDefaults: {} }),
+			...execution.optionsFor({ deviceId: "engine-runtime-test-device" }),
 			...overrides,
 		};
 		const runtime = await openRuntime(options);
@@ -522,11 +250,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			},
 		});
 		// Negative Start: a separately admitted execution whose tool ceiling omits `read`.
-		const deniedExecution = admittedExecution(mock.model, {
+		const deniedExecution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolNames: ["glob"], restrictToolNames: true },
 		});
 		// Positive Start: the admitted execution with `read` in its tool ceiling.
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolNames: ["read"], restrictToolNames: true },
 		});
 		const setup = await createRuntime(execution, undefined);
@@ -617,7 +345,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("refuses missing or unsupported images before model dispatch and leaves failed queued delivery pending", async () => {
 		const mock = createMockModel({ handler: { content: ["must not run"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, undefined);
 		const png = Buffer.from(
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
@@ -669,7 +397,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("runs two independent roots on one shared runtime and disposes only the targeted root", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		const request = (suffix: string) =>
 			startRequest(execution, {
@@ -701,7 +429,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("reuses an idle root for a new Attempt and rejects stale generation fences", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		const request = (suffix: string, attemptId: string) =>
 			startRequest(execution, {
@@ -725,7 +453,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60000);
 
 	it("bounds canonical presentation fields at Engine admission", () => {
-		const execution = admittedExecution(createMockModel().model);
+		const execution = admittedExecution(createMockModel().model, modelRegistry);
 		const base = startRequest(execution, {
 			commandId: "command-validation", agentInstanceId: "agent-validation",
 			agentInstanceRef: "grimoire://tasks/grimoire/validation/agents/agent-validation",
@@ -741,7 +469,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("uses canonical presentation fields without changing the Engine agent route", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		const started = await runtime.start(startRequest(execution, {
 			commandId: "command-named", agentInstanceId: "agent-machine-identity",
@@ -764,7 +492,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("fails closed when Engine mode has no explicit Settings snapshot", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const setup = await createRuntime(execution, async () => true);
 		// Remove the explicit settings: Engine mode must refuse to start with ambient settings.
 		const options: EngineRuntimeOptions = { ...setup.options };
@@ -782,7 +510,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("rejects an Engine Settings snapshot captured for another cwd", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const setup = await createRuntime(execution, async () => true);
 		const options: EngineRuntimeOptions = { ...setup.options };
 		if (options.sessionDefaults)
@@ -814,7 +542,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				{ content: ["corrected turn"] },
 			],
 		});
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) =>
 			session.prompt(input, identity));
 		try {
@@ -868,7 +596,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await prompt.promise;
 			return { content: ["answer"] };
 		}] });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		try {
 			const started = await runtime.start(startRequest(execution, {
@@ -938,7 +666,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				{ content: ["answer after correction"] },
 			],
 		});
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) =>
 			session.prompt(input, identity));
 		try {
@@ -1082,7 +810,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("waits for an explicit permit decision before executing a tool", async () => {
 		const mock = toolTurnModel("read-permit", "read", { path: "permit.txt" });
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolPolicies: { read: "permit" } },
 		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
@@ -1100,8 +828,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
 		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
 
-		const decision = approvalDecision(execution, started, "command-approve", approvalId, "approve");
-		await runtime.resolveApproval({ ...started, ...decision });
+		const decision = approvalDecisionFor(execution, started, "command-approve", approvalId, "approve");
+		await runtime.resolveApproval({ ...started, commandId: "command-approve", approvalDecision: decision });
 		await runtime.drain();
 		expect(toolResultOf(mock, "read-permit")).toMatchObject({ isError: false });
 		expect(JSON.stringify(toolResultOf(mock, "read-permit")?.content)).toContain("approved");
@@ -1121,7 +849,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("cancels an Attempt that is waiting for a tool permit", async () => {
 		let executed = false;
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolPolicies: { read: "permit" } },
 		});
 		const { runtime, cwd } = await createRuntime(execution, async session => {
@@ -1157,7 +885,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("durably denies a permitted tool without executing it", async () => {
 		let executed = false;
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolPolicies: { read: "permit" } },
 		});
 		const { runtime, cwd } = await createRuntime(execution, async session => {
@@ -1175,8 +903,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			executionId: "execution-denied-permit", attemptId: "attempt-denied-permit",
 		}, { cwd, principalId: "owner", input: "read" }));
 		const approvalId = ((await requested).payload as ApprovalDecision & { id: string }).id;
-		const decision = approvalDecision(execution, started, "command-deny", approvalId, "deny", "not now");
-		await runtime.resolveApproval({ ...started, ...decision });
+		const decision = approvalDecisionFor(execution, started, "command-deny", approvalId, "deny", "not now");
+		await runtime.resolveApproval({ ...started, commandId: "command-deny", approvalDecision: decision });
 		await runtime.drain();
 		expect(executed).toBeFalse();
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "denied" });
@@ -1213,7 +941,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				yield { content: ["done"] };
 			})(),
 		});
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolNames: ["ask"], restrictToolNames: true },
 		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
@@ -1383,7 +1111,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				{ content: ["steered"] },
 			],
 		});
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) =>
 			session.prompt(input, identity));
 		try {
@@ -1512,7 +1240,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("holds a formerly unheld durable queue after restart until an explicit Continue", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const setup = await createRuntime(execution, (session, input) => session.prompt(input));
 		const started = await setup.runtime.start(startRequest(execution, {
 			commandId: "command-released-wake", agentInstanceId: "agent-released-wake",
@@ -1558,7 +1286,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("does not redispatch a durable Attempt after Engine restart", async () => {
 		let dispatchCount = 0;
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const setup = await createRuntime(execution, async () => {
 			dispatchCount++;
 			return true;
@@ -1582,7 +1310,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("keeps an Attempt nonterminal when transcript durability cannot be proven", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		const failedTwice = Promise.withResolvers<void>();
 		let flushCalls = 0;
@@ -1620,7 +1348,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("fails an Attempt terminally when the storage owner rejects its transcript write", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		let flushCalls = 0;
 		const originalFlush = SessionManager.prototype.flushAndCheckpoint;
@@ -1650,10 +1378,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("removes a prepared history fork when execution resolution fails and preserves the source", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		// The failing branch resolution uses its own admitted execution whose resolver refuses after the fork.
 		let failResolution = false;
-		const failingExecution = admittedExecution(mock.model, {
+		const failingExecution = admittedExecution(mock.model, modelRegistry, {
 			taskRef: "grimoire://tasks/grimoire/fork-cleanup",
 		});
 		const failingOptions = failingExecution.optionsFor({ deviceId: "engine-runtime-test-device" });
@@ -1711,7 +1439,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("fails a history fork when its retained conversation cannot be read", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
@@ -1742,7 +1470,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("cancels a pending Start before waiting for shutdown lanes", async () => {
 		let dispatched = false;
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		// Park the resolver: resolution only finishes after the Engine cancels it.
 		let releaseResolution: (() => void) | undefined;
 		const resolutionGate = new Promise<void>(resolve => {
@@ -1801,7 +1529,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await prompt.promise;
 			return { content: ["answer"] };
 		}] });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async session => {
 			session.fetchUsageReports = async signal => {
 				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
@@ -1859,7 +1587,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("reports unsupported provider usage when no reports exist", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async session => {
 			session.fetchUsageReports = async () => [];
 			return true;
@@ -1879,7 +1607,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("records unrestricted tools without exposing their raw input", async () => {
 		const mock = toolTurnModel("read-unrestricted", "read", { path: "secret-name.txt" });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
 		await runtime.start(startRequest(execution, {
@@ -1902,7 +1630,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("records model dispatch certainty without exposing the prompt", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
 		await runtime.start(startRequest(execution, {
 			commandId: "command-model-effect", agentInstanceId: "agent-model-effect",
@@ -1935,7 +1663,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				{ content: ["done"] },
 			],
 		});
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolNames: ["read"], restrictToolNames: true },
 		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
@@ -1977,7 +1705,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			messages: string;
 		}> = [];
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async (session, input, _identity, kind) => {
 			dispatches.push({
 				kind,
@@ -2098,7 +1826,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await release.promise;
 			return { content: ["answer"] };
 		}] });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
@@ -2140,7 +1868,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await release.promise;
 			return { content: ["answer"] };
 		}] });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async () => {
 			entered.resolve();
 			await release.promise;
@@ -2204,7 +1932,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const firstPrompt = Promise.withResolvers<boolean>();
 		const inputs: string[] = [];
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model);
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
 			inputs.push(input);
 			return inputs.length === 1 ? await firstPrompt.promise : true;
@@ -2393,7 +2121,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			exaApiKeys: [],
 		});
 		const mock = createMockModel({ handler: { content: ["done"] } });
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { enableMCP: true },
 		});
 		const setup = await createRuntime(execution, (session, input) => session.prompt(input));
@@ -2496,7 +2224,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			responses: [{ content: Array.from({ length: 7 }, (_, index) => taskCall(index)) }, { content: ["done"] }],
 		});
 		const launches: Array<{ toolCallId: string; target: { work_step_id: string | null } }> = [];
-		const execution = admittedExecution(mock.model, {
+		const execution = admittedExecution(mock.model, modelRegistry, {
 			spawn: { allowed: "auto", max_depth: 1, max_children: 6, on_exceed: "deny" },
 			continuation: { toolNames: ["task"], restrictToolNames: true },
 			scopeAgents: 8,
