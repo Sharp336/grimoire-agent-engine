@@ -127,7 +127,7 @@ import {
 } from "./runtime-history";
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
-import { type AdmissionRequest, candidateIdentity, candidateRef, frozenCandidate, LEASE_HEARTBEAT_MS } from "./routing-admission";
+import { type AdmissionRequest, candidateIdentity, candidateRef, currentIdentity, frozenCandidate, LEASE_HEARTBEAT_MS } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
@@ -565,6 +565,67 @@ export class EngineRuntime {
 			throw new EngineTargetError("stale_target", "Command origin differs from its exact frozen envelope");
 	}
 
+	/** Re-verify origin and the current member of this Attempt's immutable frozen list. */
+	async #resumeRouting(binding: LiveBinding): Promise<AdmissionRequest> {
+		if (!binding.bindingSnapshot || !this.#verifyOriginReceipt)
+			throw new EngineTargetError("stale_target", "Resume requires an admitted hosted binding");
+		const original = await this.store.getStartConversationIdentity(binding.commandId);
+		const start = original?.serializedCommand
+			? JSON.parse(original.serializedCommand) as { payload?: { originReceiptId?: string } }
+			: undefined;
+		const originReceiptId = start?.payload?.originReceiptId;
+		if (!originReceiptId) throw new EngineTargetError("stale_target", "Original Start origin is missing");
+		const origin = await this.#verifyOriginReceipt({
+			originReceiptId, commandId: binding.commandId,
+			agentInstanceRef: binding.bindingSnapshot.agentInstanceRef,
+			attemptId: binding.attemptId, principalId: binding.principalId,
+		});
+		if (origin.verified !== true || origin.dispatchHash !== binding.dispatchHash ||
+			!origin.bindingSnapshot || !sameSemanticBinding(origin.bindingSnapshot, binding.bindingSnapshot) ||
+			!origin.authContextId)
+			throw new EngineTargetError("stale_target", "Resume origin or semantic binding changed");
+		const config = binding.execution.config;
+		const current = currentIdentity(binding.execution.choice);
+		const candidate = binding.execution.frozen.find(route =>
+			candidateRef(route) === candidateRef(current));
+		if (!candidate || (config.dispatch.requirement.require_trusted_provider && !candidate.execution.trusted))
+			throw new EngineTargetError("stale_target", "Current executor is outside the admitted frozen choices");
+		const request: AdmissionRequest = {
+			principalId: binding.principalId, deviceId: this.#deviceId, engineGeneration: this.engineGeneration,
+			commandId: binding.commandId, agentInstanceRef: binding.bindingSnapshot.agentInstanceRef,
+			attemptId: binding.attemptId, dispatchId: config.dispatch.dispatch_id,
+			dispatchRef: binding.dispatchRef, dispatchHash: binding.dispatchHash, originReceiptId,
+			authContextId: origin.authContextId, bindingSnapshot: binding.bindingSnapshot,
+			executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
+			rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
+			candidates: [candidate], callerAttemptId: null, frozen: true,
+		};
+		const preview = await this.store.previewRouting(request);
+		if (preview.status !== "admitted")
+			throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
+		return request;
+	}
+
+	#armLeaseHeartbeat(binding: LiveBinding): void {
+		clearInterval(binding.leaseHeartbeat);
+		let renewing = false;
+		const heartbeat = setInterval(() => {
+			if (renewing) return;
+			renewing = true;
+			void this.store.renewRouting(binding.attemptId, this.engineGeneration)
+				.then(held => {
+					if (!held) throw new EngineTargetError("stale_target", "Routing lease disappeared");
+				})
+				.catch(error => {
+					if (binding.attemptState !== "paused" && !TERMINAL_ATTEMPT_STATES.has(binding.attemptState))
+						binding.session.agent.abort(error instanceof Error ? error : new Error(String(error)));
+				})
+				.finally(() => { renewing = false; });
+		}, LEASE_HEARTBEAT_MS);
+		heartbeat.unref?.();
+		binding.leaseHeartbeat = heartbeat;
+	}
+
 	static async create(options: EngineRuntimeOptions): Promise<EngineRuntime> {
 		const binding = readStorageBinding();
 		if (!binding) throw new Error("Engine requires the ClientHost storage binding (GRIMOIRE_STORAGE_BINDING)");
@@ -785,6 +846,7 @@ export class EngineRuntime {
 					"too_late",
 					"The Attempt stopped streaming while attachments were being prepared",
 				);
+			const routingResume = binding.attemptState === "paused" ? await this.#resumeRouting(binding) : undefined;
 			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false);
 			const previousState = binding.attemptState;
 			const result = this.#controlResult(
@@ -833,6 +895,7 @@ export class EngineRuntime {
 					],
 					{
 						expectedStates: [previousState],
+						...(routingResume ? { routingResume } : {}),
 						settleCommandId: request.commandId,
 						settleCommandReceipt: { outcome: "applied", detail: result },
 						...(item
@@ -957,6 +1020,12 @@ export class EngineRuntime {
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
+			const rootIntent = action === "resume" && root?.attemptState === "paused"
+				? await this.store.intent(request.agentInstanceId) : undefined;
+			const routingResume = root && rootIntent && !rootIntent.holdsHasMore &&
+				rootIntent.holds.every(hold =>
+					hold.kind === "pause" && hold.sourceAgentInstanceId === request.agentInstanceId)
+				? await this.#resumeRouting(root) : undefined;
 			if (resumeMessage) {
 				if (!root || (!resumedIntent && root.attemptState !== "paused") || root.pendingInput ||
 					[...this.#pendingToolApprovals.values()].some(pending => pending.record.target.bindingId === root.bindingId))
@@ -1007,6 +1076,7 @@ export class EngineRuntime {
 						action,
 						request.expectedIntentRevision,
 						startFence,
+						routingResume,
 					);
 				} catch (error) {
 					if (resumeMessage)
@@ -1098,10 +1168,14 @@ export class EngineRuntime {
 										payload: controlPayload(initiator, binding.attemptState, false, binding),
 									},
 								],
-								{ expectedStates: [previous] },
+								{ expectedStates: [previous], ...(previous === "paused"
+									? { routingResume: agentId === request.agentInstanceId
+										? routingResume : await this.#resumeRouting(binding) } : {}) },
 							);
 						} catch (error) {
 							binding.attemptState = previous;
+							if (previous === "paused" && agentId === request.agentInstanceId && routingResume)
+								await this.store.releaseRouting(binding.attemptId);
 							throw error;
 						}
 					}
@@ -2117,10 +2191,15 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "Dispatch hash does not match the normalized execution");
 		if (!config.roster_complete || config.routes.routes.length === 0)
 			throw new EngineTargetError("admission_state_unknown", "A complete authorized executor roster is required");
+		const requirement = config.dispatch.requirement;
 		const roster = config.routes.routes.filter(route =>
-			!config.dispatch.requirement.require_trusted_provider || route.execution.trusted);
+			(!requirement.require_trusted_provider || route.execution.trusted) &&
+			(route.tier === null ? requirement.min_tier === 0 : route.tier >= requirement.min_tier) &&
+			(!requirement.pin || (route.model_id === requirement.pin.model_id &&
+				route.effort === requirement.pin.effort &&
+				(requirement.pin.route_ref === null || route.route_ref === requirement.pin.route_ref))));
 		if (!roster.length)
-			throw new EngineTargetError("capacity_unavailable", "No authorized trusted provider route is available");
+			throw new EngineTargetError("capacity_unavailable", "No route satisfies the admitted trust, tier and pin");
 		const { toolNames, restrictToolNames } = config.continuationConfiguration;
 		assertFilesReadable(
 			toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
@@ -2185,7 +2264,7 @@ export class EngineRuntime {
 		if (!route) throw new EngineTargetError("admission_state_unknown", "Admitted route is missing");
 		const selected: SelectedExecutor = {
 			...candidateIdentity(route),
-			basis: route.order_match ? "order" : "rank",
+			basis: requirement.pin ? "pin" : route.order_match ? "order" : "rank",
 			order_match: route.order_match,
 		};
 		const candidates = preview.frozen.map(frozenCandidate);
@@ -5012,6 +5091,7 @@ export class EngineRuntime {
 			settleCommandId?: string;
 			settleCommandReceipt?: { outcome: "applied" | "rejected"; detail?: Record<string, unknown> };
 			expectedStates?: readonly EngineAttemptState[];
+			routingResume?: AdmissionRequest;
 			requireNew?: boolean;
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 			inboxSessionId?: string;
@@ -5021,10 +5101,6 @@ export class EngineRuntime {
 			restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
 		} = {},
 	): Promise<void> {
-		if (state === "paused" || TERMINAL_ATTEMPT_STATES.has(state)) {
-			clearInterval(binding.leaseHeartbeat);
-			binding.leaseHeartbeat = undefined;
-		}
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
 			...options,
 			conversationIdentityDigest: binding.conversationIdentityDigest,
@@ -5033,6 +5109,10 @@ export class EngineRuntime {
 				? { pendingInboxSourceSessionId: binding.pendingInboxSourceSessionId }
 				: {}),
 		});
+		if (state === "paused" || TERMINAL_ATTEMPT_STATES.has(state)) {
+			clearInterval(binding.leaseHeartbeat);
+			binding.leaseHeartbeat = undefined;
+		} else if (options.routingResume) this.#armLeaseHeartbeat(binding);
 		this.#notifyEvents(committed);
 	}
 
@@ -5173,8 +5253,17 @@ export class EngineRuntime {
 	}
 }
 
-function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): LegacySessionLaunchSnapshot | undefined {
+function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): SessionLaunchSnapshot | undefined {
 	const text = (item: unknown): item is string => typeof item === "string" && item.length > 0 && item.length <= 512;
+	if (value?.schema === "engine.launch_snapshot.v2") {
+		if (Object.keys(value).sort().join(",") !==
+			"agentInstanceId,agentInstanceRef,attemptId,continuationDigest,dispatchHash,dispatchRef,executionDigest,executionId,schema,selectedRouteRef" ||
+			![value.agentInstanceId, value.agentInstanceRef, value.attemptId, value.executionId,
+				value.dispatchRef, value.selectedRouteRef].every(text) ||
+			![value.continuationDigest, value.dispatchHash, value.executionDigest].every(
+				hash => /^sha256:[0-9a-f]{64}$/.test(hash))) return undefined;
+		return structuredClone(value);
+	}
 	const context = (item: unknown) => item === null || (Number.isSafeInteger(item) && Number(item) >= 0);
 	if (
 		!value ||

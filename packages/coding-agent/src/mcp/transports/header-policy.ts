@@ -107,7 +107,12 @@ export async function mcpFetch(
 	let currentUrl = url;
 	for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
 		const attachConfigured = new URL(currentUrl).origin === configuredOrigin;
-		const headers = mergeMCPHeaders(attachConfigured ? sources : { generated: sources.generated });
+		const headers = mergeMCPHeaders(attachConfigured ? sources : {
+			generated: withoutHeader(
+				withoutHeader(sources.generated, "X-Grimoire-Client-Caller-Context"),
+				"X-Grimoire-Client-Caller-Attestation",
+			) ?? {},
+		});
 		const response = await fetch(currentUrl, { ...init, headers, redirect: "manual" });
 		if (!REDIRECT_STATUSES[response.status]) return response;
 

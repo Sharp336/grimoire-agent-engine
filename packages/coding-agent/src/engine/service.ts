@@ -10,7 +10,7 @@ import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
 import { type EngineApprovalDecision, type EngineSemanticBindingSnapshot, EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
-import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
+import { HostedBridgeUnavailableError, HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { NatsEngineAdapter } from "./nats-adapter";
 import { EngineExecutionResolver } from "./execution-resolver";
 import { ProviderAdmissionClient } from "./provider-admission";
@@ -82,7 +82,14 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 				executionResolver.resolve(execution, frozen, attempt, cwd, signal),
 			verifyOriginReceipt: rpc
 				? async identity => {
-						const verified = await rpc.call("verify_origin_receipt", identity);
+						let verified: Record<string, unknown>;
+						try {
+							verified = await rpc.call("verify_origin_receipt", identity);
+						} catch (error) {
+							if (error instanceof HostedBridgeUnavailableError)
+								throw new EngineBindingPendingError("Origin verification outcome is unknown; retry exact command");
+							throw error;
+						}
 						if (verified.verified !== true ||
 							(["originReceiptId", "commandId", "agentInstanceRef", "attemptId", "principalId"] as const)
 								.some(key => verified[key] !== identity[key]) ||

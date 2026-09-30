@@ -11,6 +11,7 @@ import type {
 	CandidateIdentity,
 	ChoiceTransition,
 	EngineAttemptState,
+	EngineExecutionConfiguration,
 	EngineBindingGate,
 	EngineBindingCheckpoint,
 	EngineBindingResult,
@@ -195,6 +196,8 @@ export interface RocksTransitionOptions {
 	execution?: RocksAttempt["execution"];
 	/** Previewed full-roster selection must remain identical at the owner CAS. */
 	routingAdmission?: { request: AdmissionRequest; preview: Extract<AdmissionOutcome, { status: "admitted" }> };
+	/** Reacquire the current frozen route in the SAME state transition that resumes a paused Attempt. */
+	routingResume?: AdmissionRequest;
 	previousInboxSessionId?: string;
 	pendingInboxSourceSessionId?: string;
 	restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
@@ -1968,6 +1971,24 @@ export class RocksEngineMutations {
 						candidateRef(row.execution!.executor_choice.selected) !== candidateRef(admitted.frozen[0]))
 						throw new EngineTargetError("admission_state_unknown", "Attempt execution differs from admitted route");
 				}
+				if (options.routingResume) {
+					if (!old?.execution || old.state !== "paused" || state === "paused" ||
+						candidateRef(currentIdentity(old.execution.executor_choice)) !==
+							candidateRef(options.routingResume.candidates[0]))
+						throw new EngineTargetError("stale_target", "Resume must keep the admitted current frozen route");
+					const held = await tx.get<RocksSlotLease>("metadata", leaseId(binding.attemptId));
+					if (held) {
+						if (held.engine_generation !== binding.engineGeneration ||
+							held.expires_at <= Date.now() ||
+							held.resources.account_ref !== options.routingResume.candidates[0]?.account_ref)
+							throw new EngineTargetError("stale_target", "Pre-acquired Resume lease changed");
+					} else {
+						const acquired = await stageAdmission(tx, options.routingResume);
+						if (acquired.status !== "admitted" ||
+							candidateRef(acquired.frozen[0]) !== candidateRef(options.routingResume.candidates[0]))
+							throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
+					}
+				}
 				await tx.put("attempt", binding.attemptId, row);
 				// §6: an actual pause or a terminal state releases the routing lease exactly once, atomically.
 				if ((state === "paused" || terminal.has(state)) && old?.state !== state)
@@ -2098,6 +2119,7 @@ export class RocksEngineMutations {
 		action: "pause" | "resume" | "stop" | "continue",
 		expected?: number,
 		startFence?: EnginePendingStartTarget,
+		routingResume?: AdmissionRequest,
 	) {
 		return this.mutation(id, async tx => {
 			if (startFence) {
@@ -2116,6 +2138,15 @@ export class RocksEngineMutations {
 					}
 					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision };
 				}
+			}
+			if (routingResume) {
+				if (action !== "resume" || routingResume.attemptId !==
+					(await tx.get<RocksBinding>("binding", id))?.attempt_id)
+					throw new EngineTargetError("stale_target", "Resume route differs from the bound Attempt");
+				const admitted = await stageAdmission(tx, routingResume);
+				if (admitted.status !== "admitted" ||
+					candidateRef(admitted.frozen[0]) !== candidateRef(routingResume.candidates[0]))
+					throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
 			}
 			return this.changeIntent(tx, id, commandId, action, expected);
 		});
@@ -2475,6 +2506,26 @@ export class RocksEngineMutations {
 			const unit = choice.candidates.find(candidate => candidateRef(candidate) === candidateRef(to));
 			if (!unit || (sameRoute) !== (reason !== "route_fallback"))
 				throw new EngineTargetError("invalid_request", "Unregistered executor fallback is forbidden");
+			const original = await tx.get<RocksCommand>("command", row.command_id);
+			const wire: unknown = original?.identity.serializedCommand
+				? JSON.parse(original.identity.serializedCommand) : undefined;
+			if (!wire || typeof wire !== "object" || !("payload" in wire) ||
+				!wire.payload || typeof wire.payload !== "object" || !("executionConfiguration" in wire.payload))
+				throw new EngineTargetError("stale_target", "Frozen Start execution configuration is missing");
+			validateRuntimeValue("engineExecutionConfiguration", wire.payload.executionConfiguration);
+			const config = wire.payload.executionConfiguration as EngineExecutionConfiguration;
+			const route = config.routes.routes.find(candidate => candidateRef(candidate) === candidateRef(to));
+			const requirement = choice.effective_requirement;
+			if (!route || to.model_id !== route.model_id || to.account_ref !== route.account_ref ||
+				(requirement.require_trusted_provider && !route.execution.trusted) ||
+				(route.tier === null ? requirement.min_tier > 0 : route.tier < requirement.min_tier) ||
+				(requirement.pin && (route.model_id !== requirement.pin.model_id ||
+					route.effort !== requirement.pin.effort ||
+					(requirement.pin.route_ref !== null && route.route_ref !== requirement.pin.route_ref))) ||
+				(!sameRoute && (requirement.fallback_mode === "none" ||
+					(requirement.fallback_mode === "same_model" && route.model_id !== choice.selected.model_id))) ||
+				(sameRoute && !route.billing_pools.some(pool => pool.pool_id === to.billing_pool_id)))
+				throw new EngineTargetError("stale_target", "Executor route violates its frozen admission policy");
 			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
 			if (!lease) throw new EngineTargetError("stale_target", "Executor route change requires a held lease");
 			let leaseRevision = lease.lease_revision;

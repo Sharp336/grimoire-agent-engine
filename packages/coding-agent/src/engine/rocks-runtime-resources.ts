@@ -24,7 +24,8 @@ export async function runtimeResource(
 	const { resource, offset, limit } = request;
 	validateRuntimeValue("resourceReadRequest", { resource, offset, limit });
 	const work = queryWork();
-	const identity = await store.identity(String(resource.agentInstanceRef), request, work);
+	const identity = await store.identity(String(resource.agentInstanceRef),
+		{ ...request, ...(typeof resource.attemptId === "string" ? { attemptId: resource.attemptId } : {}) }, work);
 	if (typeof resource.attemptId === "string") await store.attempt(identity, resource.attemptId, work);
 	let bytes: Buffer;
 	let text = false;

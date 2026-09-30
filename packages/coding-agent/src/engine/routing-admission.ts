@@ -347,13 +347,15 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 		if (request.frozen) frozen.push(...request.candidates.filter((_, index) => index !== selected));
 		const lease = leaseId(request.attemptId);
 		const heartbeat = Date.now();
+		const start = await tx.get<RocksCommand>("command", request.commandId);
+		const leaseRevision = request.frozen ? (start?.routing?.lease_revision ?? 0) + 1 : 1;
 		await tx.create("metadata", lease, {
 			schema: "grimoire.slot_lease.v1",
 			subtype: "slot_lease",
 			principal_id: request.principalId,
 			device_id: request.deviceId,
 			attempt_id: request.attemptId,
-			lease_revision: 1,
+			lease_revision: leaseRevision,
 			engine_generation: request.engineGeneration,
 			dispatch_hash: request.dispatchHash,
 			binding_snapshot_hash: sha256(storageCanonicalJson(request.bindingSnapshot)),
@@ -380,9 +382,9 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 			lease,
 			queue: queueKey,
 			candidate: candidateIdentity(request.candidates[selected]),
-			leaseRevision: 1,
+			leaseRevision,
 		});
-		return { status: "admitted", selected: 0, frozen, leaseRevision: 1, filtered };
+		return { status: "admitted", selected: 0, frozen, leaseRevision, filtered };
 	}
 	if (resources.length > 0 && filtered.permanent_capacity === resources.length)
 		throw refusal(request, own, current, "capacity_unavailable", "Configured zero or exceeded capacity", filtered);
@@ -599,7 +601,7 @@ export async function stageTransfer(
 		lease: key,
 		queue: null,
 		candidate: candidateIdentity(to),
-		leaseRevision: lease.lease_revision,
+		leaseRevision: revision,
 		from: currentIdentity(attempt.execution.executor_choice),
 	});
 	return revision;

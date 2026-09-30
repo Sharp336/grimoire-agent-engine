@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,19 +5,14 @@ import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli"
 import { adoptBlobsDirFromEnv, getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { removePrivateRuntimeEnv } from "@oh-my-pi/pi-utils/env";
 import { engineHelp as commandHelp } from "../cli/command-help";
-import {
-	EngineControlQueryClient,
-	type EngineControlQueryMethod,
-	type EnginePublicSnapshot,
-} from "../engine/control-query";
-import type { EngineCommandEnvelope, EngineCommandOp } from "../engine/nats-adapter";
+import { EngineControlQueryClient, type EngineControlQueryMethod } from "../engine/control-query";
 import { runEngineService } from "../engine/service";
 
 export default class Engine extends Command {
 	static description = commandHelp.description;
 	static args = {
 		action: Args.string({
-			description: "Engine lifecycle, diagnostics, query or control action",
+			description: "Engine lifecycle, diagnostics or read-only query action",
 			required: false,
 			options: [
 				"start",
@@ -32,13 +26,6 @@ export default class Engine extends Command {
 				"show",
 				"events",
 				"result",
-				"pause",
-				"resume",
-				"cancel",
-				"steer",
-				"approve",
-				"deny",
-				"reconcile",
 				"request",
 			],
 		}),
@@ -72,10 +59,6 @@ export default class Engine extends Command {
 		}),
 		"no-hosted": Flags.boolean({ description: "Run the local Engine without the hosted bridge" }),
 		attempt: Flags.string({ description: "Exact Attempt id" }),
-		text: Flags.string({ description: "Steering text" }),
-		reason: Flags.string({ description: "Cancellation or approval reason" }),
-		approval: Flags.string({ description: "Tool approval id" }),
-		"command-id": Flags.string({ description: "Caller-stable idempotency key" }),
 		cursor: Flags.string({ description: "Opaque query cursor" }),
 		limit: Flags.integer({ description: "Query page size", min: 1, max: 1000 }),
 		method: Flags.string({ description: "Exact Control + Query method for engine request" }),
@@ -97,13 +80,6 @@ export default class Engine extends Command {
 				"show",
 				"events",
 				"result",
-				"pause",
-				"resume",
-				"cancel",
-				"steer",
-				"approve",
-				"deny",
-				"reconcile",
 				"request",
 			].includes(args.action)
 		) {
@@ -178,10 +154,6 @@ export default class Engine extends Command {
 
 interface EngineControlFlags {
 	attempt?: string;
-	text?: string;
-	reason?: string;
-	approval?: string;
-	"command-id"?: string;
 	cursor?: string;
 	limit?: number;
 	method?: string;
@@ -212,44 +184,6 @@ async function runControlQueryAction(runtimeDir: string, action: string, flags: 
 		return printJson(await client.request("events.list", { attemptId, cursor: flags.cursor, limit: flags.limit }));
 	}
 	if (action === "result") return printJson(await client.request("result.get", { attemptId }));
-
-	const snapshot = (await client.request("snapshots.get", { attemptId })) as EnginePublicSnapshot | undefined;
-	if (!snapshot) throw new Error(`Attempt ${attemptId} was not found`);
-	const capabilities = (await client.request("capabilities")) as Record<string, unknown>;
-	const op = commandOperation(action);
-	const payload: Record<string, unknown> = {};
-	if (op === "pause" || op === "resume") payload.initiator = { kind: "human" };
-	if (op === "steer") payload.text = requiredFlag(flags.text, "--text");
-	if (op === "cancel" && flags.reason) payload.reason = flags.reason;
-	if (op === "resolve_tool_approval") {
-		payload.approvalId = requiredFlag(flags.approval, "--approval");
-		payload.decision = action;
-		if (flags.reason) payload.reason = flags.reason;
-	}
-	const command: EngineCommandEnvelope = {
-		schema: "grimoire.engine.command.v1",
-		commandId: flags["command-id"]?.trim() || randomUUID(),
-		op,
-		deviceId: String(capabilities.deviceId),
-		engineId: String(capabilities.engineId),
-		engineGeneration: snapshot.engineGeneration,
-		agentInstanceId: snapshot.agentInstanceId,
-		runtimeBindingId: snapshot.bindingId,
-		bindingGeneration: snapshot.bindingGeneration,
-		executionId: snapshot.executionId,
-		attemptId: snapshot.attemptId,
-		authorityGeneration: snapshot.authorityGeneration,
-		issuedAt: Date.now(),
-		payload,
-	};
-	const receipt = await client.request("command", { command });
-	printJson({ receipt, snapshot: await client.request("snapshots.get", { attemptId }) });
-}
-
-function commandOperation(action: string): EngineCommandOp {
-	if (action === "approve" || action === "deny") return "resolve_tool_approval";
-	if (["pause", "resume", "cancel", "steer", "reconcile"].includes(action)) return action as EngineCommandOp;
-	throw new Error(`Unsupported Engine control action ${action}`);
 }
 
 function requiredFlag(value: string | undefined, name: string): string {

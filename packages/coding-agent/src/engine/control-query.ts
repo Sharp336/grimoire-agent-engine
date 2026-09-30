@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	type EngineExecutionConfiguration,
 	type EngineAttemptState,
@@ -41,8 +42,41 @@ import {
 import type { RuntimeQueueRequest } from "./runtime-queue";
 import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resources";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
+import { waitForEngineWake } from "./wake";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
+
+const queuedStartReplays = new WeakMap<EngineRuntime, Map<string, Promise<void>>>();
+
+/** A Control+Query queued Start has no NATS delivery to redeliver; keep its exact command alive on owner wakes. */
+function replayQueuedStart(
+	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "provisionMailbox">,
+	command: EngineCommandEnvelope,
+): void {
+	let running = queuedStartReplays.get(options.runtime);
+	if (!running) queuedStartReplays.set(options.runtime, running = new Map());
+	if (running.has(command.commandId)) return;
+	const pending = (async () => {
+		for (;;) {
+			await waitForEngineWake(options.runtime.store.changeSignal(), 1_000);
+			if (!(await options.runtime.store.isCurrentEngineGeneration(options.runtime.engineGeneration))) return;
+			try {
+				await runEngineCommand(options, command);
+				return;
+			} catch (error) {
+				if (error instanceof EngineRoutingQueuedError || error instanceof EngineBindingPendingError) continue;
+				logger.warn("Queued Engine Start replay failed", { commandId: command.commandId,
+					error: error instanceof Error ? error.message : String(error) });
+				return;
+			}
+		}
+	})().catch(error => {
+		logger.warn("Queued Engine Start wake failed", { commandId: command.commandId,
+			error: error instanceof Error ? error.message : String(error) });
+	});
+	running.set(command.commandId, pending);
+	void pending.finally(() => running.delete(command.commandId));
+}
 export const ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES = 256 * 1024;
 export const ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS = 48_000;
 
@@ -594,7 +628,7 @@ async function dispatchRequest(
 			return result;
 		}
 		case "runtime.history.entry": {
-			const agent = await runtimeAgent(options.runtime, params);
+			const agent = await runtimeAgent(options.runtime, params, true);
 			return await options.runtime.store.nativeHistoryEntry(
 				requiredString(agent, "agentInstanceId"),
 				requiredString(params, "entryId"),
@@ -602,7 +636,7 @@ async function dispatchRequest(
 				optionalNonNegativeInteger(params.offset),
 				params.limit === undefined ? runtimeLimits.deliveryBatchBytes : optionalNonNegativeInteger(params.limit),
 				requiredString(params, "sessionId"),
-				optionalString(params.attemptId),
+				requiredString(params, "attemptId"),
 			);
 		}
 		case "capabilities":
@@ -622,13 +656,16 @@ async function dispatchRequest(
 			return await getResult(options.runtime, requiredString(params, "attemptId"));
 		case "session.context":
 			return await options.runtime.sessionContext(requiredTarget(params));
-		case "session.history":
+		case "session.history": {
+			const agent = await runtimeAgent(options.runtime, params, true);
+			if (requiredString(agent, "agentInstanceId") !== requiredString(params, "agentInstanceId"))
+				throw new EngineTargetError("stale_target", "Historical AgentInstance identity changed");
 			return await listSessionHistory(
-				options.runtime,
-				requiredString(params, "agentInstanceId"),
-				optionalString(params.cursor),
-				optionalLimit(params.limit),
+				options.runtime, requiredString(params, "agentInstanceId"),
+				requiredString(params, "agentInstanceRef"), requiredString(params, "attemptId"),
+				optionalString(params.cursor), optionalLimit(params.limit),
 			);
+		}
 		case "session.archive":
 		case "session.archive.verify":
 		case "session.archive.retire":
@@ -736,8 +773,20 @@ export async function runEngineCommand(
 	if (!(await options.runtime.store.isCurrentEngineGeneration(options.runtime.engineGeneration))) {
 		throw new EngineTargetError("stale_target", "Engine generation lease is no longer current");
 	}
-	await options.runtime.verifyCommandOrigin(command);
 	const identity = engineCommandIdentity(command);
+	try {
+		await options.runtime.verifyCommandOrigin(command);
+	} catch (error) {
+		if (error instanceof EngineBindingPendingError) throw error;
+		const detail = {
+			...(error instanceof EngineTargetError ? error.detail : undefined),
+			code: error instanceof EngineTargetError ? error.code : "invalid_request",
+			message: error instanceof Error ? error.message : String(error),
+		};
+		await options.runtime.store.rejectUnadmittedCommand(identity, { outcome: "rejected", detail },
+			options.runtime.engineGeneration);
+		throw error;
+	}
 	let admission = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
 	for (let retry = 0; admission.status === "in_progress" && retry < 100; retry++) {
 		await Bun.sleep(25);
@@ -774,6 +823,7 @@ export async function runEngineCommand(
 	} catch (error) {
 		if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
+			if (error instanceof EngineRoutingQueuedError) replayQueuedStart(options, command);
 			throw error;
 		}
 		// A Start can fail while materializing credentials after its atomic applied Attempt admission.
@@ -1044,14 +1094,12 @@ function terminalError(event: EngineEvent, cause: string | null | undefined): st
 async function listSessionHistory(
 	runtime: EngineRuntime,
 	agentInstanceId: string,
+	agentInstanceRef: string,
+	attemptId: string,
 	cursor: string | undefined,
 	limit: number,
 ) {
-	const binding = await runtime.store.getBinding(agentInstanceId);
-	const identity = binding && (await runtime.store.getStartConversationIdentity(binding.commandId));
-	if (!identity?.agentInstanceRef)
-		throw new EngineTargetError("agent_not_found", "Native history requires its canonical AgentInstance identity");
-	const page = await runtime.sessionHistoryPage(agentInstanceId, identity.agentInstanceRef, cursor, limit);
+	const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, cursor, limit, attemptId);
 	return {
 		schema: "grimoire.engine.session_history.v1",
 		agentInstanceId,
@@ -1466,6 +1514,7 @@ function failure(
 
 function runtimeResponseBytes(method: string): number {
 	return [
+		"runtime.command.get",
 		"runtime.snapshot",
 		"runtime.history",
 		"runtime.history.entry",

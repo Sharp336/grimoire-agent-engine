@@ -55,6 +55,9 @@ export interface HostedGrimoireRpcOptions {
 	installedSequence?: number;
 }
 
+/** A lost authority response is unknown, not an explicit authorization denial. */
+export class HostedBridgeUnavailableError extends Error {}
+
 export class HostedGrimoireRpc implements GrimoireRpc {
 	readonly #options: HostedGrimoireRpcOptions;
 	readonly #endpoint: string;
@@ -103,7 +106,9 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 			? `hmac-sha256:${createHmac("sha256", this.#options.token)
 				.update("grimoire-client-internal-request-v1\0").update(storageCanonicalJson(envelope)).digest("hex")}`
 			: undefined;
-		const response = await fetch(internal ? this.#internalEndpoint : this.#endpoint, {
+		let response: Response;
+		try {
+			response = await fetch(internal ? this.#internalEndpoint : this.#endpoint, {
 			method: "POST",
 			redirect: "error",
 			headers: {
@@ -125,15 +130,24 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 			},
 			body: JSON.stringify(envelope),
 			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
-		});
+			});
+		} catch (error) {
+			throw new HostedBridgeUnavailableError(`Grimoire Host transport unavailable: ${String(error)}`);
+		}
+		if (response.status >= 500) throw new HostedBridgeUnavailableError(`Grimoire Host returned HTTP ${response.status}`);
 		if (!response.ok) throw new Error(`Grimoire Host returned HTTP ${response.status}`);
-		const json = (await response.json()) as Record<string, unknown>;
+		let json: Record<string, unknown>;
+		try {
+			json = (await response.json()) as Record<string, unknown>;
+		} catch {
+			throw new HostedBridgeUnavailableError("Grimoire Host returned no complete bridge response");
+		}
 		if (json.error) {
 			const error = json.error as Record<string, unknown>;
 			throw new Error(`Grimoire Host rejected bridge call: ${String(error.message ?? "unknown error")}`);
 		}
 		const result = json.result as Record<string, unknown> | undefined;
-		if (!result) throw new Error("Grimoire Host returned no bridge result");
+		if (!result) throw new HostedBridgeUnavailableError("Grimoire Host returned no bridge result");
 		const content = Array.isArray(result.content) ? result.content : [];
 		const text = content.find(
 			item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text",
@@ -154,8 +168,12 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 			);
 		}
 		if (structured && typeof structured === "object") return structured;
-		if (typeof text?.text !== "string") throw new Error("Grimoire Host bridge result has no JSON content");
-		return JSON.parse(text.text) as Record<string, unknown>;
+		if (typeof text?.text !== "string") throw new HostedBridgeUnavailableError("Grimoire Host bridge result has no JSON content");
+		try {
+			return JSON.parse(text.text) as Record<string, unknown>;
+		} catch {
+			throw new HostedBridgeUnavailableError("Grimoire Host bridge result is incomplete");
+		}
 	}
 }
 

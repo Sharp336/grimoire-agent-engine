@@ -36,6 +36,7 @@ import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runti
 import { publicRuntimeQueueItem } from "./runtime-queue";
 import type { EngineCommandIdentity } from "./store";
 import { EngineCommandConflictError } from "./store";
+import { waitForEngineWake } from "./wake";
 
 export const ENGINE_COMMAND_STREAM = "GRIMOIRE_ENGINE_COMMANDS";
 export const ENGINE_EVENT_STREAM = "GRIMOIRE_ENGINE_EVENTS";
@@ -496,8 +497,8 @@ export class NatsEngineAdapter {
 		try {
 			command = this.#parseCommand(message);
 			await this.#options.authorizeCommand(command);
-			await this.runtime.verifyCommandOrigin(command);
 			identity = commandIdentity(command);
+			await this.runtime.verifyCommandOrigin(command);
 			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
 			if (admission.status === "binding_pending") throw new EngineBindingPendingError();
 			// Admission is durable before dispatch. A busy event sink must not hold
@@ -533,7 +534,9 @@ export class NatsEngineAdapter {
 		} catch (error) {
 			if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 				if (claimed && identity) await this.#releaseClaim(identity);
-				message.nak(1_000);
+				if (error instanceof EngineRoutingQueuedError)
+					await waitForEngineWake(this.runtime.store.changeSignal(), 1_000);
+				message.nak(error instanceof EngineRoutingQueuedError ? 0 : 1_000);
 				return;
 			}
 			if (error instanceof StaleEngineLeaseError) {

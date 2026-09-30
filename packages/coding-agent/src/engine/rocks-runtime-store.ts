@@ -432,7 +432,16 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const page = await this.records.query("identity_ref", [ref], undefined, 1);
 		if (work) account(work, page.records);
 		const identity = page.records[0]?.value as unknown as RocksIdentity | undefined;
-		if (!access.principalId || !identity || !runtimeAuthorized(identity, access))
+		if (!access.principalId || !identity)
+			throw new EngineTargetError("agent_not_found", "Unknown authorized AgentInstance");
+		const attemptId = "attemptId" in access && typeof access.attemptId === "string"
+			? access.attemptId : undefined;
+		if (attemptId) {
+			await this.assertHistoricalAttemptAccess(attemptId, access.principalId);
+			const attempt = await this.row<RocksAttempt>("attempt", attemptId, work);
+			if (attempt?.agent_instance_id !== identity.agent_instance_id)
+				throw new EngineTargetError("agent_not_found", "Original Attempt is not owned by this AgentInstance");
+		} else if (!runtimeAuthorized(identity, access))
 			throw new EngineTargetError("agent_not_found", "Unknown authorized AgentInstance");
 		return identity;
 	}
@@ -1299,8 +1308,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 						resources: heldLease.resources,
 					}
 				: { held: false },
-			...(effectProof ? { effect: effectStarted && heldLease &&
-				heldLease.engine_generation === attempt?.engine_generation && heldLease.expires_at > Date.now()
+			...(effectProof ? { effect: effectStarted && row.receipt?.outcome === "applied" &&
+				attempt && !terminal.has(attempt.state) && attempt.state !== "paused" &&
+				heldLease && heldLease.attempt_id === attempt.attempt_id &&
+				heldLease.engine_generation === attempt.engine_generation &&
+				heldLease.dispatch_hash === attempt.execution?.dispatch_hash &&
+				heldLease.expires_at > Date.now()
 				? { started: true, effectId: effect!.effect_id, toolCallId: effect!.tool_call_id,
 					toolName: effect!.tool_name, inputHash: effect!.input_hash }
 				: { started: false } } : {}),

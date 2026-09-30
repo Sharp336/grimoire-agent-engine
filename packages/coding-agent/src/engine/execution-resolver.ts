@@ -24,6 +24,7 @@ import type {
 	ProviderExecutionIdentity,
 	ProviderExecutionMaterial,
 } from "./provider-execution";
+import { candidateIdentity } from "./routing-admission";
 
 /** Admitted Attempt facts every credential/admission request is bound to (§3, §8.3). */
 export type ExecutionAttemptIdentity = Omit<
@@ -192,7 +193,9 @@ export class EngineExecutionResolver {
 						};
 						external.set(marker, binding);
 						candidateBindings[index] = binding;
-						provider = `artel-route-${route.route_ref.slice(5)}`;
+						provider = `artel-route-${createHash("sha256")
+							.update(stableStringifyJson(candidateIdentity(route))).digest("hex").slice(0, 24)}`;
+						binding.runtimeProviderId = provider;
 						externalProviders.set(provider, binding);
 						await authStorage.set(provider, { type: "api_key", key: marker });
 					}
@@ -290,6 +293,9 @@ export class EngineExecutionResolver {
 					const binding = candidateBindings[index];
 					if (!binding) throw new Error("Admitted fallback candidate is unavailable");
 					binding.identity = { ...binding.identity, executionDigest };
+					const observation = apiKeyRoutes.find(route =>
+						route.runtimeProviderId === binding.runtimeProviderId);
+					if (observation) observation.executionDigest = executionDigest;
 				},
 				dispose: () => authStorage.close(),
 			};
@@ -373,6 +379,7 @@ interface ProviderExecutionBinding {
 	identity: ProviderExecutionIdentity;
 	transport?: Omit<ProviderExecutionMaterial, "credential" | "executionPin">;
 	execution: RouteExecution;
+	runtimeProviderId?: string;
 	executionPin?: string;
 }
 
