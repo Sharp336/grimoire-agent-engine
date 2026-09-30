@@ -1376,6 +1376,7 @@ function applyCodexServiceTierPricing(
 function resetOutputState(output: AssistantMessage): void {
 	output.content.length = 0;
 	output.usage = {
+		unavailable: true,
 		input: 0,
 		output: 0,
 		cacheRead: 0,
@@ -2969,6 +2970,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			provider: model.provider,
 			model: model.id,
 			usage: {
+				unavailable: true,
 				input: 0,
 				output: 0,
 				cacheRead: 0,

@@ -228,7 +228,8 @@ export function admittedExecution(
 			const decision = decisions.get(identity.originReceiptId);
 			if (!decision || decision.command_id !== identity.commandId)
 				throw new EngineTargetError("stale_target", "Approval decision differs from its submitted command");
-			return { verified: true, approvalDecision: decision, expectedInputRevision: null };
+			const inputRevision = receipts.get(identity.originReceiptId)?.payload.expectedInputRevision;
+			return { verified: true, approvalDecision: decision, expectedInputRevision: typeof inputRevision === "number" ? inputRevision : null };
 		},
 	});
 	const fixture: AdmittedExecutionFixture = {

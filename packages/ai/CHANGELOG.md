@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Codex Responses marks missing usage as unavailable on initial responses and internal retries; a provider-reported zero remains measured zero.
 - OpenAI-compatible streams now enforce bounded ingress and provider-event budgets during SSE parsing.
 - A stream admission overflow no longer throws into the provider that pushed the event; the stream fails and the admission signal aborts out of band, so no producer leaks an unhandled rejection.
 - Codex now honors an explicit reasoning-off selection instead of using the provider default.

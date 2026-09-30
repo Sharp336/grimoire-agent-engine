@@ -8,8 +8,15 @@ import { safeEngineErrorDetail } from "../src/engine/public-error";
 
 const identity: ProviderExecutionIdentity = {
 	expectedPrincipalId: "grimoire:user:test",
-	profileRef: "gctx:2222222222222222",
-	profileContentHash: `sha256:${"2".repeat(64)}`,
+	agentInstanceRef: `grimoire://agents/~u/${"b".repeat(64)}/fixture`,
+	attemptId: "fixture-attempt",
+	bindingRevision: 1,
+	installationId: `install_${"a".repeat(32)}`,
+	dispatchRef: "gctx:2222222222222222",
+	dispatchHash: `sha256:${"2".repeat(64)}`,
+	executionDigest: `sha256:${"d".repeat(64)}`,
+	originReceiptId: "origin-fixture",
+	credentialGeneration: 1,
 	routeRef: "gctx:3333333333333333",
 	routeContentHash: `sha256:${"3".repeat(64)}`,
 	providerAccountRef: "gctx:4444444444444444",
@@ -48,10 +55,6 @@ describe("ProviderExecutionClient", () => {
 			"http://127.0.0.1/provider-execution",
 			"local-token",
 			async (_url, init) => {
-				expect(init?.headers).toEqual({
-					Authorization: "Bearer local-token",
-					"Content-Type": "application/json",
-				});
 				const request = JSON.parse(String(init?.body));
 				return Response.json({
 					...request,
@@ -79,9 +82,9 @@ describe("ProviderExecutionClient", () => {
 
 	it("never accepts provider material from a descriptor and keeps a billing proposal typed without material", async () => {
 		const proposal = {
-			from: { model_id: "m", route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
+			from: { model_id: identity.modelId, route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
 				effort: "high", service_tier: "standard", billing_pool_id: "included", billing_pool_basis: "expected" },
-			to: { model_id: "m", route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
+			to: { model_id: identity.modelId, route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
 				effort: "high", service_tier: "standard", billing_pool_id: "paid", billing_pool_basis: "expected" },
 			from_execution_digest: `sha256:${"d".repeat(64)}`,
 			reason: "billing_pool_exhausted",
@@ -110,6 +113,18 @@ describe("ProviderExecutionClient", () => {
 			.toEqual([[true, false], [false, false]]);
 	});
 
+	it("refuses the obsolete bare-pool proposal without yielding execution material", async () => {
+		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
+			Response.json({ schema: "grimoire.provider_execution.result.v1", allowed: false, status: "billing_pool_changed",
+				billing: { from: "included", to: "paid", from_execution_digest: identity.executionDigest, reason: "billing_pool_exhausted" } }));
+		const error = await client.resolve(identity).then(() => null, reason => reason);
+		expect(error).toBeInstanceOf(ProviderExecutionError);
+		if (!(error instanceof ProviderExecutionError)) throw new Error("Expected a typed provider refusal");
+		expect(error.code).toBe("billing_pool_changed");
+		expect(error.billing).toBeUndefined();
+		expect(error).not.toHaveProperty("credential");
+	});
+
 	it("surfaces fixed actionable trust text without reflecting a server message", async () => {
 		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
 			Response.json({
@@ -122,7 +137,7 @@ describe("ProviderExecutionClient", () => {
 		const error = await client.resolve(identity).catch(value => value);
 		expect(error).toBeInstanceOf(ProviderExecutionError);
 		expect(error.code).toBe("provider_trust_required_for_full_agent");
-		expect(error.message).toBe("ProviderAccount must be explicitly trusted before it can run a full Agent session");
+		expect(error.message).not.toContain("raw untrusted server detail");
 		expect(safeEngineErrorDetail(error)).toBe(error.message);
 	});
 

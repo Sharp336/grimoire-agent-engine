@@ -672,6 +672,21 @@ describe("openai-codex streaming", () => {
 		return { result, textEndContents, eventTypes };
 	}
 
+	for (const measured of [false, true]) it(`distinguishes ${measured ? "reported zero" : "missing"} Codex usage`, async () => {
+		const { result } = await runCodexSseEvents([
+			{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+			{ type: "response.output_text.delta", delta: "answer" },
+			{ type: "response.output_item.done", item: { type: "message", id: "usage-message", role: "assistant",
+				status: "completed", content: [{ type: "output_text", text: "answer" }] } },
+			{ type: "response.completed", response: { status: "completed",
+				...(measured ? { usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } } : {}) } },
+		]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.usage.unavailable === true).toBe(!measured);
+		expect(result.usage.input).toBe(0);
+		expect(result.usage.output).toBe(0);
+	});
+
 	it("surfaces result-bearing native images with stale generating status", async () => {
 		const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 		const { result, eventTypes } = await runCodexSseEvents([
@@ -2217,7 +2232,7 @@ describe("openai-codex streaming", () => {
 			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
 			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after retry" })}`,
 			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after retry" }] } })}`,
-			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed" } })}`,
 		].join("\n\n")}\n\n`;
 		const errorSse = `${[
 			`data: ${JSON.stringify({
@@ -2264,6 +2279,7 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
+		expect(result.usage.unavailable).toBe(true);
 	});
 
 	it("retries a pre-response watchdog timeout with a fresh attempt signal", async () => {

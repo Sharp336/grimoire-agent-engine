@@ -14,6 +14,7 @@ import { formatRetryFallbackSelector } from "../session/retry-fallback-chains";
 import { resolveThinkingLevelForModel } from "../thinking";
 import type { EngineExecutionConfiguration, EngineExecutionRoute } from "./contracts";
 import { resolveCanonicalModelLimits, resolveExecutableModelLimits } from "./model-limits";
+import { candidateIdentity } from "./routing-admission";
 import type {
 	ProviderAdmissionClient,
 	ProviderAdmissionIdentity,
@@ -343,7 +344,7 @@ function routeIdentity(route: EngineExecutionRoute) {
 	};
 }
 
-function toModelSpec(route: EngineExecutionRoute, provider: string, material?: ProviderExecutionMaterial): ModelSpec<Api> {
+function toModelSpec(route: EngineExecutionRoute, provider: string, material?: Pick<ProviderExecutionDescriptor, "api" | "baseUrl">): ModelSpec<Api> {
 	const execution: RouteExecution = route.execution;
 	const api = material?.api ?? nativeProviderApi(execution.api as Api);
 	const reference = resolveCanonicalModelLimits(route.modelId);

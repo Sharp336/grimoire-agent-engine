@@ -193,7 +193,7 @@ export class ProviderExecutionClient {
 			(executionPin !== undefined && pin !== executionPin) ||
 			(mode === "hosted_broker" && !credential.startsWith("gri_pbr_")) ||
 			(localOAuth !== undefined && !ownedOAuth) ||
-			(ownedOAuth && (result.secrets_returned !== false || result.provider_credentials_returned !== false)) ||
+			(ownedOAuth && (result.secrets_returned !== false || result.provider_credentials_returned !== false))
 		) {
 			throw new ProviderExecutionError(
 				"provider_execution_invalid_response",
