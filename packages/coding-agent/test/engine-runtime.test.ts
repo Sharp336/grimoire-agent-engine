@@ -2862,6 +2862,318 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}
 		}
 	}, 20_000);
+
+	it("resolves the largest indexed Ask reply without echoing or losing canonical option labels", async () => {
+		const questions = Array.from({ length: 2 }, (_, question) => ({
+			id: `question-${question}`,
+			question: "q".repeat(9_000),
+			multi: true,
+			options: Array.from({ length: 32 }, (_, option) => ({
+				label: `${question}:${option}:`.padEnd(2_048, "x"),
+			})),
+		}));
+		const release = Promise.withResolvers<void>();
+		const secondModelCall = Promise.withResolvers<void>();
+		let activeSession: AgentSession | undefined;
+		const mock = createMockModel({
+			responses: (async function* () {
+				yield {
+					content: [{ type: "toolCall" as const, id: "ask-indexed", name: "ask", arguments: { questions } }],
+				};
+				secondModelCall.resolve();
+				await release.promise;
+				yield { content: ["done"] };
+			})(),
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["ask"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => {
+			activeSession = session;
+			return session.prompt(input);
+		});
+		const requested = nextEngineEvent(runtime, "input_requested");
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-indexed-start", agentInstanceId: "agent-indexed",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-indexed",
+			executionId: "execution-indexed", attemptId: "attempt-indexed",
+		}, { cwd, principalId: "owner", input: "ask" }));
+		const input = await requested;
+		const inputId = String((input.payload as { inputId: string }).inputId);
+		const expectedIntentRevision = (await runtime.store.intent(started.agentInstanceId)).intentRevision;
+		const result = {
+			kind: "submit" as const,
+			results: questions.map(question => ({
+				id: question.id,
+				selectedOptionIndexes: question.options.map((_option, index) => index),
+			})),
+		};
+		expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1_500);
+		const request = {
+			...started,
+			commandId: "command-indexed-reply",
+			inputId,
+			expectedIntentRevision,
+			expectedInputRevision: input.eventId,
+			result,
+		};
+		try {
+			for (const invalid of [
+				{ ...result.results[0], id: "foreign-question" },
+				{ ...result.results[0], selectedOptionIndexes: [32] },
+				{ ...result.results[0], selectedOptionIndexes: [1, 1] },
+				{ ...result.results[0], options: ["forged label"] },
+			]) {
+				await expect(
+					runtime.resolveInput({ ...request, result: { ...result, results: [invalid, result.results[1]] } }),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			await expect(
+				runtime.resolveInput({ ...request, expectedInputRevision: input.eventId + 1 }),
+			).rejects.toMatchObject({ code: "stale_target" });
+			await expect(
+				runtime.resolveInput({ ...request, expectedIntentRevision: expectedIntentRevision + 1 }),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_input");
+			const resolved = nextEngineEvent(runtime, "input_resolved");
+			await runtime.resolveInput(request);
+			const event = await resolved;
+			expect(event).toMatchObject({ attemptId: started.attemptId, payload: { inputId, result } });
+			expect(Buffer.byteLength(JSON.stringify(event.payload))).toBeLessThan(2_048);
+			await secondModelCall.promise;
+			const toolResult = activeSession?.messages.find(message => message.role === "toolResult");
+			expect(toolResult).toMatchObject({
+				role: "toolResult",
+				toolCallId: "ask-indexed",
+				isError: false,
+				details: {
+					results: questions.map(question => ({
+						id: question.id,
+						question: question.question,
+						multi: true,
+						options: question.options.map(option => option.label),
+						selectedOptions: question.options.map(option => option.label),
+					})),
+				},
+			});
+			expect(Buffer.byteLength(JSON.stringify(toolResult))).toBeGreaterThan(262_144);
+			await expect(runtime.resolveInput(request)).rejects.toMatchObject({ code: "too_late" });
+		} finally {
+			release.resolve();
+		}
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+	}, 30_000);
+
+	for (const op of ["cancel", "pause"] as const) {
+		it(`holds a completed Attempt when a revision-fenced ${op} arrives before its queued wake starts`, async () => {
+			const mock = createMockModel({ handler: { content: ["done"] } });
+			const execution = admittedExecution(mock.model, modelRegistry);
+			const { runtime, cwd, options } = await createRuntime(execution, (session, input) => session.prompt(input));
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "command-a", agentInstanceId: "agent-a",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-a",
+				executionId: "execution-a", attemptId: "attempt-a",
+			}, { cwd, principalId: "owner", input: "A" }));
+			const startedIntentRevision = started.intentRevision!;
+			const queued = await runtime.enqueueInbox(started, {
+				sourceEventId: "queued-after-completion-boundary",
+				sourceType: "user",
+				body: "must remain queued",
+				createdAt: Date.now(),
+				wakeIntent: true,
+			});
+			const remaining = [];
+			for (const body of ["QB", "QC"]) {
+				remaining.push(
+					await runtime.enqueueInbox(started, {
+						sourceEventId: `queued-after-completion-${body}`,
+						sourceType: "user",
+						body,
+						createdAt: Date.now(),
+						wakeIntent: true,
+					}),
+				);
+			}
+			await runtime.drain();
+			const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+			let wake: EngineEvent | undefined;
+			for (let attempts = 50; !wake && attempts > 0; attempts--) {
+				wake = (await runtime.store.pendingEvents()).find(
+					event => event.kind === "inbox_changed" && event.payload?.action === "wake_due",
+				);
+				if (!wake) await Bun.sleep(25);
+			}
+			expect(wake?.payload).toMatchObject({
+				queueId: queued.item.queueId,
+				revision: 2,
+				intentRevision: startedIntentRevision,
+			});
+			await expect(
+				runtime[op]({ ...started, initiator: { kind: "human" }, commandId: "terminal-stop-without-revision" }),
+			).rejects.toMatchObject({
+				code: "too_late",
+			});
+
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "stop-after-completion-before-wake-start",
+				op,
+				deviceId: "terminal-hold-device",
+				engineId: "terminal-hold-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				runtimeBindingId: started.bindingId,
+				bindingGeneration: started.bindingGeneration,
+				executionId: started.executionId,
+				attemptId: started.attemptId,
+				authorityGeneration: started.authorityGeneration,
+				issuedAt: Date.now(),
+				payload: { initiator: { kind: "human" }, expectedIntentRevision: startedIntentRevision },
+			};
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({ status: "claimed" });
+			const stopped = await runtime[op]({
+				...started,
+				initiator: { kind: "human" },
+				commandId: "stop-after-completion-before-wake-start",
+				expectedIntentRevision: startedIntentRevision,
+			});
+			expect(stopped).toEqual({
+				phase: "applied",
+				manualHold: true,
+				intentRevision: startedIntentRevision + 1,
+				alreadyTerminal: true,
+			});
+			await expect(
+				runtime[op]({
+					...started,
+					initiator: { kind: "human" },
+					commandId: "terminal-stop-with-wrong-revision",
+					expectedIntentRevision: stopped.intentRevision! + 1,
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(await runtime.store.getAttempt(started.attemptId)).toEqual(completedAttempt);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "applied", detail: stopped },
+			});
+			expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+				attemptId: started.attemptId,
+				manualHold: true,
+				intentRevision: stopped.intentRevision,
+			});
+			const holdEvent = (await runtime.store.pendingEvents()).find(
+				event =>
+					event.causationCommandId === "stop-after-completion-before-wake-start" &&
+					event.kind === "holds_changed" &&
+					event.payload?.phase === "applied",
+			);
+			expect(holdEvent).toMatchObject({
+				kind: "holds_changed",
+				payload: {
+					action: op === "cancel" ? "stop" : "pause",
+					alreadyTerminal: true,
+					manualHold: true,
+					intentRevision: stopped.intentRevision,
+				},
+			});
+			const staleWake = startRequest(execution, {
+				commandId: "stale-wake-after-terminal-stop", agentInstanceId: started.agentInstanceId,
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-a",
+				executionId: "execution-stale-wake-after-stop", attemptId: "attempt-stale-wake-after-stop",
+			}, {
+				cwd, principalId: "owner",
+				queueId: queued.item.queueId,
+				expectedRevision: 2,
+				mutationId: "wake:queued-after-completion-boundary:2",
+				expectedIntentRevision: started.intentRevision,
+			});
+			await expect(runtime.start(staleWake)).rejects.toMatchObject({ code: "stale_target" });
+			expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+				disposition: "pending",
+			});
+			expect(
+				(await runtime.store.pendingEvents()).some(event => event.kind === "cancelled" || event.kind === "paused"),
+			).toBeFalse();
+			await runtime.dispose();
+			const restarted = await openRuntime(options);
+			try {
+				const recoveredIntent = await restarted.store.intent(started.agentInstanceId);
+				expect(
+					await restarted.store.admitCommand(engineCommandIdentity(command), restarted.engineGeneration),
+				).toMatchObject({
+					status: "replay",
+					receipt: { outcome: "applied", detail: stopped },
+				});
+				expect(await restarted.store.getBinding(started.agentInstanceId)).toMatchObject({
+					manualHold: true,
+					intentRevision: recoveredIntent.intentRevision,
+				});
+				expect(await restarted.store.claimDueInboxWakes(restarted.engineGeneration)).toEqual([]);
+				for (const item of [queued, ...remaining]) {
+					expect(await restarted.store.getInboxItem(item.item.sessionId, item.item.queueId)).toMatchObject({
+						disposition: "pending",
+					});
+				}
+				const sent = await restarted.start(startRequest(execution, {
+					commandId: "send-after-terminal-hold", agentInstanceId: started.agentInstanceId,
+					agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-a",
+					executionId: "execution-after-terminal-hold", attemptId: "attempt-after-terminal-hold",
+				}, {
+					cwd, principalId: "owner", input: "manual release",
+					expectedIntentRevision: recoveredIntent.intentRevision,
+					explicitContinue: true,
+				}));
+				expect(sent).toMatchObject({
+					manualHold: false,
+					intentRevision: recoveredIntent.intentRevision + 1,
+					sessionFile: started.sessionFile,
+				});
+				await restarted.drain();
+			} finally {
+				await restarted.dispose();
+			}
+		}, 60000);
+	}
+
+	for (const op of ["cancel", "pause"] as const) {
+		it(`rejects a terminal ${op} after a newer Send advances the AgentInstance intent`, async () => {
+			const mock = createMockModel({ handler: { content: ["done"] } });
+			const execution = admittedExecution(mock.model, modelRegistry);
+			const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+			const request = (suffix: string, attemptId: string) =>
+				startRequest(execution, {
+					commandId: `command-terminal-stop-${suffix}`, agentInstanceId: "agent-terminal-stop-newer-send",
+					agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-terminal-stop-newer-send",
+					executionId: `execution-terminal-stop-${suffix}`, attemptId,
+				}, { cwd, principalId: "owner", input: suffix });
+			const first = await runtime.start(request("old", "attempt-terminal-stop-old"));
+			await runtime.drain();
+			const newer = await runtime.start({
+				...request("newer", "attempt-terminal-stop-newer"),
+				expectedIntentRevision: first.intentRevision,
+			});
+			await expect(
+				runtime[op]({
+					...first,
+					initiator: { kind: "human" },
+					commandId: "late-stop-for-old-attempt",
+					expectedIntentRevision: first.intentRevision,
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(runtime.getBinding(first.agentInstanceId)).toMatchObject({
+				attemptId: newer.attemptId,
+				manualHold: false,
+				intentRevision: newer.intentRevision,
+			});
+			await runtime.drain();
+			await runtime.dispose();
+		}, 60000);
+	}
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
