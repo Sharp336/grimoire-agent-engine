@@ -17,7 +17,7 @@
 
 ### Fixed
 - Managed Engine sessions treat omitted context files, skills, prompt templates, slash commands, and rules as empty arrays instead of discovering ambient instructions; explicit arrays and non-Engine discovery remain unchanged.
-- Executor rule recovery replays the exact admitted transition history and original event IDs. Fallback rules reach the next provider request durably; compaction replaces all raw rule messages with current-route L1 in its original priority order.
+- Executor rule recovery replays the exact admitted transition history and original event IDs without duplicating archived messages. Fallback rules reach the next provider request durably while failed assistant context is removed; compaction replaces all raw rule messages with current-route L1 in its original priority order.
 - Explicit Continue cleans up a terminal predecessor without overwriting the newly committed Attempt binding. Active and same-generation conflicting bindings still fail their native fences.
 - Approval decisions through authenticated ClientHost Control + Query now require the addressed ancestor's current binding, held lease and effective tool authority; direct unauthenticated CLI approval aliases remain removed. Missing local authority addresses the human without changing whether the request intrinsically requires a human.
 - Explicit hosted origin refusals become nonretryable Engine command rejections, while lost or transient transport remains blocked for retry. A paused branch Resume reacquires its frozen routes with its intent in one atomic storage mutation; approval input projections retain distinct request IDs and revisions through resolution and readdressing.

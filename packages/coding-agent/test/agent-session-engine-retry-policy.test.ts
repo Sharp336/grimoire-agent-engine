@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -329,6 +330,7 @@ describe("Engine bounded turn retry policy", () => {
 			ordered = false,
 			routeOrder: readonly number[] = [0, 1, 2],
 			maxRetries = ENGINE_POLICY.delaysMs.length,
+			afterApply?: (selector: string) => Promise<void>,
 		) {
 			const models = routeModels();
 			const selectors = routeOrder.map(index => `${models[index]!.provider}/${models[index]!.id}`);
@@ -359,7 +361,7 @@ describe("Engine bounded turn retry policy", () => {
 					...ENGINE_POLICY,
 					delaysMs: ENGINE_POLICY.delaysMs.slice(0, maxRetries),
 					...(ordered
-						? { orderedRouteFallback: { selectors } }
+						? { orderedRouteFallback: { selectors, beforeApply: async (selector: string) => selectors.includes(selector), afterApply } }
 						: {
 								sameModelRouteFallback: {
 									modelIdentityId: "test-logical-model",
@@ -395,6 +397,37 @@ describe("Engine bounded turn retry policy", () => {
 				{ type: "profile_route_exhausted", reason: "routes_unavailable" },
 			]);
 			expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		});
+
+		it("retains committed route rules but removes the failed assistant before the next provider request", async () => {
+			let active: AgentSession;
+			let manager: SessionManager;
+			const fixture = createRouteSession(
+				[{ throw: "503 route unavailable" }, { content: ["fallback complete"] }],
+				[], true, [0, 1], 3,
+				async selector => {
+					const message = createCustomMessage("executor-rules", "FALLBACK_RULE_BEFORE_REQUEST", false,
+						{ attemptId: "current", eventId: "original-route-event", routeRef: selector },
+						new Date().toISOString(), "agent");
+					manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details, message.attribution);
+					await manager.flush();
+					active.agent.appendMessage(message);
+				},
+			);
+			active = fixture.session;
+			manager = fixture.sessionManager;
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			await active.prompt("retry with the committed route instructions");
+			await active.waitForIdle();
+			expect(fixture.requested).toEqual(routeModels().slice(0, 2).map(model => `${model.provider}/${model.id}`));
+			const retryContext = fixture.mock.calls[1].context.messages;
+			expect(JSON.stringify(retryContext)).toContain("FALLBACK_RULE_BEFORE_REQUEST");
+			expect(retryContext.some(message => message.role === "assistant" && message.stopReason === "error")).toBe(false);
+			expect(active.agent.state.messages.some(message => message.role === "assistant" && message.stopReason === "error")).toBe(false);
+			expect(active.agent.state.messages.filter(message => message.role === "custom" && message.customType === "executor-rules"))
+				.toHaveLength(1);
+			expect(manager.getContextBranch().filter(entry => entry.type === "custom_message" && entry.customType === "executor-rules"))
+				.toHaveLength(1);
 		});
 
 		it("distinguishes an untried route at the retry budget from all routes being unavailable", async () => {

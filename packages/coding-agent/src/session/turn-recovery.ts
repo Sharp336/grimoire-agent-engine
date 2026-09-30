@@ -872,10 +872,20 @@ export class TurnRecovery {
 		reason = "assistant-context-cleanup",
 	): void {
 		const messages = this.#host.agent.state.messages;
-		const lastMessage = messages[messages.length - 1];
+		let index = messages.length - 1;
+		if (this.#turnRetryPolicy?.orderedRouteFallback) {
+			// The Engine commits route instructions before retry. They must survive removing
+			// the failed assistant; never skip a tool result, user turn or unrelated custom message.
+			while (index >= 0) {
+				const message = messages[index];
+				if (message.role !== "custom" || message.customType !== "executor-rules") break;
+				index--;
+			}
+		}
+		const lastMessage = messages[index];
 		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.slice(0, -1));
+			this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
