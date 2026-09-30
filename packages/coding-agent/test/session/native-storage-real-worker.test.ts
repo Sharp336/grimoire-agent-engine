@@ -125,6 +125,10 @@ function nativeEngineHarness(
 		},
 		stableDependencyDigest: hash("native-dependency"),
 		sessionDefaults: {},
+		instruction_sources: {
+			facts: { binding: "task", scope: [taskRef], os: null, runtime: "artel-engine", engine_version: null },
+			rules: [], skills: [],
+		},
 		record_revisions: {},
 		routingLimits: {
 			scopes: [{ scope_ref: taskRef, agents: 1, by_tier: [], consultations: null }],
@@ -150,6 +154,7 @@ function nativeEngineHarness(
 					if (index !== 0) throw new EngineTargetError("stale_target", "Unknown fixture route");
 				},
 				activateCandidate: () => {},
+				setBillingPoolChanged: () => {}, // Local deterministic provider has no hosted billing admission.
 				dispose: () => {},
 			};
 		},

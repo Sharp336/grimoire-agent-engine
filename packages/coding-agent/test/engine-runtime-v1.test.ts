@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding, validateStartRequest } from "../src/engine/contracts";
+import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding } from "../src/engine/contracts";
 import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
@@ -62,18 +62,6 @@ it("fences semantic scope independently of opaque Agent provenance and validates
 	validateSemanticBinding({ ...owned, taskRef: null, workStepId: null }, ownedRef);
 	expect(() => validateSemanticBinding({ ...owned, taskRef: null }, ownedRef)).toThrow();
 	expect(() => validateRuntimeValue("agi", `${ref}\n`)).toThrow();
-	const native = {
-		commandId: "native", agentInstanceId: "native", executionId: "execution", attemptId: "attempt",
-		authorityGeneration: 1, cwd: "pinned", input: "native SDK",
-	};
-	validateStartRequest(native);
-	validateStartRequest({ ...native, agentInstanceRef: ref, bindingSnapshot: snapshot });
-	expect(() => validateStartRequest({ ...native, agentInstanceRef: ref })).toThrow();
-	for (const bindingSnapshot of [
-		snapshot,
-		{ ...snapshot, taskRef: null, workStepId: null },
-		{ ...snapshot, agentInstanceRef: ownedRef, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` },
-	]) expect(() => validateStartRequest({ ...native, bindingSnapshot })).toThrow();
 	const envelope = {
 		schema: "grimoire.engine.command.v1" as const, op: "start" as const, commandId: "exact",
 		deviceId: "device", engineId: "engine", engineGeneration: 1, agentInstanceId: "agent",

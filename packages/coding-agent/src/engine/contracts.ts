@@ -16,7 +16,7 @@ export type {
 	ApprovalRequest, ApprovalDecision, ApprovalDecisionInput, ApprovalAddressee, ApprovalDecider,
 	ToolApprovalSubject, SpawnApprovalSubject, EscalationApprovalSubject, ConsultantApprovalSubject,
 	EngineExecutionConfiguration, EngineExecutionRoutes, EngineExecutionRoute, ExecutionDescriptor,
-	ExecutorRouteState as EngineExecutorRouteState, ImmutableAttemptStart, EngineCommandPayload,
+	ExecutorRouteState, ImmutableAttemptStart, EngineCommandPayload,
 	ContinuationConfiguration, ContinuationDigestInput, ExecutionDigestInput, RoutingLimits,
 	NativeCompatibility, RosterRequest, ExecutorSettingsRequest, AutomationExecution,
 	ChoiceProvenance, InstructionRule, InstructionSources,
