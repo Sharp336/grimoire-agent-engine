@@ -1980,6 +1980,9 @@ export class RocksEngineMutations {
 					if (held) {
 						if (held.engine_generation !== binding.engineGeneration ||
 							held.expires_at <= Date.now() ||
+							held.attempt_id !== binding.attemptId ||
+							held.dispatch_hash !== options.routingResume.dispatchHash ||
+							held.binding_snapshot_hash !== `sha256:${createHash("sha256").update(storageCanonicalJson(options.routingResume.bindingSnapshot)).digest("hex")}` ||
 							held.resources.account_ref !== options.routingResume.candidates[0]?.account_ref)
 							throw new EngineTargetError("stale_target", "Pre-acquired Resume lease changed");
 					} else {
@@ -2066,6 +2069,19 @@ export class RocksEngineMutations {
 		}
 		return agentIds;
 	}
+	/** Paused branch members whose only removable hold belongs to this Resume root. */
+	async branchResumeTargets(id: string): Promise<string[]> {
+		const tx = new RuntimeTransaction(this.records, true);
+		const targets: string[] = [];
+		for (const agent of await this.branchAgents(tx, id)) {
+			const binding = await tx.get<RocksBinding>("binding", agent);
+			if (!binding || (await tx.get<RocksAttempt>("attempt", binding.attempt_id))?.state !== "paused") continue;
+			if ((await this.holds(tx, agent)).every(hold =>
+				hold.kind === "pause" && hold.sourceAgentInstanceId === id))
+				targets.push(agent);
+		}
+		return targets;
+	}
 
 	async changeIntent(
 		tx: RuntimeTransaction,
@@ -2119,7 +2135,7 @@ export class RocksEngineMutations {
 		action: "pause" | "resume" | "stop" | "continue",
 		expected?: number,
 		startFence?: EnginePendingStartTarget,
-		routingResume?: AdmissionRequest,
+		routingResume?: AdmissionRequest[],
 	) {
 		return this.mutation(id, async tx => {
 			if (startFence) {
@@ -2139,16 +2155,36 @@ export class RocksEngineMutations {
 					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision };
 				}
 			}
-			if (routingResume) {
-				if (action !== "resume" || routingResume.attemptId !==
-					(await tx.get<RocksBinding>("binding", id))?.attempt_id)
-					throw new EngineTargetError("stale_target", "Resume route differs from the bound Attempt");
-				const admitted = await stageAdmission(tx, routingResume);
-				if (admitted.status !== "admitted" ||
-					candidateRef(admitted.frozen[0]) !== candidateRef(routingResume.candidates[0]))
-					throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
-			}
-			return this.changeIntent(tx, id, commandId, action, expected);
+			const changed = await this.changeIntent(tx, id, commandId, action, expected);
+			if (action === "resume") {
+				const routes = new Map((routingResume ?? []).map(route => [engineAgentInstanceId(route.agentInstanceRef), route]));
+				for (const agent of changed.agentIds) {
+					const binding = await tx.get<RocksBinding>("binding", agent);
+					const attempt = binding && await tx.get<RocksAttempt>("attempt", binding.attempt_id);
+					const route = routes.get(agent);
+					if (attempt?.state !== "paused" || (await this.holds(tx, agent)).length) {
+						if (route) throw new EngineTargetError("stale_target", "Resume route has no paused unheld Attempt");
+						continue;
+					}
+					if (!route || !attempt.execution || !binding ||
+						route.attemptId !== attempt.attempt_id || route.commandId !== attempt.command_id ||
+						route.engineGeneration !== binding.engine_generation ||
+						route.engineGeneration !== attempt.engine_generation ||
+						route.engineGeneration !== (await tx.get<{ generation: number }>("metadata", "engine"))?.generation ||
+						!sameSemanticBinding(route.bindingSnapshot, attempt.binding_snapshot) ||
+						binding.binding_snapshot && !sameSemanticBinding(route.bindingSnapshot, binding.binding_snapshot) ||
+						candidateRef(currentIdentity(attempt.execution.executor_choice)) !== candidateRef(route.candidates[0]))
+						throw new EngineTargetError("stale_target", "Paused branch lacks its current frozen Resume route");
+					const admitted = await stageAdmission(tx, route);
+					if (admitted.status !== "admitted" ||
+						candidateRef(admitted.frozen[0]) !== candidateRef(route.candidates[0]))
+						throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
+					routes.delete(agent);
+				}
+				if (routes.size) throw new EngineTargetError("stale_target", "Resume route is outside the branch");
+			} else if (routingResume?.length)
+				throw new EngineTargetError("invalid_request", "Routing reacquire requires Resume");
+			return changed;
 		});
 	}
 

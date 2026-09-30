@@ -12,6 +12,7 @@ import {
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { EngineTargetError } from "./contracts";
 import { storageCanonicalJson } from "../session/storage-client";
 import {
 	type AgentMessageEnvelope,
@@ -134,8 +135,10 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		} catch (error) {
 			throw new HostedBridgeUnavailableError(`Grimoire Host transport unavailable: ${String(error)}`);
 		}
-		if (response.status >= 500) throw new HostedBridgeUnavailableError(`Grimoire Host returned HTTP ${response.status}`);
-		if (!response.ok) throw new Error(`Grimoire Host returned HTTP ${response.status}`);
+		if (response.status >= 500 || [408, 425, 429].includes(response.status))
+			throw new HostedBridgeUnavailableError(`Grimoire Host returned HTTP ${response.status}`);
+		if (!response.ok)
+			throw new EngineTargetError("stale_target", `Grimoire Host refused bridge call (HTTP ${response.status})`);
 		let json: Record<string, unknown>;
 		try {
 			json = (await response.json()) as Record<string, unknown>;
@@ -143,8 +146,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 			throw new HostedBridgeUnavailableError("Grimoire Host returned no complete bridge response");
 		}
 		if (json.error) {
-			const error = json.error as Record<string, unknown>;
-			throw new Error(`Grimoire Host rejected bridge call: ${String(error.message ?? "unknown error")}`);
+			throw new EngineTargetError("stale_target", `Grimoire Host refused ${tool}`);
 		}
 		const result = json.result as Record<string, unknown> | undefined;
 		if (!result) throw new HostedBridgeUnavailableError("Grimoire Host returned no bridge result");
@@ -152,21 +154,8 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		const text = content.find(
 			item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text",
 		) as Record<string, unknown> | undefined;
-		const structured = result.structuredContent as Record<string, unknown> | undefined;
-		if (result.isError === true) {
-			const error = structured?.error;
-			const message =
-				typeof text?.text === "string"
-					? text.text
-					: typeof error === "string"
-						? error
-						: error && typeof error === "object"
-							? (error as Record<string, unknown>).message
-							: structured?.message;
-			throw new Error(
-				`Grimoire Host tool ${tool} failed: ${typeof message === "string" && message.trim() ? message : "unknown error"}`,
-			);
-		}
+		if (result.isError === true)
+			throw new EngineTargetError("stale_target", `Grimoire Host refused ${tool}`);
 		if (structured && typeof structured === "object") return structured;
 		if (typeof text?.text !== "string") throw new HostedBridgeUnavailableError("Grimoire Host bridge result has no JSON content");
 		try {

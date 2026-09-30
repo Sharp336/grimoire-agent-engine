@@ -549,6 +549,18 @@ export class EngineRuntime {
 		);
 	}
 
+	/** Live tool ceiling for an addressed ancestor, not the child's approval-required list. */
+	canApproveTool(agentInstanceId: string, attemptId: string, toolName: string): boolean {
+		const binding = this.#bindings.get(agentInstanceId);
+		if (!binding || binding.attemptId !== attemptId || binding.attemptState !== "running" ||
+			binding.manualHold || !binding.session.getEnabledToolNames().includes(toolName)) return false;
+		const config = binding.execution.config;
+		const policy = config.continuationConfiguration;
+		if (policy.tools_permit.includes(toolName) || policy.toolPolicies[toolName] === "permit") return false;
+		const current = currentIdentity(binding.execution.choice);
+		const route = binding.execution.frozen.find(candidate => candidateRef(candidate) === candidateRef(current));
+		return Boolean(route && (!config.dispatch.requirement.require_trusted_provider || route.execution.trusted));
+	}
 	/** Verify current CH authority for every non-Start command before local admission or side effects. */
 	async verifyCommandOrigin(command: EngineCommandEnvelope): Promise<void> {
 		if (command.op === "start") return; // Start verifies its dispatch and binding in #startInLane.
@@ -566,7 +578,7 @@ export class EngineRuntime {
 	}
 
 	/** Re-verify origin and the current member of this Attempt's immutable frozen list. */
-	async #resumeRouting(binding: LiveBinding): Promise<AdmissionRequest> {
+	async #resumeRouting(binding: LiveBinding, preview = true): Promise<AdmissionRequest> {
 		if (!binding.bindingSnapshot || !this.#verifyOriginReceipt)
 			throw new EngineTargetError("stale_target", "Resume requires an admitted hosted binding");
 		const original = await this.store.getStartConversationIdentity(binding.commandId);
@@ -600,9 +612,11 @@ export class EngineRuntime {
 			rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
 			candidates: [candidate], callerAttemptId: null, frozen: true,
 		};
-		const preview = await this.store.previewRouting(request);
-		if (preview.status !== "admitted")
-			throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
+		if (preview) {
+			const outcome = await this.store.previewRouting(request);
+			if (outcome.status !== "admitted")
+				throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
+		}
 		return request;
 	}
 
@@ -1004,7 +1018,7 @@ export class EngineRuntime {
 					? (request as EngineCancelRequest)
 					: undefined;
 			const resumeMessage = action === "resume" && "message" in request && request.message !== undefined;
-			const resumedIntent = resumeMessage && request.expectedIntentRevision !== undefined &&
+			const resumedIntent = action === "resume" && request.expectedIntentRevision !== undefined &&
 				durable.intentCommandId === request.commandId &&
 				durable.intentRevision === request.expectedIntentRevision + 1;
 			const recoveringAcceptedMessage = action === "resume" && !resumeMessage &&
@@ -1020,12 +1034,15 @@ export class EngineRuntime {
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
-			const rootIntent = action === "resume" && root?.attemptState === "paused"
-				? await this.store.intent(request.agentInstanceId) : undefined;
-			const routingResume = root && rootIntent && !rootIntent.holdsHasMore &&
-				rootIntent.holds.every(hold =>
-					hold.kind === "pause" && hold.sourceAgentInstanceId === request.agentInstanceId)
-				? await this.#resumeRouting(root) : undefined;
+			const resumeRoutes = new Map<string, AdmissionRequest>();
+			if (action === "resume" && !resumedIntent) {
+				for (const agentId of await this.store.branchResumeTargets(request.agentInstanceId)) {
+					const binding = this.#bindings.get(agentId);
+					if (!binding || binding.attemptState !== "paused")
+						throw new EngineTargetError("stale_target", "Paused branch member requires its live Resume Attempt");
+					resumeRoutes.set(agentId, await this.#resumeRouting(binding));
+				}
+			}
 			if (resumeMessage) {
 				if (!root || (!resumedIntent && root.attemptState !== "paused") || root.pendingInput ||
 					[...this.#pendingToolApprovals.values()].some(pending => pending.record.target.bindingId === root.bindingId))
@@ -1076,7 +1093,7 @@ export class EngineRuntime {
 						action,
 						request.expectedIntentRevision,
 						startFence,
-						routingResume,
+						action === "resume" ? [...resumeRoutes.values()] : undefined,
 					);
 				} catch (error) {
 					if (resumeMessage)
@@ -1169,12 +1186,11 @@ export class EngineRuntime {
 									},
 								],
 								{ expectedStates: [previous], ...(previous === "paused"
-									? { routingResume: agentId === request.agentInstanceId
-										? routingResume : await this.#resumeRouting(binding) } : {}) },
+									? { routingResume: resumeRoutes.get(agentId) ?? await this.#resumeRouting(binding, !resumedIntent) } : {}) },
 							);
 						} catch (error) {
 							binding.attemptState = previous;
-							if (previous === "paused" && agentId === request.agentInstanceId && routingResume)
+							if (previous === "paused" && resumeRoutes.has(agentId))
 								await this.store.releaseRouting(binding.attemptId);
 							throw error;
 						}
@@ -3467,11 +3483,14 @@ export class EngineRuntime {
 			if (!binding?.bindingSnapshot) throw new EngineTargetError("stale_target", "Approval binding was released");
 			const parentRef = binding.bindingSnapshot.parentAgentInstanceRef;
 			const parent = parentRef && this.#bindings.get(engineAgentInstanceId(parentRef));
-			const parentCanDecide = parent && parent.attemptId === binding.bindingSnapshot.parentAttemptId &&
-				parent.attemptState === "running" &&
-				parent.execution.config.continuationConfiguration.tools_permit.includes(record.toolName);
+			const parentReceipt = parent && await this.store.runtimeCommand(parent.commandId, { principalId: binding.principalId });
+			const parentCanDecide = Boolean(parent && parent.attemptId === binding.bindingSnapshot.parentAttemptId &&
+				parent.bindingSnapshot?.bindingRevision === binding.bindingSnapshot.parentBindingRevision &&
+				this.canApproveTool(parent.agentInstanceId, parent.attemptId, record.toolName) &&
+				parentReceipt?.stage === "applied" &&
+				(parentReceipt.lease as { held?: boolean } | undefined)?.held === true);
 			const addressedTo: ApprovalAddressee = parentCanDecide
-				? { kind: "attempt", agent_ref: parentRef!, attempt_id: parent.attemptId }
+				? { kind: "attempt", agent_ref: parentRef!, attempt_id: parent!.attemptId }
 				: { kind: "human", principal_id: binding.principalId };
 			const now = new Date();
 			const timeoutSeconds = 300;
@@ -3491,7 +3510,7 @@ export class EngineRuntime {
 					call_hash: `sha256:${record.inputHash}`,
 					ceiling_hash: executionHash(binding.execution.config.continuationConfiguration.tools_permit),
 				},
-				requires_human: !parentCanDecide,
+				requires_human: false,
 				reason: `Permission requested for ${record.toolName}`,
 				created_at: now.toISOString(),
 				addressed_to: addressedTo,

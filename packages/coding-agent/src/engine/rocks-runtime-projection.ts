@@ -33,7 +33,7 @@ import { type RuntimeChange, runtimeLimits, runtimeToolPageRecords, validateRunt
 import { publicRuntimeQueueItem } from "./runtime-queue";
 import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
 import type { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
-import type { EngineCommandReceipt, EngineTransitionEvent } from "./store";
+import type { EngineApprovalRow, EngineCommandReceipt, EngineTransitionEvent } from "./store";
 
 export const terminal = new Set(["completed", "cancelled", "failed", "interrupted"]);
 const summaryEvents = new Set([
@@ -58,6 +58,9 @@ const summaryEvents = new Set([
 	"tool_approval_resolved",
 	"inbox_changed",
 ]);
+const approvalEvent = (kind: string) =>
+	kind.endsWith("_approval_requested") || kind.endsWith("_approval_resolved") ||
+	kind === "approval_escalated" || kind === "approval_timed_out";
 export const projectionId = (subtype: string, ...parts: string[]) =>
 	`projection_${new Bun.CryptoHasher("sha256").update(JSON.stringify([subtype, ...parts])).digest("hex")}`;
 /** An input request payload up to this size stays whole in its event and projection rows. */
@@ -164,7 +167,7 @@ export function eventReadKeys(
 	}
 	if (event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string")
 		keys.push({ kind: "projection", id: projectionId("ownership", agent, event.payload.assistantMessageId) });
-	if (summaryEvents.has(event.kind))
+	if (summaryEvents.has(event.kind) || approvalEvent(event.kind))
 		keys.push(
 			{ kind: "metadata", id: "engine" },
 			{ kind: "binding", id: agent },
@@ -613,11 +616,13 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			await tx.put("effect", effect.effect_id, { ...effect, runtime_event_id: event.eventId });
 		attempt.tool_revision = event.eventId;
 	}
-	if (event.kind.startsWith("input_") || event.kind.startsWith("tool_approval_")) {
-		const inputId = String(event.payload?.inputId ?? event.payload?.approvalId);
+	if (event.kind.startsWith("input_") || approvalEvent(event.kind)) {
+		const inputId = String(event.kind === "input_requested" || event.kind === "input_resolved"
+			? event.payload?.inputId
+			: event.kind.endsWith("_approval_requested") ? event.payload?.id : event.payload?.request_id);
 		const id = projectionId("input", event.attemptId, inputId);
 		if (event.kind.endsWith("requested")) {
-			// An oversized request event already carries its preview; its full body is read through its parts.
+			// An oversized question already carries its preview; approvals retain their exact request.
 			const body = runtimeInputBody(event);
 			const parts = event.payload?.inputParts as InputParts | undefined;
 			await putProjection(
@@ -628,9 +633,19 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 				{ inputId, kind: body.kind, revision: event.eventId },
 				{ body, resolved: false, ...(parts ? { parts } : {}) },
 			);
-		} else if (event.kind.endsWith("resolved")) {
+		} else {
 			const previous = await tx.get<RocksProjection>("projection", id);
-			if (previous) await tx.put("projection", id, { ...previous, resolved: true });
+			if (previous && event.kind.endsWith("resolved"))
+				await tx.put("projection", id, { ...previous, resolved: true });
+			else if (previous && (event.kind === "approval_escalated" || event.kind === "approval_timed_out")) {
+				const approval = await tx.get<EngineApprovalRow>("approval", inputId);
+				if (!approval) throw new EngineTargetError("stale_target", "Readdressed approval lost its request");
+				const body = runtimeInputBody({ ...event, kind: `${approval.request.kind}_approval_requested`, payload: approval.request });
+				await tx.put("projection", id, { ...previous,
+					value: { ...previous.value, revision: event.eventId },
+					body,
+				});
+			}
 		}
 		if (attempt) attempt.input_revision = event.eventId;
 	}
@@ -674,7 +689,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		await putProjection(tx, event, "membership", projectionId("membership", event.agentInstanceId), membership);
 	}
 	let summary: Record<string, unknown> | null = null;
-	if (summaryEvents.has(event.kind) || !identity.summary_json) {
+	if (summaryEvents.has(event.kind) || approvalEvent(event.kind) || !identity.summary_json) {
 		const binding = await tx.get<RocksBinding>("binding", event.agentInstanceId);
 		const gate = identity.agent_instance_ref?.startsWith("grimoire://agents/~u/")
 			? (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${event.agentInstanceId}`))?.gate
@@ -887,7 +902,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		invalidations.push("usage", "context");
 	if (event.kind === "inbox_changed") invalidations.push("queue");
 	if (event.kind === "holds_changed") invalidations.push("holds");
-	if ((event.kind.startsWith("input_") || event.kind.startsWith("tool_approval_")) && attempt)
+	if ((event.kind.startsWith("input_") || approvalEvent(event.kind)) && attempt)
 		invalidations.push("input");
 	if (event.payload?.transcriptCheckpoint && event.attemptId) invalidations.push("history");
 	for (const resource of invalidations) {

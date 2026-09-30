@@ -423,42 +423,47 @@ async function dispatchRequest(
 			const id = requiredString(params, "requestId");
 			const principalId = requiredString(params, "principalId");
 			const approval = await options.runtime.store.getApproval(id);
-			const request = approval?.request;
-			if (!request || request.principal_id !== principalId)
+			const approvalRequest = approval?.request;
+			if (!approvalRequest || approvalRequest.principal_id !== principalId)
 				throw new EngineTargetError("agent_not_found", "Approval request is not accessible");
-			const attempt = await options.runtime.store.getAttempt(request.requester_attempt_id);
-			if (!attempt || !attempt.execution || attempt.execution.dispatch_hash !== request.dispatch_hash)
+			const attempt = await options.runtime.store.getAttempt(approvalRequest.requester_attempt_id);
+			if (!attempt || !attempt.execution || attempt.execution.dispatch_hash !== approvalRequest.dispatch_hash)
 				throw new EngineTargetError("stale_target", "Requester Attempt has no admitted approval");
 			const inputRevision = attempt.input_revision;
 			if (params.expectedInputRevision !== undefined &&
 				requiredInteger(params, "expectedInputRevision") !== inputRevision)
 				throw new EngineTargetError("stale_target", "Approval input revision changed");
 			if (request.method === "approval.authorize" &&
-				(request.status !== "pending" || approval.state !== "pending"))
+				(approvalRequest.status !== "pending" || approval.state !== "pending"))
 				throw new EngineTargetError("too_late", "Approval request is no longer pending");
 			if (request.method === "approval.authorize") {
 				const caller = params.callerContext as Record<string, unknown> | undefined;
-				if (!caller || request.requires_human || request.addressed_to.kind !== "attempt" ||
-					caller.agentInstanceRef !== request.addressed_to.agent_ref ||
-					caller.attemptId !== request.addressed_to.attempt_id ||
-					caller.attemptId === request.requester_attempt_id)
+				if (!caller || approvalRequest.requires_human || approvalRequest.addressed_to.kind !== "attempt" ||
+					caller.agentInstanceRef !== approvalRequest.addressed_to.agent_ref ||
+					caller.attemptId !== approvalRequest.addressed_to.attempt_id ||
+					caller.attemptId === approvalRequest.requester_attempt_id)
 					throw new EngineTargetError("stale_target", "Caller is not the addressed ancestor");
 				const actor = await options.runtime.store.getAttempt(String(caller.attemptId));
+				const actorBinding = actor && await options.runtime.store.getBinding(actor.agent_instance_id);
 				const actorCommand = actor && await options.runtime.store.getStartConversationIdentity(actor.command_id);
 				const rawConfig = actorCommand?.serializedCommand &&
 					(JSON.parse(actorCommand.serializedCommand) as EngineCommandEnvelope).payload.executionConfiguration;
 				if (rawConfig) validateRuntimeValue("engineExecutionConfiguration", rawConfig);
 				const actorConfig = rawConfig as EngineExecutionConfiguration | undefined;
 				if (!actor || !actor.execution || !actorCommand || !actorConfig ||
+					!actorBinding || actorBinding.attemptId !== actor.attempt_id ||
+					actorBinding.engineGeneration !== options.runtime.engineGeneration ||
+					!sameSemanticBinding(actorBinding.bindingSnapshot, actor.binding_snapshot) ||
 					actor.state !== "running" ||
 					actorCommand.agentInstanceRef !== caller.agentInstanceRef ||
 					!sameSemanticBinding(actor.binding_snapshot, caller.bindingSnapshot as EngineSemanticBindingSnapshot) ||
 					actor.execution.dispatch_hash !== caller.dispatchHash ||
-					request.requester_attempt_id !== attempt.attempt_id ||
+					approvalRequest.requester_attempt_id !== attempt.attempt_id ||
 					attempt.binding_snapshot?.parentAttemptId !== actor.attempt_id ||
-					!["tool", "spawn"].includes(request.kind) ||
-					(request.kind === "tool" && !actorConfig.continuationConfiguration.tools_permit.includes(request.subject.tool_name)) ||
-					(request.kind === "spawn" && actorConfig.dispatch.spawn.allowed === "no"))
+					attempt.binding_snapshot?.parentBindingRevision !== actor.binding_snapshot?.bindingRevision ||
+					!["tool", "spawn"].includes(approvalRequest.kind) ||
+					(approvalRequest.kind === "tool" && !options.runtime.canApproveTool(actor.agent_instance_id, actor.attempt_id, approvalRequest.subject.tool_name)) ||
+					(approvalRequest.kind === "spawn" && actorConfig.dispatch.spawn.allowed === "no"))
 					throw new EngineTargetError("stale_target", "Caller lacks the current approval ceiling");
 				const actorReceipt = await options.runtime.store.runtimeCommand(actor.command_id, { principalId });
 				if (actorReceipt.stage !== "applied" ||
@@ -466,11 +471,11 @@ async function dispatchRequest(
 					!("held" in actorReceipt.lease) || actorReceipt.lease.held !== true)
 					throw new EngineTargetError("stale_target", "Approving ancestor has no live lease");
 			}
-			const subject_hash = `sha256:${createHash("sha256").update(storageCanonicalJson(request.subject)).digest("hex")}`;
+			const subject_hash = `sha256:${createHash("sha256").update(storageCanonicalJson(approvalRequest.subject)).digest("hex")}`;
 			return {
-				request,
+				request: approvalRequest,
 				inputRevision,
-				ceiling_hash: "ceiling_hash" in request.subject ? request.subject.ceiling_hash : request.settings_hash,
+				ceiling_hash: "ceiling_hash" in approvalRequest.subject ? approvalRequest.subject.ceiling_hash : approvalRequest.settings_hash,
 				subject_hash,
 			};
 		}
