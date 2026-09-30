@@ -140,10 +140,10 @@ describe("structured native SessionManager", () => {
 		manager.appendCompaction("summary", undefined, "outside-active-branch", 100);
 		await manager.flush();
 		const reopened = await SessionManager.openNative(storage);
-		expect(reopened.getLastUserLaunchSnapshot("agent")?.schema).toBe("engine.launch_snapshot.v2");
-		expect(
-			reopened.getLastUserLaunchSnapshot("agent")?.selectedRouteRef,
-		).toBe("gctx:bbbbbbbbbbbbbbbb");
+		const retainedLaunch = reopened.getLastUserLaunchSnapshot("agent");
+		if (retainedLaunch?.schema !== "engine.launch_snapshot.v2")
+			throw new Error("Cold compaction lost the admitted v2 launch snapshot");
+		expect(retainedLaunch.selectedRouteRef).toBe("gctx:bbbbbbbbbbbbbbbb");
 		expect(storage.readIds).not.toContain(archived);
 		expect(storage.archiveReads).toBe(0);
 		reopened.appendMessage({ role: "user", content: "unannotated steer", timestamp: 2 });

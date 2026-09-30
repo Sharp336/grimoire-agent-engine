@@ -336,7 +336,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("refuses missing or unsupported images before model dispatch and leaves failed queued delivery pending", async () => {
 		const mock = createMockModel({ handler: { content: ["must not run"] } });
-		mock.model.input = ["text"];
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, undefined);
 		const png = Buffer.from(
@@ -830,10 +829,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(JSON.stringify(toolResultOf(mock, "read-permit")?.content)).toContain("approved");
 		const events = await runtime.store.pendingEvents();
 		const toolKinds = events.filter(event => event.kind.startsWith("tool_")).map(event => event.kind);
-		for (const kind of ["tool_approval_requested", "tool_approval_resolved", "tool_started", "tool_settled"])
-			expect(toolKinds).toContain(kind);
-		const ordered = ["tool_approval_requested", "tool_approval_resolved", "tool_started", "tool_settled"]
-			.map(kind => toolKinds.indexOf(kind));
+		const expectedToolKinds = ["tool_approval_requested", "tool_approval_resolved", "tool_started", "tool_settled"] as const;
+		for (const kind of expectedToolKinds) expect(toolKinds).toContain(kind);
+		const ordered = expectedToolKinds.map(kind => toolKinds.indexOf(kind));
 		expect(ordered.every((index, position) => index >= 0 && (position === 0 || index > ordered[position - 1]))).toBeTrue();
 		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe("command-approve");
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "completed" });
@@ -3116,7 +3114,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				expectedIntentRevision: 0,
 			});
 			expect(result).toMatchObject({ manualHold: true, intentRevision: 2 });
-			expect((await runtime.store.getAttempt(command.attemptId))?.state).toBe("cancel_requested");
+			expect((await runtime.store.getAttempt(request.attemptId))?.state).toBe("cancel_requested");
 		} finally {
 			release.resolve();
 			await runtime.drain();
@@ -3601,11 +3599,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.drain();
 		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
 		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
-		const messageIds = [...new Set(snapshots.map(event =>
-			event.kind === "assistant_snapshot" ? String(event.payload.assistantMessageId) : ""))];
+		const messageIds = [...new Set(snapshots.map(event => {
+			const messageId = event.payload?.assistantMessageId;
+			if (typeof messageId !== "string") throw new Error("Assistant snapshot lost its message identity");
+			return messageId;
+		}))];
 		expect(messageIds).toHaveLength(2);
 		const settled = snapshots.at(-1);
-		const settledSnapshot = settled?.kind === "assistant_snapshot" ? settled.payload : null;
+		if (!settled?.payload) throw new Error("Settled assistant snapshot lost its payload");
+		const settledSnapshot = settled.payload;
 		expect(settledSnapshot).toMatchObject({
 			assistantMessageId: messageIds[1],
 			text: fullFinal.slice(0, 48_000),
@@ -3613,16 +3615,16 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			stopReason: "stop",
 			textTruncated: true,
 		});
-		expect(settled?.kind === "assistant_snapshot" && String(settled.payload.text)).toHaveLength(48_000);
+		expect(String(settledSnapshot.text)).toHaveLength(48_000);
 		const completed = events.find(event => event.kind === "completed");
-		expect(completed?.kind === "completed" ? completed.payload.assistantMessageId : undefined).toBe(messageIds[1]);
-		expect(events.indexOf(settled!)).toBeLessThan(events.indexOf(completed!));
+		if (!completed?.payload) throw new Error("Completed Attempt lost its assistant identity");
+		expect(completed.payload.assistantMessageId).toBe(messageIds[1]);
+		expect(events.indexOf(settled)).toBeLessThan(events.indexOf(completed));
 		const history = await nativeHistory(runtime, started.agentInstanceId);
 		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
 		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
 		expect(history.activityCompleteness).toBe("complete");
-		const historyEntry = settled?.kind === "assistant_snapshot" ? settled.payload : null;
-		const historyEntryId = historyEntry?.historyEntryId;
+		const historyEntryId = settledSnapshot.historyEntryId;
 		expect(typeof historyEntryId).toBe("string");
 		expect(historyEntryId).toBe(assistantEntries.at(-1)?.entryId);
 		expect(JSON.stringify(snapshots)).not.toMatch(
@@ -3795,10 +3797,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.dispose();
 			expect(events.find(event => event.kind === "completed")).toBeUndefined();
 			const failed = events.find(event => event.kind === "failed");
+			if (!failed?.payload) throw new Error("Failed Attempt lost its public error payload");
+			if (typeof failed.payload.error !== "string") throw new Error("Failed Attempt has no public error");
 			expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
 			expect(JSON.stringify(failed?.payload)).not.toContain("private.invalid");
-			expect(failed?.kind === "failed" ? failed.payload.error : undefined).toStartWith(`${publicReason} (diagnostic `);
-			expect(failed?.kind === "failed" ? failed.payload : null).toMatchObject({
+			expect(failed.payload.error).toStartWith(`${publicReason} (diagnostic `);
+			expect(failed.payload).toMatchObject({
 				error: expect.stringContaining("diagnostic"),
 				transcriptRef: `history://${started.engineAgentId}`,
 				transcriptCheckpoint: { revision: 2 },
@@ -3864,7 +3868,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}));
 			await withTimeout(reached.promise, 5000, "Image-only start did not reach the provider");
 			const binding = setup.runtime.getBinding(started.agentInstanceId)!;
-			const runningCommand = {
+			const runningCommand: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1",
 				commandId: "steer-image-command",
 				op: "steer" as const,
@@ -4080,10 +4084,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			afterEntryId: assistants[0].entryId,
 			terminal: false,
 		});
-		const failure = events.find(
-			event =>
-				event.kind === "assistant_snapshot" && event.payload.assistantMessageId === assistants[0].assistantMessageId,
-		)!;
+		const failure = events.find(event =>
+			event.kind === "assistant_snapshot" &&
+			event.payload?.assistantMessageId === assistants[0].assistantMessageId);
+		if (!failure?.payload) throw new Error("Failed assistant snapshot lost its native entry");
 		expect(failure.payload).toMatchObject({ text: "", stopReason: "error", historyEntryId: assistants[0].entryId });
 		expect(failure.eventId).toBeLessThan(retry.eventId);
 		await setup.runtime.dispose();
@@ -4159,23 +4163,34 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.drain();
 		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
 		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
-		const streamingSnapshots = snapshots.filter(event => event.kind === "assistant_snapshot" && event.payload.status === "streaming");
+		const streamingSnapshots = snapshots.filter(event => event.payload?.status === "streaming");
 		expect(streamingSnapshots).toHaveLength(2);
-		expect(new Set(streamingSnapshots.map(event => event.kind === "assistant_snapshot" ? event.payload.assistantMessageId : "")).size).toBe(1);
-		expect(streamingSnapshots.map(event => event.kind === "assistant_snapshot" ? event.payload.revision : -1)).toEqual([1, 2]);
+		const streamingIds = streamingSnapshots.map(event => {
+			const id = event.payload?.assistantMessageId;
+			if (typeof id !== "string") throw new Error("Streaming assistant snapshot lost its identity");
+			return id;
+		});
+		expect(new Set(streamingIds).size).toBe(1);
+		expect(streamingSnapshots.map(event => event.payload?.revision)).toEqual([1, 2]);
 		const settledSnapshot = snapshots.at(-1);
-		expect(settledSnapshot?.kind === "assistant_snapshot" ? settledSnapshot.payload : null).toMatchObject({
-			assistantMessageId: snapshots[0]?.kind === "assistant_snapshot" ? snapshots[0].payload.assistantMessageId : undefined,
+		const first = snapshots[0];
+		if (!first?.payload || !settledSnapshot?.payload)
+			throw new Error("Stopped assistant snapshots lost their payloads");
+		const firstMessageId = first.payload.assistantMessageId;
+		if (typeof firstMessageId !== "string")
+			throw new Error("Stopped assistant snapshot lost its message identity");
+		expect(settledSnapshot.payload).toMatchObject({
+			assistantMessageId: firstMessageId,
 			text: "a".repeat(400),
 			status: "settled",
 			stopReason: "aborted",
 			historyEntryId: expect.any(String),
 		});
 		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
-		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
+		expect(events.indexOf(settledSnapshot)).toBeLessThan(firstCancelled);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		const retainedAnswer = (await nativeHistory(runtime, started.agentInstanceId)).entries.find(
-			entry => snapshots[0]?.kind === "assistant_snapshot" && entry.assistantMessageId === snapshots[0].payload.assistantMessageId,
+			entry => entry.assistantMessageId === firstMessageId,
 		);
 		expect(retainedAnswer).toMatchObject({ text: "a".repeat(400), stopReason: "aborted" });
 		await runtime.dispose();

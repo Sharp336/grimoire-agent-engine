@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog";
 import { type EngineBindingSnapshot, EngineTargetError, type EngineSemanticBindingSnapshot,
 	type ExecutorChoice, type Candidate, type EngineExecutionConfiguration } from "../../src/engine/contracts";
 import { ModelRegistry } from "../../src/config/model-registry";
@@ -150,7 +151,7 @@ export function eventsRequest(
 /** One full typed admitted execution from the shared READONLY fixture: config, digests, receipts. */
 export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/runtime-test",
 	withFallback = false): AdmittedExecutionFixture {
-	const model = buildModel({
+	const spec: ModelSpec<"openai-completions"> = {
 		id: "runtime-v1-fixture-model",
 		name: "Runtime v1 fixture model",
 		api: "openai-completions",
@@ -161,9 +162,10 @@ export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/ru
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 32_000,
 		maxTokens: 16_000,
-	});
+	};
+	const model = buildModel(spec);
 	const fallbackModel = withFallback
-		? buildModel({ ...model, id: "runtime-v1-fixture-fallback-model", name: "Fallback fixture model" })
+		? buildModel({ ...spec, id: "runtime-v1-fixture-fallback-model", name: "Fallback fixture model" })
 		: undefined;
 	return admittedExecution(model, new ModelRegistry(createInMemoryAuthStorage()), {
 		taskRef, ...(fallbackModel ? { fallbackModel } : {}),

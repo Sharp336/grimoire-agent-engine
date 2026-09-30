@@ -304,7 +304,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 		});
 		const directParentExecution = admittedExecution(directParentModel.model, modelRegistry, {
 			taskRef: parentTaskRef,
-			spawn: { allowed: "yes", max_depth: 1, max_children: 1, on_exceed: "deny" },
+			spawn: { allowed: "auto", max_depth: 1, max_children: 1, on_exceed: "deny" },
 			continuation: { systemPrompt: "Direct parent admission" },
 		});
 		const executions = [execution, directParentExecution];
@@ -551,7 +551,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			const parentExecution = admittedExecution(parentModel.model, modelRegistry, {
 				taskRef: parentTaskRef,
 				// The service parent spawns one local child then reports its structured result.
-				spawn: { allowed: "yes", max_depth: 1, max_children: 1, on_exceed: "deny" },
+				spawn: { allowed: "auto", max_depth: 1, max_children: 1, on_exceed: "deny" },
 				continuation: { toolNames: ["task"], restrictToolNames: true },
 			});
 			executions.push(parentExecution);

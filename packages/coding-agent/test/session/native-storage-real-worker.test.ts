@@ -7,7 +7,8 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import { type EngineBindingSnapshot, type EngineOrdinaryEvent, type EngineStartRequest } from "../../src/engine/contracts";
+import { type EngineBindingSnapshot, type EngineEvent, type EngineOrdinaryEvent,
+	type EngineStartRequest } from "../../src/engine/contracts";
 import { runEngineCommand } from "../../src/engine/control-query";
 import type { RocksEvent } from "../../src/engine/rocks-runtime-rows";
 import { EngineRuntime, type EngineRuntimeOptions } from "../../src/engine/runtime";

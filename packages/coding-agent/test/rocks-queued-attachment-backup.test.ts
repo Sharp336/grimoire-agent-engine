@@ -12,6 +12,7 @@ import { attachmentUploadKey, EngineAttachmentUploads } from "../src/engine/runt
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { AuthStorage } from "../src/session/auth-storage";
 import { BlobStore } from "../src/session/blob-store";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
@@ -213,12 +214,13 @@ it.skipIf(!(executable && runRoot))(
 			process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
 			process.env.PI_BLOBS_DIR = restoredBlobs.dir;
 			let runtime: EngineRuntime | undefined;
+			const restoredAuth = createInMemoryAuthStorage();
 			try {
 				const settings = await Settings.loadReadOnly({ cwd: freshRoot, agentDir: freshRoot });
 				const mock = createMockModel();
 				mock.input.push("image");
 				const delivered: Array<{ input: string; imageData?: string }> = [];
-				const execution = admittedExecution(mock.model, new ModelRegistry(new AuthStorage(":memory:")), {
+				const execution = admittedExecution(mock.model, new ModelRegistry(restoredAuth), {
 					taskRef: "grimoire://tasks/grimoire/queue-fixture",
 					continuation: { toolNames: ["read"], restrictToolNames: true },
 				});
@@ -271,6 +273,7 @@ it.skipIf(!(executable && runRoot))(
 				expect(delivered).toContainEqual({ input: "Read my file", imageData: image.toString("base64") });
 			} finally {
 				await runtime?.dispose();
+				restoredAuth.close();
 				if (previousBinding === undefined) delete process.env.GRIMOIRE_STORAGE_BINDING;
 				else process.env.GRIMOIRE_STORAGE_BINDING = previousBinding;
 				if (previousBlobs === undefined) delete process.env.PI_BLOBS_DIR;

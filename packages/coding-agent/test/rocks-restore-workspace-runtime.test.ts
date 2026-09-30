@@ -214,7 +214,10 @@ it.skipIf(!(executable && runRoot))(
 				targetWorkRoot: targetCwd,
 				mappings: [{ source: sourceCwd, destination: targetCwd }],
 			};
-			const plan: RestoreWorkspacePlan = { ...planBody, planHash: digest(planBody) };
+			const plan: RestoreWorkspacePlan = {
+				...planBody,
+				planHash: new Bun.CryptoHasher("sha256").update(stableStringifyJson(planBody)).digest("hex"),
+			};
 			process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(worker.binding);
 			process.env.GRIMOIRE_STORAGE_RESTORE_ID = restoreEpoch;
 			process.env.GRIMOIRE_STORAGE_RESTORE_WORKSPACE_REBIND = JSON.stringify(plan);
