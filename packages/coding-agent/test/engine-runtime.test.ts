@@ -3257,6 +3257,138 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "cancelled")?.causationCommandId).toBe("command-parent-owned");
 		await runtime.dispose();
 	}, 60000);
+
+	it("disposes a newborn held child while its effect admission is returning", async () => {
+		const parentPrompt = Promise.withResolvers<boolean>();
+		const parentDispatched = Promise.withResolvers<void>();
+		const busyReached = Promise.withResolvers<void>();
+		const returnBusy = Promise.withResolvers<void>();
+		const prompts: string[] = [];
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
+			prompts.push(input);
+			if (input !== "parent work") return true;
+			parentDispatched.resolve();
+			return parentPrompt.promise;
+		});
+		const parent = await runtime.start(startRequest(execution, {
+			commandId: "dispose-held-parent-start", agentInstanceId: "dispose-held-parent",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/dispose-held-parent",
+			executionId: "dispose-held-parent-execution", attemptId: "dispose-held-parent-attempt",
+		}, { cwd, principalId: "owner", input: "parent work" }));
+		// The parent pauses mid-prompt: its model admission is already settled, only the newborn child is held.
+		await withTimeout(parentDispatched.promise, 2000, "Parent prompt was not dispatched");
+		await runtime.pause({ ...parent, commandId: "dispose-held-parent-pause", initiator: { kind: "human" } });
+		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(async (target, effect) => {
+			try {
+				return await originalAdmission(target, effect);
+			} catch (error) {
+				busyReached.resolve();
+				await returnBusy.promise;
+				throw error;
+			}
+		});
+		try {
+			const child = await runtime.start(startRequest(execution, {
+				commandId: "dispose-held-child-start", agentInstanceId: "dispose-held-child",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/dispose-held-child",
+				executionId: "dispose-held-child-execution", attemptId: "dispose-held-child-attempt",
+			}, { cwd, principalId: "owner", input: "child work", parentAgentInstanceId: parent.agentInstanceId }));
+			await withTimeout(busyReached.promise, 2000, "Held child did not reach effect admission");
+			const session = runtime.agentRegistry.get(child.engineAgentId)?.session;
+			if (!session) throw new Error("Child session is unavailable");
+			const originalAbort = session.abort.bind(session);
+			const abort = spyOn(session, "abort").mockImplementation(options => {
+				returnBusy.resolve();
+				return originalAbort(options);
+			});
+			parentPrompt.resolve(true);
+			try {
+				await withTimeout(runtime.dispose({ closeStore: false }), 2000, "Held child disposal did not finish");
+			} finally {
+				abort.mockRestore();
+			}
+			expect(prompts).toEqual(["parent work"]);
+			expect(await runtime.store.getAttempt(child.attemptId)).toMatchObject({ state: "interrupted" });
+			expect((await runtime.store.intent(child.agentInstanceId)).manualHold).toBeTrue();
+			expect(
+				(await runtime.store.pendingEvents()).filter(
+					event => event.attemptId === child.attemptId && event.kind === "pause_requested",
+				),
+			).toHaveLength(0);
+		} finally {
+			returnBusy.resolve();
+			parentPrompt.resolve(true);
+			admission.mockRestore();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+		}
+	}, 15000);
+
+	it("disposes an agent whose model admission is parked behind a hold", async () => {
+		const prompts: string[] = [];
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
+			prompts.push(input);
+			return true;
+		});
+		// A quiet store: no unrelated change will wake a parked admission, only the Engine itself can.
+		const quiet = spyOn(runtime.store, "changeSignal").mockReturnValue(Promise.withResolvers<void>().promise);
+		const held = Promise.withResolvers<void>();
+		const parked = Promise.withResolvers<void>();
+		let refused = false;
+		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(
+			async (target, effect, checkpoint) => {
+				await held.promise;
+				try {
+					return await originalAdmission(target, effect, checkpoint);
+				} catch (error) {
+					refused = true;
+					throw error;
+				}
+			},
+		);
+		// A refused admission re-reads the hold in its agent lane before it waits for a store change.
+		const originalIntent = runtime.store.intent.bind(runtime.store);
+		const intent = spyOn(runtime.store, "intent").mockImplementation(async agentInstanceId => {
+			const afterRefusal = refused;
+			const result = await originalIntent(agentInstanceId);
+			if (afterRefusal) parked.resolve();
+			return result;
+		});
+		try {
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "parked-admission-start", agentInstanceId: "parked-admission-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/parked-admission-agent",
+				executionId: "parked-admission-execution", attemptId: "parked-admission-attempt",
+			}, { cwd, principalId: "owner", input: "parked work" }));
+			// The hold settles before the first model admission, so that admission is refused and parks.
+			const paused = nextEngineEvent(runtime, "paused", started.attemptId);
+			await runtime.pause({ ...started, commandId: "parked-admission-pause", initiator: { kind: "human" } });
+			await withTimeout(paused, 2000, "Pause did not settle before model admission");
+			held.resolve();
+			await withTimeout(parked.promise, 2000, "Model admission did not park behind the hold");
+			// Only microtasks separate that re-read from the wait; one macrotask turn lets the admission reach it.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			await withTimeout(runtime.dispose({ closeStore: false }), 5000, "Parked admission blocked disposal");
+			expect(prompts).toEqual([]);
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "interrupted" });
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
+		} finally {
+			held.resolve();
+			admission.mockRestore();
+			intent.mockRestore();
+			quiet.mockRestore();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+		}
+	}, 15000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
