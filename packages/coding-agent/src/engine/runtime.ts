@@ -48,7 +48,7 @@ import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BlobStore } from "../session/blob-store";
 import { NativeSessionWriteRejectedError } from "../session/native-session-storage";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
-import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
+import { decodeNativeEntry, parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import type {
 	SessionEntry,
 	SessionHeader,
@@ -315,6 +315,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 		selectors: Array<string | undefined>;
 		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
 		activateCandidate: ResolvedEngineExecution["activateCandidate"];
+		ruleEventPending?: string;
 		choice: ExecutorChoice;
 	};
 	leaseHeartbeat?: NodeJS.Timeout;
@@ -3046,6 +3047,7 @@ export class EngineRuntime {
 								}))],
 								transitions: [...parent.execution.choice.transitions, changed.payload as ExecutorChoice["transitions"][number]],
 							};
+							parent.execution.ruleEventPending = (changed.payload as ExecutorChoice["transitions"][number]).event_id;
 							this.#notifyEvents([changed]);
 							return true;
 						},
@@ -3054,7 +3056,10 @@ export class EngineRuntime {
 							if (!parent) throw new EngineTargetError("stale_target", "Executor binding disappeared after route admission");
 							// Persist and append before retry sends its first provider request. A nextTurn queue
 							// may not drain during fallback and is not evidence that the rule was delivered.
-							await this.#repairExecutorRuleMessages(parent, parent.execution.choice, parent.execution.config);
+							const eventId = parent.execution.ruleEventPending;
+							if (!eventId) throw new EngineTargetError("stale_target", "Fallback lost its committed rule event");
+							await this.#repairExecutorRuleMessages(parent, parent.execution.choice, parent.execution.config, eventId);
+							parent.execution.ruleEventPending = undefined;
 						},
 					},
 				},
@@ -5768,8 +5773,10 @@ export class EngineRuntime {
 		binding: LiveBinding,
 		choice: ExecutorChoice,
 		config: EngineExecutionConfiguration,
+		eventId?: string,
 	): Promise<void> {
-		const deltas = executorRuleReplay(config.instruction_sources, choice);
+		const replay = executorRuleReplay(config.instruction_sources, choice);
+		const deltas = eventId === undefined ? replay : replay.filter(delta => delta.eventId === eventId);
 		const delivered = new Set(
 			binding.session.sessionManager.getContextBranch()
 				.filter(entry => entry.type === "custom_message" && entry.customType === "executor-rules")
@@ -5778,6 +5785,35 @@ export class EngineRuntime {
 					return details?.attemptId === binding.attemptId && typeof details.eventId === "string" ? [details.eventId] : [];
 				}),
 		);
+		if (eventId === undefined && deltas.some(delta => !delivered.has(delta.eventId))) {
+			// The working context may have compacted these messages away. Read only bounded pages
+			// on this exact native branch/cut; absence from the working set is not absence from history.
+			const checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
+			if (!checkpoint.native || !checkpoint.leafEntryId)
+				throw new EngineTargetError("stale_target", "Rule repair requires its durable native history");
+			const pending = new Set(deltas.filter(delta => !delivered.has(delta.eventId)).map(delta => delta.eventId));
+			let cursor: string | undefined;
+			do {
+				const page = await this.store.storageClient.readContext({
+					familyId: checkpoint.native.familyId, generationId: checkpoint.native.generationId,
+					cutSeq: checkpoint.native.throughSeq, leafId: checkpoint.leafEntryId, cursor,
+					maxRecords: runtimeLimits.httpPageRecords, maxBytes: 1024 * 1024,
+				});
+				for (const entry of page.events) {
+					if (entry.kind !== "custom_message") continue;
+					const message = await decodeNativeEntry(entry, this.attachmentUploads.blobs);
+					if (message.type !== "custom_message" || message.customType !== "executor-rules") continue;
+					const details = message.details as { attemptId?: unknown; eventId?: unknown } | undefined;
+					if (details?.attemptId === binding.attemptId && typeof details.eventId === "string") {
+						delivered.add(details.eventId);
+						pending.delete(details.eventId);
+					}
+				}
+				if (page.nextCursor && page.nextCursor === cursor)
+					throw new EngineTargetError("source_unavailable", "Rule history cursor did not advance");
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor && pending.size);
+		}
 		for (const delta of deltas) {
 			if (delivered.has(delta.eventId)) continue;
 			const message = createCustomMessage(
