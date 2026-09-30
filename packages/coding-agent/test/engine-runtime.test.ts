@@ -3804,6 +3804,201 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.dispose();
 		}
 	});
+
+	it("rejects queued steer while held and only explicit Resume releases the same Attempt", async () => {
+		const promptStarted = Promise.withResolvers<void>();
+		const prompt = Promise.withResolvers<boolean>();
+		const delivered: string[] = [];
+		const mock = createMockModel({ responses: [async () => {
+			await prompt.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			session.steer = async message => {
+				delivered.push(message);
+			};
+			promptStarted.resolve();
+			return prompt.promise;
+		});
+		try {
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "held-steer-start", agentInstanceId: "held-steer-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/held-steer-agent",
+				executionId: "held-steer-execution", attemptId: "held-steer-attempt",
+			}, { cwd, principalId: "owner", input: "work" }));
+			await promptStarted.promise;
+			const queued = await runtime.enqueueInbox(started, {
+				sourceEventId: "queued-steer-item",
+				sourceType: "user",
+				body: "change course",
+				createdAt: Date.now(),
+			});
+			const paused = nextEngineEvent(runtime, "paused");
+			const hold = await runtime.pause({
+				...started,
+				commandId: "pause-before-steer",
+				initiator: { kind: "human" },
+				expectedIntentRevision: started.intentRevision,
+			});
+			prompt.resolve(true);
+			await paused;
+			await expect(
+				runtime.steer({
+					...started,
+					commandId: "steer-while-held",
+					queueId: queued.item.queueId,
+					expectedRevision: queued.item.revision,
+					mutationId: "consume-held-item",
+					expectedIntentRevision: hold.intentRevision,
+				}),
+			).rejects.toMatchObject({ code: "agent_busy" });
+			expect(delivered).toEqual([]);
+			expect(await runtime.readInbox(started, queued.item.queueId)).toMatchObject({
+				disposition: "pending",
+				revision: queued.item.revision,
+			});
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "paused" });
+			expect((await runtime.store.getBinding(started.agentInstanceId))?.manualHold).toBeTrue();
+			const resumed = await runtime.resume({
+				...started,
+				commandId: "explicit-resume-held-steer",
+				initiator: { kind: "human" },
+				expectedIntentRevision: hold.intentRevision,
+			});
+			expect(resumed).toMatchObject({ manualHold: false, intentRevision: hold.intentRevision + 1 });
+			await runtime.drain();
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "completed" });
+			expect(delivered).toEqual([]);
+			expect((await runtime.store.pendingEvents()).some(event => event.kind === "steered")).toBeFalse();
+		} finally {
+			prompt.resolve(true);
+			await runtime.dispose();
+		}
+	}, 60000);
+
+	it("pauses and resumes the same child Attempt without waking its parent", async () => {
+		const prompts = new Map<string, PromiseWithResolvers<boolean>>();
+		const mock = createMockModel({ responses: [async () => {
+			// Both parent and child share this handler; each waits on its own gate.
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, session => {
+			const prompt = Promise.withResolvers<boolean>();
+			const agentId = session.getAgentId();
+			if (!agentId) throw new Error("Engine test session has no agent id");
+			prompts.set(agentId, prompt);
+			return prompt.promise;
+		});
+		const parent = await runtime.start(startRequest(execution, {
+			commandId: "command-parent", agentInstanceId: "parent-agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/parent-agent",
+			executionId: "execution-parent", attemptId: "attempt-parent",
+		}, { cwd, principalId: "owner", input: "wait for children" }));
+		const parentSession = runtime.agentRegistry.get(parent.engineAgentId)?.session;
+		if (!parentSession) throw new Error("parent session is unavailable");
+		let parentSessionEvents = 0;
+		parentSession.subscribe(() => parentSessionEvents++);
+
+		const sources: EngineControlInitiator[] = [
+			{ kind: "human" },
+			{
+				kind: "agent",
+				agentInstanceId: "controller-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/controller-agent",
+			},
+		];
+		for (const [index, initiator] of sources.entries()) {
+			const child = await runtime.start({
+				...startRequest(execution, {
+					commandId: `command-child-${index}`, agentInstanceId: `child-agent-${index}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/runtime-test/agents/child-agent-${index}`,
+					executionId: `execution-child-${index}`, attemptId: `attempt-child-${index}`,
+				}, { cwd, principalId: "owner", input: "work" }),
+				parentAgentInstanceId: "parent-agent",
+			});
+			const parentEventsBefore = (await runtime.store.pendingEvents()).filter(
+				event => event.agentInstanceId === "parent-agent",
+			);
+			const parentSnapshot = {
+				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
+				unread: runtime.ircBus.unreadCount(parent.engineAgentId),
+				sessionEvents: parentSessionEvents,
+				messages: parentSession.messages.length,
+				eventSeq: parentEventsBefore.map(event => event.seq),
+			};
+			const paused = nextEngineEvent(runtime, "paused");
+			await runtime.pause({ ...child, commandId: `pause-child-${index}`, initiator });
+			prompts.get(child.engineAgentId)?.resolve(true);
+			const pausedEvent = await paused;
+
+			const pausedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(pausedAttempt).toMatchObject({ state: "paused", transcript_revision: 2 });
+			expect(runtime.getBinding(child.agentInstanceId)).toMatchObject({
+				bindingId: child.bindingId,
+				attemptId: child.attemptId,
+			});
+			expect(pausedEvent.payload).toMatchObject({
+				initiator,
+				attemptState: "paused",
+				controlReadiness: { pause: false, resume: true, steer: false, cancel: true },
+				transcriptCheckpoint: { revision: 2 },
+			});
+			expect({
+				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
+				unread: runtime.ircBus.unreadCount(parent.engineAgentId),
+				sessionEvents: parentSessionEvents,
+				messages: parentSession.messages.length,
+				eventSeq: (await runtime.store.pendingEvents())
+					.filter(event => event.agentInstanceId === "parent-agent")
+					.map(event => event.seq),
+			}).toEqual(parentSnapshot);
+
+			const completed = nextEngineEvent(runtime, "completed");
+			await runtime.resume({ ...child, commandId: `resume-child-${index}`, initiator });
+			const completedEvent = await completed;
+			expect(completedEvent.attemptId).toBe(child.attemptId);
+			expect(completedEvent.payload).toMatchObject({ transcriptCheckpoint: { revision: 3 } });
+			const completedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(completedAttempt).toMatchObject({ state: "completed", transcript_revision: 3 });
+			expect(Number(completedAttempt?.transcript_byte_boundary)).toBeGreaterThanOrEqual(
+				Number(pausedAttempt?.transcript_byte_boundary),
+			);
+			const resumedEvent = (await runtime.store.pendingEvents()).find(
+				event => event.kind === "resumed" && event.attemptId === child.attemptId,
+			);
+			expect(resumedEvent?.payload).toMatchObject({ initiator, attemptState: "running" });
+		}
+
+		prompts.get(parent.engineAgentId)?.resolve(true);
+		await runtime.drain();
+		await runtime.dispose();
+	}, 60000);
+
+	it("completes a native prompt when user persistence and history checkpoints share the lane", async () => {
+		const mock = createMockModel({ responses: [{ content: ["checkpoint answer"] }] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, undefined);
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "checkpoint-cycle-start", agentInstanceId: "checkpoint-cycle-agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/checkpoint-cycle-agent",
+			executionId: "checkpoint-cycle-execution", attemptId: "checkpoint-cycle-attempt",
+		}, { cwd, principalId: "owner", input: "checkpoint question" }));
+		// Use the real prompt path: message_end precedes native user append. A mocked
+		// dispatch that appends directly never exercises the two checkpoint queues.
+		await withTimeout(runtime.drain(), 3_000, "User checkpoint deadlocked with the history lane");
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		const history = await nativeHistory(runtime, started.agentInstanceId);
+		expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
+			"checkpoint question",
+		]);
+		expect(history.entries.filter(entry => entry.role === "assistant").map(entry => entry.text)).toEqual([
+			"checkpoint answer",
+		]);
+		const events = await runtime.store.pendingEvents();
+		expect(events.some(event => event.kind === "history_checkpoint")).toBeTrue();
+	}, 10_000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
