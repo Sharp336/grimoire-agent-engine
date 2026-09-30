@@ -1534,7 +1534,7 @@ export class RocksEngineMutations {
 		hash?: string,
 		required = false,
 	): Promise<void> {
-		const row = await tx.get<RocksCommand>("command", id);
+		let row = await tx.get<RocksCommand>("command", id);
 		if (!row) {
 			if (required) throw new Error(`Command ${id} was not admitted`);
 			return;
@@ -1545,6 +1545,18 @@ export class RocksEngineMutations {
 			if (storageCanonicalJson(row.receipt) !== storageCanonicalJson(receipt))
 				throw new EngineCommandConflictError(id, "receipt");
 			return;
+		}
+		if (row.operation === "start" && row.routing?.action === "enqueue" && row.identity.attemptId &&
+			row.identity.agentInstanceRef && row.identity.principalId) {
+			await stageQueueCancel(tx, {
+				principalId: row.identity.principalId,
+				deviceId: row.identity.deviceId,
+				commandId: id,
+				agentInstanceRef: row.identity.agentInstanceRef,
+				attemptId: row.identity.attemptId,
+			}, receipt.outcome === "rejected" ? "refused" : "cancelled",
+			String(receipt.detail?.code ?? "command_settled"));
+			row = (await tx.get<RocksCommand>("command", id))!;
 		}
 		if (row.pending_accounted)
 			await this.pendingBudget(tx, row.agent_instance_id, Boolean(row.control_admission), -1, -row.payload_bytes);

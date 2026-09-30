@@ -27,7 +27,7 @@ import type {
 	EngineSemanticBindingSnapshot,
 	EngineStartRequest,
 } from "./contracts";
-import { EngineBindingPendingError, EngineTargetError, validateCommandContext, validateSemanticBinding } from "./contracts";
+import { EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, validateCommandContext, validateSemanticBinding } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
@@ -517,16 +517,20 @@ export class NatsEngineAdapter {
 			}
 			claimed = true;
 			const detail = await this.#dispatchCommand(command);
-			await this.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
-				outcome: "applied",
-				...(detail && typeof detail === "object" && !Array.isArray(detail)
-					? { detail: detail as Record<string, unknown> }
-					: {}),
-			});
+			// An accepted Start already settled itself in the same mutation as its lease and Attempt.
+			const committed = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
+			if (committed.status !== "replay") {
+				await this.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
+					outcome: "applied",
+					...(detail && typeof detail === "object" && !Array.isArray(detail)
+						? { detail: detail as Record<string, unknown> }
+						: {}),
+				});
+			}
 			this.#commandFailures.delete(command.commandId);
 			message.ack();
 		} catch (error) {
-			if (error instanceof EngineBindingPendingError) {
+			if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 				if (claimed && identity) await this.#releaseClaim(identity);
 				message.nak(1_000);
 				return;
@@ -1028,6 +1032,7 @@ export async function dispatchEngineCommand(options: {
 						expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 					} as EngineStartRequest,
 				);
+				if (started.queueId && !started.executorChoice) throw new EngineRoutingQueuedError(started.queueId);
 				return {
 					phase: queued ? "consumed" : "applied",
 					manualHold: started.manualHold ?? false,
@@ -1039,7 +1044,8 @@ export async function dispatchEngineCommand(options: {
 					continuationDigest: started.continuationDigest,
 				};
 			} catch (error) {
-				if (error instanceof EngineTargetError || error instanceof EngineBindingPendingError) throw error;
+				if (error instanceof EngineTargetError || error instanceof EngineBindingPendingError ||
+					error instanceof EngineRoutingQueuedError) throw error;
 				throw new EngineTargetError(
 					"launch_failed",
 					publicFailureMessage("Agent session initialization failed", error),

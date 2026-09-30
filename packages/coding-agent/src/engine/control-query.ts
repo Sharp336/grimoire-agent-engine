@@ -8,6 +8,7 @@ import {
 	type EngineBindingGate,
 	type EngineBindingResult,
 	EngineBindingPendingError,
+	EngineRoutingQueuedError,
 	type EngineEvent,
 	type EngineInboxMutation,
 	type EngineInboxSource,
@@ -761,7 +762,7 @@ export async function runEngineCommand(
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, receipt);
 		return receipt;
 	} catch (error) {
-		if (error instanceof EngineBindingPendingError) {
+		if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
 			throw error;
 		}

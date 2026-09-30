@@ -64,6 +64,14 @@ export class EngineBindingPendingError extends Error {
 	}
 }
 
+/** A capacity-queued Start remains received until its exact command can acquire a lease. */
+export class EngineRoutingQueuedError extends Error {
+	readonly code = "routing_queued";
+	constructor(readonly queueId: string) {
+		super(`Start is waiting for routing capacity in ${queueId}`);
+	}
+}
+
 export interface EngineBindingGate {
 	bindingSnapshot: EngineSemanticBindingSnapshot;
 	phase: "open" | "preparing" | "committed_closed";

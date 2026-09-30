@@ -8,7 +8,7 @@ import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
-import { type EngineApprovalDecision, type EngineSemanticBindingSnapshot, EngineBindingPendingError, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, sameSemanticBinding, validateSemanticBinding } from "./contracts";
+import { type EngineApprovalDecision, type EngineSemanticBindingSnapshot, EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { NatsEngineAdapter } from "./nats-adapter";
@@ -282,7 +282,7 @@ export async function launchLocalEngineChild(
 				await runEngineCommand(runner, command);
 				break;
 			} catch (error) {
-				if (!(error instanceof EngineBindingPendingError)) throw error;
+				if (!(error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError)) throw error;
 				await waitForEngineWake(runtime.store.changeSignal(), 1_000, request.signal);
 			}
 		}
