@@ -1,13 +1,14 @@
 import type {
-	EngineBindingSnapshot,
 	EngineExecutionConfiguration,
 	EngineSemanticBindingSnapshot,
 	EngineTarget,
+	EngineStartRequest,
+	EngineStartResult,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
-import { EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { EngineBindingPendingError, EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import type { ApprovalDecision } from "@oh-my-pi/pi-coding-agent/engine/contracts";
-import type { EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
+import type { EngineRuntime, EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { type EngineCommandEnvelope, engineCommandIdentity } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ResolvedEngineExecution } from "@oh-my-pi/pi-coding-agent/engine/execution-resolver";
@@ -27,8 +28,9 @@ export interface AdmittedExecutionFixture {
 	/** Approval decisions captured per decision command for the fixture approval verifier. */
 	decisions: Map<string, ApprovalDecision>;
 	setModelOverride(override: Record<string, unknown>): void;
+	captureCommand(command: EngineCommandEnvelope): void;
 	optionsFor(runtimeOptions: {
-		deviceId: string;
+		deviceId?: string;
 		sessionDefaults?: EngineRuntimeOptions["sessionDefaults"];
 	}): Pick<
 		EngineRuntimeOptions,
@@ -77,6 +79,8 @@ export function admittedExecution(
 		continuationPolicy?: "exact" | "fresh";
 		fallbackModel?: Model | null;
 		scopeAgents?: number;
+		rules?: EngineExecutionConfiguration["instruction_sources"]["rules"];
+		stableDependencyDigest?: string;
 	} = {},
 ): AdmittedExecutionFixture {
 	const taskRef = options.taskRef ?? "grimoire://tasks/grimoire/runtime-test";
@@ -129,23 +133,24 @@ export function admittedExecution(
 				min_context: null, min_output: null, latency_ceiling_ms: null, min_effort: null,
 				service_tier: "standard", downgrade: "forbidden", pin: null,
 				require_trusted_provider: true,
-				fallback_mode: options.fallbackModel ? "same_model" : "none",
+				fallback_mode: options.fallbackModel ? "scope" : "none",
 			},
 			output_schema: null, limits: unlimitedLimits,
 		},
 		routes: { routes },
 		continuationPolicy: options.continuationPolicy ?? "exact",
 		continuationConfiguration: continuation({ spawn, limits: unlimitedLimits, ...options.continuation }),
-		stableDependencyDigest: hash("engine-runtime-test-dependency"),
+		stableDependencyDigest: options.stableDependencyDigest ?? hash("engine-runtime-test-dependency"),
 		sessionDefaults: {},
 		instruction_sources: {
 			facts: { binding: "task", scope: [taskRef], os: null, runtime: "artel-engine", engine_version: null },
-			rules: [], skills: [],
+			rules: options.rules ?? [], skills: [],
 		},
 		record_revisions: {},
 		routingLimits: {
 			scopes: [{ scope_ref: taskRef, agents: scopeAgents, by_tier: [], consultations: null }],
-			accounts: { "gctx:aaaaaaaaaaaaaaaa": scopeAgents }, providers: { [model.provider]: scopeAgents },
+			accounts: { "gctx:aaaaaaaaaaaaaaaa": scopeAgents },
+			providers: Object.fromEntries(routes.map(route => [route.provider_id, scopeAgents])),
 		},
 		scope_revision: hash("engine-runtime-test-scope"),
 		roster_revision: hash("engine-runtime-test-roster"),
@@ -154,33 +159,45 @@ export function admittedExecution(
 	const dispatchHash = hash(config.dispatch);
 	const receipts = new Map<string, EngineCommandEnvelope>();
 	const decisions = new Map<string, ApprovalDecision>();
+	const captureCommand = (command: EngineCommandEnvelope): void => {
+		const receiptId = command.payload.originReceiptId;
+		if (typeof receiptId !== "string") throw new EngineTargetError("invalid_request", "Fixture command needs its origin receipt");
+		const retained = receipts.get(receiptId);
+		if (retained && storageCanonicalJson(retained) !== storageCanonicalJson(command))
+			throw new EngineTargetError("stale_target", "Fixture origin receipt is immutable");
+		receipts.set(receiptId, structuredClone(command));
+	};
 	let modelOverride: Record<string, unknown> = {};
 	const optionsFor = (runtimeOptions: {
-		deviceId: string;
+		deviceId?: string;
 		sessionDefaults?: EngineRuntimeOptions["sessionDefaults"];
 	}): Pick<
 		EngineRuntimeOptions,
 		"deviceId" | "resolveExecution" | "verifyOriginReceipt" | "verifyApprovalReceipt"
 	> => ({
-		deviceId: "engine-runtime-test-device",
+		deviceId: runtimeOptions.deviceId ?? "engine-runtime-test-device",
 		resolveExecution: async (execution, frozen): Promise<ResolvedEngineExecution> => {
 			if (hash(execution.dispatch) !== dispatchHash ||
-				frozen.length !== routes.length ||
-				frozen.some((candidate, index) => candidate.route_ref !== routes[index]!.route_ref))
+				frozen.some(candidate => !routes.some(route => candidate.route_ref === route.route_ref)))
 				throw new EngineTargetError("stale_target", "Fixture route differs from admitted execution");
+			const selected = [model, options.fallbackModel].find(candidate =>
+				candidate?.id === frozen[0]?.model_id && candidate?.provider === frozen[0]?.provider_id);
+			if (!selected) throw new EngineTargetError("stale_target", "Fixture selected model is outside its frozen roster");
 			return {
 				options: {
-					model, modelRegistry,
+					model: selected, modelRegistry,
 					...(runtimeOptions.sessionDefaults?.settings
 						? { settings: runtimeOptions.sessionDefaults.settings }
 						: {}),
 					...modelOverride,
 				},
-				selectors: routes.map(candidate => `${candidate.provider}/${candidate.modelId}`),
+				selectors: frozen.map(candidate => `${candidate.provider}/${candidate.modelId}`),
 				verifyCandidate: async index => {
-					if (index >= routes.length) throw new EngineTargetError("stale_target", "Unknown fixture route");
+					if (index < 0 || index >= frozen.length) throw new EngineTargetError("stale_target", "Unknown fixture route");
+					return { billing_pool_id: frozen[index].billing_pool_id, billing_pool_basis: frozen[index].billing_pool_basis };
 				},
 				activateCandidate: () => {},
+				setBillingPoolChanged: () => {}, // Fixture routes execute locally, without hosted billing material.
 				dispose: () => {},
 			};
 		},
@@ -191,10 +208,13 @@ export function admittedExecution(
 				command.attemptId !== identity.attemptId || command.principalId !== identity.principalId)
 				throw new EngineTargetError("stale_target", "Origin differs from the exact fixture command");
 			// Return the exact captured binding snapshot, never a synthesized one.
-			if (!command.bindingSnapshot)
+			if (command.op === "start" && !command.bindingSnapshot)
 				throw new EngineTargetError("invalid_request", "Fixture Start command has no captured binding snapshot");
+			const { originReceiptId: _receipt, ...payload } = command.payload;
 			return {
-				verified: true, dispatchHash, bindingSnapshot: command.bindingSnapshot,
+				verified: true, dispatchHash: command.op === "start" ? String(command.payload.dispatchHash) : undefined,
+				bindingSnapshot: command.bindingSnapshot,
+				commandHash: hash({ ...command, payload }),
 				authContextId: "engine-runtime-test-auth", approvalSettings: null, specialApproval: null,
 			};
 		},
@@ -207,6 +227,7 @@ export function admittedExecution(
 	});
 	return {
 		config, dispatchRef, dispatchHash, taskRef, receipts, decisions,
+		captureCommand,
 		setModelOverride: override => {
 			modelOverride = override;
 		},
@@ -259,7 +280,7 @@ export function startRequest(
 		principalId: string;
 		input?: string;
 		parentAgentInstanceId?: string;
-		historyEdit?: import("@oh-my-pi/pi-coding-agent/engine/contracts").EngineStartRequest["historyEdit"];
+		historyEdit?: EngineStartRequest["historyEdit"];
 		attachmentUploadIds?: string[];
 		clientMessageId?: string;
 		context?: string;
@@ -270,21 +291,12 @@ export function startRequest(
 		mutationId?: string;
 		expectedIntentRevision?: number;
 		explicitContinue?: boolean;
+		bindingSnapshot?: EngineSemanticBindingSnapshot;
+		parentAgentInstanceRef?: string;
 	},
-): import("@oh-my-pi/pi-coding-agent/engine/contracts").EngineStartRequest {
+): EngineStartRequest {
 	const originReceiptId = `origin:${identity.commandId}`;
-	const command: EngineCommandEnvelope = {
-		schema: "grimoire.engine.command.v1", op: "start", commandId: identity.commandId,
-		deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
-		engineGeneration: 0, agentInstanceId: identity.agentInstanceId,
-		agentInstanceRef: identity.agentInstanceRef,
-		bindingSnapshot: semanticBinding(identity.agentInstanceRef, execution.taskRef),
-		executionId: identity.executionId, attemptId: identity.attemptId, authorityGeneration: 1,
-		principalId: payload.principalId, issuedAt: Date.now(),
-		payload: { cwd: payload.cwd },
-	};
-	execution.receipts.set(originReceiptId, command);
-	const { principalId: _p, cwd: _c, ...rest } = payload;
+	const { principalId: _p, cwd: _c, bindingSnapshot, ...rest } = payload;
 	return {
 		...rest,
 		commandId: identity.commandId,
@@ -297,10 +309,38 @@ export function startRequest(
 		originReceiptId,
 		agentInstanceId: identity.agentInstanceId,
 		agentInstanceRef: identity.agentInstanceRef,
-		bindingSnapshot: semanticBinding(identity.agentInstanceRef, execution.taskRef),
+		bindingSnapshot: bindingSnapshot ?? semanticBinding(identity.agentInstanceRef, execution.taskRef),
 		executionId: identity.executionId,
 		attemptId: identity.attemptId,
 		authorityGeneration: 1,
 		cwd: payload.cwd,
 	};
+}
+
+/** Capture the exact transport envelope; duplicates retain their original generation and timestamp. */
+export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest): EngineCommandEnvelope {
+	const { commandId, agentInstanceId, agentInstanceRef, bindingSnapshot, parentAgentInstanceId, parentAgentInstanceRef,
+		executionId, attemptId, authorityGeneration, principalId, ...payload } = request;
+	const prior = execution.receipts.get(request.originReceiptId);
+	const command: EngineCommandEnvelope = {
+		schema: "grimoire.engine.command.v1", op: "start", commandId,
+		deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+		engineGeneration: prior?.engineGeneration ?? runtime.engineGeneration,
+		issuedAt: prior?.issuedAt ?? Date.now(), agentInstanceId, agentInstanceRef, bindingSnapshot,
+		parentAgentInstanceId, parentAgentInstanceRef, executionId, attemptId, authorityGeneration, principalId, payload,
+	};
+	execution.captureCommand(command);
+	return command;
+}
+
+/** The same native admission followed by Start that the Engine command transports perform. */
+export async function admitStart(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest): Promise<EngineStartResult> {
+	const command = startEnvelope(runtime, execution, request);
+	const admission = await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+	if (admission.status === "binding_pending") throw new EngineBindingPendingError();
+	if (admission.status === "replay" && admission.receipt.outcome === "rejected")
+		throw Object.assign(new Error(String(admission.receipt.detail?.message ?? "Start was rejected")), {
+			code: admission.receipt.detail?.code ?? "invalid_request",
+		});
+	return runtime.start(request);
 }
