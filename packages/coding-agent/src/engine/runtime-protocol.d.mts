@@ -351,7 +351,7 @@ export type InstructionRule = {
 };
 
 export type InstructionFacts = {
-	"binding": Array<"task" | "step" | "consultation" | "automation">;
+	"binding": "task" | "step" | "consultation" | "automation";
 	"scope": Array<string>;
 	"os": "windows" | "linux" | "darwin" | null;
 	"runtime": "artel-engine";
@@ -365,6 +365,37 @@ export type InstructionSources = {
 	"facts": InstructionFacts;
 	"rules": Array<InstructionRule>;
 	"skills": Array<ChoiceProvenance>;
+};
+
+export type UsageProbeBindingGet = {
+	"principalId": string;
+	"accountRef": string;
+};
+
+export type UsageProbeBindingSet = {
+	"principalId": string;
+	"accountRef": string;
+	"expectedRevision": number;
+	"modulePath": string | null;
+};
+
+export type UsageProbeBindingResult = {
+	"accountRef": string;
+	"modulePath": string | null;
+	"revision": number;
+};
+
+export type UsageProbeRun = {
+	"principalId": string;
+	"accountRef": string;
+	"kind": "builtin" | "module";
+	"account": Record<string, unknown>;
+	"credential": Record<string, unknown> | null;
+};
+
+export type UsageProbeRunResult = {
+	"status": string;
+	"observations": Array<unknown>;
 };
 
 export type ActualCost = {

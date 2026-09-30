@@ -231,6 +231,18 @@
       "runtime.summary": {
         "request": "nativeSummaryRequest",
         "response": "summaryRead"
+      },
+      "usage_probe_binding.get": {
+        "request": "usageProbeBindingGet",
+        "response": "usageProbeBindingResult"
+      },
+      "usage_probe_binding.set": {
+        "request": "usageProbeBindingSet",
+        "response": "usageProbeBindingResult"
+      },
+      "usage_probe.run": {
+        "request": "usageProbeRun",
+        "response": "usageProbeRunResult"
       }
     },
     "httpReads": {
@@ -273,6 +285,55 @@
     }
   },
   "$defs": {
+    "usageProbeBindingGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "accountRef"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "usageProbeBindingSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "accountRef", "expectedRevision", "modulePath"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "integer", "minimum": 0 },
+        "modulePath": { "type": ["string", "null"] }
+      }
+    },
+    "usageProbeBindingResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountRef", "modulePath", "revision"],
+      "properties": {
+        "accountRef": { "type": "string", "minLength": 1 },
+        "modulePath": { "type": ["string", "null"] },
+        "revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "usageProbeRun": {
+      "type": "object",
+      "required": ["principalId", "accountRef", "kind", "account", "credential"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["builtin", "module"] },
+        "account": { "type": "object" },
+        "credential": { "type": ["object", "null"] }
+      }
+    },
+    "usageProbeRunResult": {
+      "type": "object",
+      "required": ["status", "observations"],
+      "properties": {
+        "status": { "type": "string" },
+        "observations": { "type": "array" }
+      }
+    },
     "attachmentUploadIds": {
       "type": "array",
       "minItems": 1,
@@ -7781,6 +7842,145 @@
         "ref",
         "revision",
         "content_hash"
+      ],
+      "additionalProperties": false
+    },
+    "instructionSources": {
+      "type": "object",
+      "properties": {
+        "facts": {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "enum": [
+                "task",
+                "step",
+                "consultation",
+                "automation"
+              ]
+            },
+            "scope": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "os": {
+              "oneOf": [
+                {
+                  "enum": [
+                    "windows",
+                    "linux",
+                    "darwin"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "runtime": {
+              "const": "artel-engine"
+            },
+            "engine_version": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(>=)?\\d+\\.\\d+\\.\\d+$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "family": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "binding",
+            "scope",
+            "os",
+            "runtime",
+            "engine_version"
+          ],
+          "additionalProperties": false
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/instructionRule"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/choiceProvenance"
+          }
+        }
+      },
+      "required": [
+        "facts",
+        "rules",
+        "skills"
+      ],
+      "additionalProperties": false
+    },
+    "instructionRule": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "content_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "content": {
+          "type": "string"
+        },
+        "route_refs": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/artifactRef"
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "ref",
+        "revision",
+        "content_hash",
+        "content",
+        "route_refs"
       ],
       "additionalProperties": false
     },
@@ -19044,166 +19244,6 @@
           "additionalProperties": false
         }
       ]
-    },
-    "instructionRule": {
-      "type": "object",
-      "properties": {
-        "ref": {
-          "$ref": "#/$defs/artifactRef"
-        },
-        "revision": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 9007199254740991
-        },
-        "content_hash": {
-          "$ref": "#/$defs/hash"
-        },
-        "content": {
-          "type": "string",
-          "minLength": 1
-        },
-        "route_refs": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/artifactRef"
-              },
-              "minItems": 1,
-              "uniqueItems": true
-            }
-          ]
-        }
-      },
-      "required": [
-        "ref",
-        "revision",
-        "content_hash",
-        "content",
-        "route_refs"
-      ],
-      "additionalProperties": false
-    },
-    "instructionSources": {
-      "type": "object",
-      "properties": {
-        "facts": {
-          "type": "object",
-          "properties": {
-            "binding": {
-              "type": "array",
-              "items": {
-                "enum": [
-                  "task",
-                  "step",
-                  "consultation",
-                  "automation"
-                ]
-              },
-              "minItems": 1,
-              "uniqueItems": true
-            },
-            "scope": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "os": {
-              "oneOf": [
-                {
-                  "enum": [
-                    "windows",
-                    "linux",
-                    "darwin"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "runtime": {
-              "const": "artel-engine"
-            },
-            "engine_version": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "pattern": "^(>=)?\\d+\\.\\d+\\.\\d+$"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "provider": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "family": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "model": {
-              "oneOf": [
-                {
-                  "type": "string",
-                  "minLength": 1
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "binding",
-            "scope",
-            "os",
-            "runtime",
-            "engine_version"
-          ],
-          "additionalProperties": false
-        },
-        "rules": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/instructionRule"
-          }
-        },
-        "skills": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/choiceProvenance"
-          }
-        }
-      },
-      "required": [
-        "facts",
-        "rules",
-        "skills"
-      ],
-      "additionalProperties": false
     }
   }
 }

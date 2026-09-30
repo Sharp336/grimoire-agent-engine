@@ -20,6 +20,7 @@ export type {
 	ContinuationConfiguration, ContinuationDigestInput, ExecutionDigestInput, RoutingLimits,
 	NativeCompatibility, RosterRequest, ExecutorSettingsRequest, AutomationExecution,
 	ChoiceProvenance, InstructionRule, InstructionSources,
+	UsageProbeBindingGet, UsageProbeBindingResult, UsageProbeBindingSet, UsageProbeRun, UsageProbeRunResult,
 } from "./runtime-protocol.mjs";
 
 /** Immutable semantic scope admitted by Core/ClientHost, independent of transport generations. */
@@ -582,10 +583,40 @@ export class EngineTargetError extends Error {
 	}
 }
 
+/**
+ * Rule/skill provenance invariants that the JSON Schema cannot express:
+ * rule entries carry a non-null integer revision; skill entries carry a null
+ * revision; route rule refs are a subset of the admitted roster; route rules
+ * are at most 5 lines; (ref, content_hash) pairs are unique.
+ */
+export function validateInstructionSources(config: EngineExecutionConfiguration): void {
+	const sources = config.instruction_sources;
+	const routeRefs = new Set(config.routes.routes.map(route => route.route_ref));
+	const seen = new Set<string>();
+	for (const skill of sources.skills) {
+		if (skill.revision !== null)
+			throw new EngineTargetError("invalid_request", "Skill provenance revision must be null");
+	}
+	for (const rule of sources.rules) {
+		if (!Number.isSafeInteger(rule.revision) || rule.revision < 1)
+			throw new EngineTargetError("invalid_request", "Rule provenance revision must be a positive integer");
+		if (rule.route_refs !== null) {
+			if (rule.route_refs.some(ref => !routeRefs.has(ref)))
+				throw new EngineTargetError("invalid_request", "Rule route_refs must be a subset of the admitted roster");
+			if (rule.content.split("\n").length > 5)
+				throw new EngineTargetError("invalid_request", "Route rules are limited to 5 lines");
+		}
+		const key = `${rule.ref}\0${rule.content_hash}`;
+		if (seen.has(key)) throw new EngineTargetError("invalid_request", "Rule provenance must be unique");
+		seen.add(key);
+	}
+}
+
 export function validateStartRequest(request: EngineStartRequest): void {
 	validateCommandContext(request.context);
 	validateSemanticBinding(request.bindingSnapshot, request.agentInstanceRef);
 	validateRuntimeValue("engineExecutionConfiguration", request.executionConfiguration);
+	validateInstructionSources(request.executionConfiguration);
 	validateRuntimeValue("artifactRef", request.dispatchRef);
 	validateRuntimeValue("hash", request.dispatchHash);
 	validateRuntimeValue("id", request.originReceiptId);

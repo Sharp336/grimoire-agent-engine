@@ -1790,6 +1790,7 @@ export class TurnRecovery {
 			return false;
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		await this.#turnRetryPolicy?.orderedRouteFallback?.afterApply?.(selector.raw);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
@@ -1916,6 +1917,8 @@ export class TurnRecovery {
 	 * Requires the base model to exist in the registry.
 	 */
 	isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
+		// Engine-owned routes never bypass their frozen candidates/current fences.
+		if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		if (message.stopReason !== "error") return false;
@@ -1947,6 +1950,8 @@ export class TurnRecovery {
 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
+		// Engine-owned routes fall back only through their frozen orderedRouteFallback chain.
+		if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -1983,6 +1988,9 @@ export class TurnRecovery {
 	 * model is not a fast variant, the base id is missing, or it has no key.
 	 */
 	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
+		// Defense in depth: even a future caller that skips eligibility cannot bypass
+		// an Engine-owned route.
+		if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
@@ -2298,8 +2306,10 @@ export class TurnRecovery {
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
 			// best-effort, degrade to Standard on failure) and triggers on hard router
-			// errors the generic retry classifier would otherwise reject.
-			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
+			// errors the generic retry classifier would otherwise reject. An
+			// Engine-owned route never bypasses its frozen candidates/current fences.
+			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback &&
+				!this.#turnRetryPolicy?.orderedRouteFallback) {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
 			if (switchedModel && !switchedRoute) {

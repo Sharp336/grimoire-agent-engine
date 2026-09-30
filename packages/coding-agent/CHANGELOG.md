@@ -4,6 +4,9 @@
 
 ### Added
 
+- Engine executor rules (rev5 typed `grimoire.rule.v1` slice): ordered L1 instructions rendered before L2/L3 from the immutable admitted selection; route fallback persists its rule delta atomically with the route transition and injects one hidden `executor-rules` message after the model change; restart repair recomputes deltas and fails stale on mismatch; Engine-only `engineContextProjection` hides prior Attempt deltas and rebuilds one authoritative current-rules block after compaction; Fireworks-fast/hard-error fallbacks cannot bypass Engine-owned routes; `capabilities` reports `engineVersion`.
+- Runtime protocol 17 / storage protocol 21 amended: `choiceProvenance.revision` is nullable for skill provenance; new `instructionSources`/`instructionRule` defs; `engineExecutionConfiguration.instruction_sources` is required; usage probe schema is canonical.
+
 - Enabled `agent_binding.v1` on the unchanged runtime16 contract: installation-verified owned Starts, durable prepare/census/adopt/activate/abort gates, installation-scoped hosted localization, and fresh native context after same-installation semantic rebind. Legacy project bindings remain immutable.
 
 ### Removed

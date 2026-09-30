@@ -121,6 +121,8 @@ export interface TurnRetryPolicy {
 	orderedRouteFallback?: {
 		selectors: readonly string[];
 		beforeApply(selector: string, signal?: AbortSignal): Promise<boolean>;
+		/** Fires after the model change is durably recorded; injects follow-up state (rule deltas). */
+		afterApply?(selector: string): Promise<void>;
 	};
 }
 
