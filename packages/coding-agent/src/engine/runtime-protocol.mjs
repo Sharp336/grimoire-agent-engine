@@ -63,6 +63,15 @@ const projectionLimits = {
 function validProjection(name, value) {
   if (name === 'billingPool' && ['window', 'corp_quota'].includes(value.kind) && value.reserve > 1) return false;
   if (name === 'requestedExecution' && (value.parent_attempt_id === null) !== (value.parent_binding_revision === null)) return false;
+  if (name === 'immutableAttemptStart' || name === 'engineStartPayload') {
+    const dispatch = value.executionConfiguration.dispatch;
+    const special = dispatch.special_ref;
+    const outer = value.specialRef;
+    if (value.executionKind !== dispatch.execution_kind || (special === null) !== (outer === null)
+      || (special !== null && (outer.definitionRef !== special.definition_ref
+        || outer.revision !== special.definition_revision
+        || outer.occurrenceOrCallId !== (special.occurrence_id ?? special.call_id)))) return false;
+  }
   if (name === 'selectedExecutor' && (value.basis === 'order') !== (value.order_match !== null)) return false;
   if (name === 'approvalDecision' && value.decided_by.kind === 'human' && value.decision === 'approve_always') return false;
   if (name === 'approvalRequest' && value.status === 'waiting_human_paused'

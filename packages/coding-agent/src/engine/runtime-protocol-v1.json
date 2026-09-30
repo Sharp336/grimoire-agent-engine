@@ -6054,6 +6054,10 @@
       "type": "string",
       "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$"
     },
+    "automationRef": {
+      "type": "string",
+      "pattern": "^grimoire://automations/[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?/[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?(?![\\s\\S])"
+    },
     "revision": {
       "type": "integer",
       "minimum": 0,
@@ -6473,7 +6477,7 @@
               "const": "automation"
             },
             "definition_ref": {
-              "$ref": "#/$defs/artifactRef"
+              "$ref": "#/$defs/automationRef"
             },
             "definition_revision": {
               "type": "integer",
@@ -7039,7 +7043,7 @@
                   "const": "automation"
                 },
                 "definition_ref": {
-                  "$ref": "#/$defs/artifactRef"
+                  "$ref": "#/$defs/automationRef"
                 },
                 "definition_revision": {
                   "type": "integer",
@@ -9776,7 +9780,14 @@
       "type": "object",
       "properties": {
         "definitionRef": {
-          "$ref": "#/$defs/artifactRef"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/automationRef"
+            },
+            {
+              "$ref": "#/$defs/artifactRef"
+            }
+          ]
         },
         "revision": {
           "type": "integer",
@@ -13621,24 +13632,31 @@
           "additionalProperties": false,
           "properties": {
             "materializer": {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "maxLength": 16000,
-                  "minLength": 1,
-                  "type": "string"
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "maxLength": 16000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxBytes": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "maxBytes"
+                  ],
+                  "type": "object"
                 },
-                "maxBytes": {
-                  "maximum": 9007199254740991,
-                  "minimum": 1,
-                  "type": "integer"
+                {
+                  "type": "null"
                 }
-              },
-              "required": [
-                "kind",
-                "maxBytes"
-              ],
-              "type": "object"
+              ]
             },
             "schema": {
               "type": "object"
@@ -15511,24 +15529,31 @@
           "additionalProperties": false,
           "properties": {
             "materializer": {
-              "additionalProperties": false,
-              "properties": {
-                "kind": {
-                  "maxLength": 16000,
-                  "minLength": 1,
-                  "type": "string"
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "maxLength": 16000,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "maxBytes": {
+                      "maximum": 9007199254740991,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "maxBytes"
+                  ],
+                  "type": "object"
                 },
-                "maxBytes": {
-                  "maximum": 9007199254740991,
-                  "minimum": 1,
-                  "type": "integer"
+                {
+                  "type": "null"
                 }
-              },
-              "required": [
-                "kind",
-                "maxBytes"
-              ],
-              "type": "object"
+              ]
             },
             "schema": {
               "type": "object"

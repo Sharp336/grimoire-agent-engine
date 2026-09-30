@@ -41,6 +41,7 @@ export type IndexedQuestionAnswer = {
 };
 
 export type ArtifactRef = string;
+export type AutomationRef = `grimoire://automations/${string}/${string}`;
 
 export type Revision = number;
 
@@ -113,7 +114,7 @@ export type PresetReference = {
 
 export type SpecialRef = {
 	"kind": "automation";
-	"definition_ref": ArtifactRef;
+	"definition_ref": AutomationRef;
 	"definition_revision": number;
 	"occurrence_id": string;
 } | {
@@ -210,7 +211,7 @@ export type Dispatch = {
 	"execution_kind": "automation";
 	"special_ref": {
 		"kind": "automation";
-		"definition_ref": ArtifactRef;
+		"definition_ref": AutomationRef;
 		"definition_revision": number;
 		"occurrence_id": string;
 	};
@@ -723,7 +724,7 @@ export type ExecutionDigestInput = {
 };
 
 export type StartSpecialRef = {
-	"definitionRef": ArtifactRef;
+	"definitionRef": AutomationRef | `gctx:${string}`;
 	"revision": number;
 	"occurrenceOrCallId": string;
 };
@@ -1467,7 +1468,7 @@ export type Consultant = {
 		"materializer": {
 			"kind": string;
 			"maxBytes": number;
-		};
+		} | null;
 		"schema": Record<string, unknown>;
 	};
 	"instructions": string;
@@ -1759,7 +1760,7 @@ export type ConsultantRequest = {
 		"materializer": {
 			"kind": string;
 			"maxBytes": number;
-		};
+		} | null;
 		"schema": Record<string, unknown>;
 	};
 	"instructions": string;
