@@ -15,6 +15,7 @@ import {
 	active,
 	admittedFixtureStart,
 	admittedExecutionFixture,
+	binding,
 	command,
 	eventsRequest,
 	identity,
