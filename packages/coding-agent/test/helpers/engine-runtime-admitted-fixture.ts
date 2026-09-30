@@ -5,7 +5,7 @@ import type {
 	EngineStartRequest,
 	EngineStartResult,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
-import { EngineBindingPendingError, EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { EngineBindingPendingError, EngineTargetError, validateStartRequest } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import type { ApprovalDecision } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import type { EngineRuntime, EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { type EngineCommandEnvelope, engineCommandIdentity } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
@@ -16,6 +16,7 @@ import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-
 import { semanticBinding } from "./runtime-v1-rocks-fixture";
 
 const hash = (value: unknown) => `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
+const fixtures = new WeakMap<EngineExecutionConfiguration, AdmittedExecutionFixture>();
 
 export interface AdmittedExecutionFixture {
 	/** Complete admitted typed execution; every Start consumes it read-only. */
@@ -230,7 +231,7 @@ export function admittedExecution(
 			return { verified: true, approvalDecision: decision, expectedInputRevision: null };
 		},
 	});
-	return {
+	const fixture: AdmittedExecutionFixture = {
 		config, dispatchRef, dispatchHash, taskRef, receipts, decisions,
 		captureCommand,
 		setModelOverride: override => {
@@ -238,6 +239,8 @@ export function admittedExecution(
 		},
 		optionsFor,
 	};
+	fixtures.set(config, fixture);
+	return fixture;
 }
 
 /** An approval decision carrying the exact command identity the fixture verifier captured. */
@@ -344,6 +347,7 @@ export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecuti
 
 /** The same native admission followed by Start that the Engine command transports perform. */
 export async function admitStart(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest): Promise<EngineStartResult> {
+	validateStartRequest(request);
 	const command = startEnvelope(runtime, execution, request);
 	const admission = await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
 	if (admission.status === "binding_pending") throw new EngineBindingPendingError();
@@ -352,4 +356,11 @@ export async function admitStart(runtime: EngineRuntime, execution: AdmittedExec
 			code: admission.receipt.detail?.code ?? "invalid_request",
 		});
 	return runtime.start(request);
+}
+
+/** Admit a typed request created from a registered fixture, without monkeypatching the Runtime API. */
+export function admitRequest(runtime: EngineRuntime, request: EngineStartRequest): Promise<EngineStartResult> {
+	const execution = fixtures.get(request.executionConfiguration);
+	if (!execution) throw new EngineTargetError("invalid_request", "Start uses an unregistered fixture configuration");
+	return admitStart(runtime, execution, request);
 }
