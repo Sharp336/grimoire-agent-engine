@@ -3389,6 +3389,148 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.store.close();
 		}
 	}, 15000);
+
+	it("releases every binding resource when one session disposer fails", async () => {
+		let disposalFailures = 0;
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			const dispose = session.dispose.bind(session);
+			session.dispose = async () => {
+				await dispose();
+				disposalFailures++;
+				throw new Error("injected session disposal failure");
+			};
+			return true;
+		});
+		const request = (suffix: string) =>
+			startRequest(execution, {
+				commandId: `command-cleanup-${suffix}`, agentInstanceId: `agent-cleanup-${suffix}`,
+				agentInstanceRef: `grimoire://tasks/grimoire/runtime-test/agents/agent-cleanup-${suffix}`,
+				executionId: `execution-cleanup-${suffix}`, attemptId: `attempt-cleanup-${suffix}`,
+			}, { cwd, principalId: "owner", input: "finish" });
+		await Promise.all([runtime.start(request("0")), runtime.start(request("1"))]);
+		await runtime.drain();
+		await expect(runtime.dispose()).rejects.toBeInstanceOf(AggregateError);
+		expect(disposalFailures).toBe(2);
+		expect(runtime.agentRegistry.list()).toHaveLength(0);
+		expect(runtime.asyncJobManager.getRunningJobs()).toHaveLength(0);
+		expect(getLspResourceCounts()).toEqual({ clients: 0, pending: 0, owners: 0 });
+	});
+
+	it("forces extension discovery to explicit-only with no in-process roots", async () => {
+		let roots: { mode: string; explicit: readonly string[] } | undefined;
+		let enabledTools: string[] = [];
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const setup = await createRuntime(execution, async session => {
+			roots = session.effectiveExtensionRoots;
+			enabledTools = session.getEnabledToolNames();
+			return true;
+		});
+		// The runtime's Engine mode already forces explicit-only discovery; the ambient
+		// fixture file must never load even when discovery is left enabled at construction.
+		const { cwd } = setup;
+		fs.writeFileSync(
+			path.join(cwd, "ambient-engine-tool.js"),
+			[
+				"export default api => ({",
+				'  name: "ambient_engine_tool",',
+				'  label: "Ambient Engine Tool",',
+				'  description: "must not load",',
+				"  parameters: api.arktype({}),",
+				'  async execute() { return { content: [{ type: "text", text: "bad" }] }; },',
+				"});",
+			].join("\n"),
+		);
+		await setup.runtime.start(startRequest(execution, {
+			commandId: "command-ambient-extensions", agentInstanceId: "agent-ambient-extensions",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-ambient-extensions",
+			executionId: "execution-ambient-extensions", attemptId: "attempt-ambient-extensions",
+		}, { cwd, principalId: "owner", input: "start without ambient extensions" }));
+		await setup.runtime.drain();
+		expect(roots).toMatchObject({ mode: "explicit-only", explicit: [] });
+		expect(enabledTools).not.toContain("ambient_engine_tool");
+		await setup.runtime.dispose();
+	});
+
+	it("preserves terminal child history by default and refuses explicit expiry policies", async () => {
+		const recordPrompt: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+			return true;
+		};
+		const cancelledPrompt = Promise.withResolvers<boolean>();
+		const preservedModel = createMockModel({
+			responses: [async () => {
+				await cancelledPrompt.promise;
+				return { content: ["answer"] };
+			}],
+		});
+		const preservedExecution = admittedExecution(preservedModel.model, modelRegistry, {
+			taskRef: "grimoire://tasks/grimoire/history-test",
+		});
+		const preserved = await createRuntime(preservedExecution, async (session, input, identity) => {
+			if (input.startsWith("fail")) throw new Error("injected failed child");
+			if (!input.startsWith("cancel")) {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+				return true;
+			}
+			return await cancelledPrompt.promise;
+		});
+		const childRequest = (id: string, input: string) =>
+			startRequest(preservedExecution, {
+				commandId: `command-${id}-1`, agentInstanceId: id,
+				agentInstanceRef: `grimoire://tasks/grimoire/history-test/agents/${id}`,
+				executionId: `execution-${id}-1`, attemptId: `attempt-${id}-1`,
+			}, { cwd: preserved.cwd, principalId: "owner", input });
+		await preserved.runtime.store.registerAgent({
+			agentInstanceId: "parent-agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/history-test/agents/parent-agent",
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const failed = await preserved.runtime.start({ ...childRequest("child-local-failed", "fail but retain child history"), parentAgentInstanceId: "parent-agent" });
+		const completed = await preserved.runtime.start({ ...childRequest("child-local-completed", "complete and retain child history"), parentAgentInstanceId: "parent-agent" });
+		const cancelledStarted = await preserved.runtime.start({ ...childRequest("child-local-cancelled", "cancel but retain child history"), parentAgentInstanceId: "parent-agent" });
+		await withTimeout(
+			(async () => {
+				// Stop the child mid-prompt; a Stop before model admission never dispatches the prompt at all.
+				await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
+			})(),
+			2000,
+			"Cancelled child prompt was not dispatched",
+		);
+		cancelledPrompt.resolve(true);
+		await preserved.runtime.drain();
+		expect((await preserved.runtime.store.getAttempt(failed.attemptId))?.state).toBe("failed");
+		expect((await preserved.runtime.store.getAttempt(completed.attemptId))?.state).toBe("completed");
+		expect((await preserved.runtime.store.getAttempt(cancelledStarted.attemptId))?.state).toBe("cancelled");
+		await preserved.runtime.dispose();
+		const preservedRestart = await openRuntime(preserved.options);
+		expect(await preservedRestart.sweepExpiredChildHistory()).toEqual({
+			expired: 0,
+			archived: 0,
+			deleted: 0,
+			retained: 0,
+		});
+		for (const [id, text] of [
+			["child-local-failed", "fail but retain child history"],
+			["child-local-completed", "complete and retain child history"],
+			["child-local-cancelled", "cancel but retain child history"],
+		] as const) {
+			expect(await nativeHistory(preservedRestart, id, "history-test")).toMatchObject({
+				entries: [{ role: "user", text }],
+			});
+		}
+		await preservedRestart.dispose();
+
+		// Expiring retained child history is deferred for native storage; explicit policies refuse.
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const localExecution = admittedExecution(mock.model, modelRegistry);
+		const local = await createRuntime(localExecution, recordPrompt, { childHistoryRetention: "off" });
+		await expect(local.runtime.sweepExpiredChildHistory()).rejects.toMatchObject({ code: "invalid_request" });
+		await local.runtime.dispose();
+	}, 60000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
