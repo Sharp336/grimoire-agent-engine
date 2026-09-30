@@ -3999,6 +3999,263 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const events = await runtime.store.pendingEvents();
 		expect(events.some(event => event.kind === "history_checkpoint")).toBeTrue();
 	}, 10_000);
+
+	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
+		const releaseFinal = Promise.withResolvers<void>();
+		const finalCall = Promise.withResolvers<void>();
+		const fullFinal = `${"x".repeat(48_001)}FULL-STREAM-TAIL`;
+		const mock = createMockModel({
+			reasoning: true,
+			responses: (async function* () {
+				yield {
+					content: [
+						{ type: "thinking" as const, thinking: "private streaming reasoning sentinel" },
+						"Inspecting the file.",
+						{ type: "toolCall" as const, id: "read-stream", name: "read", arguments: { path: "private.txt" } },
+						"Waiting for the read result.",
+					],
+				};
+				finalCall.resolve();
+				await releaseFinal.promise;
+				yield { content: [fullFinal] };
+			})(),
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["read"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		fs.writeFileSync(path.join(cwd, "private.txt"), "private tool output sentinel");
+		const firstSnapshot = nextEngineEvent(runtime, "assistant_snapshot");
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-assistant-stream", agentInstanceId: "agent-assistant-stream",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-assistant-stream",
+			executionId: "execution-assistant-stream", attemptId: "attempt-assistant-stream",
+		}, { cwd, principalId: "owner", input: "inspect then answer" }));
+		await finalCall.promise;
+		const first = await firstSnapshot;
+		expect({ attemptId: first.attemptId, payload: first.payload }).toMatchObject({
+			attemptId: started.attemptId,
+			payload: {
+				assistantMessageId: expect.stringMatching(/^assistant_[0-9a-f]{32}$/),
+				revision: 1,
+				text: expect.stringContaining("Inspecting the file."),
+				status: "streaming",
+				textTruncated: false,
+			},
+		});
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+
+		releaseFinal.resolve();
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const messageIds = [...new Set(snapshots.map(event => String(event.payload?.assistantMessageId)))];
+		expect(messageIds).toHaveLength(2);
+		const settled = snapshots.at(-1);
+		expect(settled?.payload).toMatchObject({
+			assistantMessageId: messageIds[1],
+			text: fullFinal.slice(0, 48_000),
+			status: "settled",
+			stopReason: "stop",
+			textTruncated: true,
+		});
+		expect(String(settled?.payload?.text)).toHaveLength(48_000);
+		const completed = events.find(event => event.kind === "completed");
+		expect(completed?.payload?.assistantMessageId).toBe(messageIds[1]);
+		expect(events.indexOf(settled!)).toBeLessThan(events.indexOf(completed!));
+		const history = await nativeHistory(runtime, started.agentInstanceId);
+		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
+		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
+		expect(history.activityCompleteness).toBe("complete");
+		const historyEntryId = settled?.payload?.historyEntryId;
+		expect(typeof historyEntryId).toBe("string");
+		expect(historyEntryId).toBe(assistantEntries.at(-1)?.entryId);
+		expect(JSON.stringify(snapshots)).not.toMatch(
+			/private streaming reasoning sentinel|private\.txt|private tool output sentinel|FULL-STREAM-TAIL/,
+		);
+		await runtime.dispose();
+	}, 60_000);
+
+	it("backpressures a three MiB provider burst until durable writes and reopens its exact bounded message resource", async () => {
+		const prefix = `${"x".repeat(4095)}${'😀"\\\n'.repeat(1024)}`;
+		const text =
+			prefix +
+			crypto
+				.randomBytes((3 * 1024 * 1024 * 3) / 4)
+				.toString("base64")
+				.slice(0, 3 * 1024 * 1024 - Buffer.byteLength(prefix));
+		const mock = createMockModel({ responses: [{ content: [text] }] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd, options } = await createRuntime(execution, (session, input) => session.prompt(input));
+		const append = runtime.store.appendEvent.bind(runtime.store);
+		let inFlightBytes = 0;
+		let maxInFlightBytes = 0;
+		const slowStore = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
+			if (event.kind !== "message_updated") return append(event);
+			const bytes = Buffer.byteLength(JSON.stringify(event.payload));
+			inFlightBytes += bytes;
+			maxInFlightBytes = Math.max(maxInFlightBytes, inFlightBytes);
+			try {
+				return await append(event);
+			} finally {
+				inFlightBytes -= bytes;
+			}
+		});
+		const agentInstanceRef = "grimoire://tasks/grimoire/burst/agents/large";
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "burst-start", agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+			agentInstanceRef, executionId: "burst-execution", attemptId: "burst-attempt",
+		}, { cwd, principalId: "burst-owner", input: "large answer" }));
+		await runtime.drain();
+		slowStore.mockRestore();
+		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+		expect(completedAttempt?.state, completedAttempt?.cause ?? undefined).toBe("completed");
+		// A result beyond one storage write stays bounded; its transcript serves the rest.
+		expect(completedAttempt?.result_payload).toMatchObject({
+			outputTruncated: true,
+			transcriptRef: `history://${started.engineAgentId}`,
+		});
+		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
+		const page = await runtime.store.runtimeMessages(request);
+		const baseline = (page.items as Array<Record<string, unknown>>)[0];
+		expect(baseline).toMatchObject({ status: "settled", partial: true, totalBytes: 3 * 1024 * 1024 });
+		expect((page.work as { scannedRows: number }).scannedRows).toBeLessThan(10);
+		const resource = baseline.resource as Record<string, unknown>;
+		await runtime.dispose();
+		const reopened = await openRuntime(options);
+		expect((await reopened.store.runtimeMessages(request)).items).toEqual(page.items);
+		const hash = crypto.createHash("sha256");
+		let offset = 0;
+		do {
+			const range = await reopened.store.runtimeResource({
+				principalId: "burst-owner",
+				resource,
+				offset,
+				limit: 65536,
+			});
+			const bytes = Buffer.from(String(range.contentBase64), "base64");
+			expect(bytes.byteLength).toBeLessThanOrEqual(65536);
+			new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+			hash.update(bytes);
+			offset += bytes.byteLength;
+			expect(range.nextOffset).toBe(offset === baseline.totalBytes ? null : offset);
+		} while (offset < Number(baseline.totalBytes));
+		expect(hash.digest("hex")).toBe(crypto.createHash("sha256").update(text).digest("hex"));
+		await reopened.dispose();
+	}, 60_000);
+
+	it("fails the Attempt when a streaming content commit fails and does not consume the next provider delta", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first", "second"] }] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		const append = runtime.store.appendEvent.bind(runtime.store);
+		let failedWrites = 0;
+		const brokenStore = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
+			if (event.kind === "message_updated") {
+				failedWrites++;
+				throw new Error("isolated stream commit failure");
+			}
+			return append(event);
+		});
+		try {
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "stream-failure-start", agentInstanceId: "stream-failure-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/stream-failure-agent",
+				executionId: "stream-failure-execution", attemptId: "stream-failure-attempt",
+			}, { cwd, principalId: "owner", input: "answer" }));
+			await runtime.drain();
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+				state: "failed",
+				cause: "Engine message content could not be persisted",
+			});
+			expect(failedWrites).toBe(1);
+			expect(mock.calls).toHaveLength(1);
+		} finally {
+			brokenStore.mockRestore();
+		}
+	}, 30_000);
+
+	it.each([
+		{
+			kind: "unclassified",
+			message: "provider rejected Authorization: Bearer sk-secretcredential1234",
+			publicReason: "Error",
+		},
+		{
+			kind: "rate limited",
+			message:
+				"engine_provider_retry_deferred: HTTP 429 Authorization: Bearer sk-secretcredential1234; https://private.invalid/path; retry through Engine",
+			publicReason: "Provider rate limit reached",
+		},
+		{
+			kind: "embedded untrusted code",
+			message: "raw engine_provider_retry_deferred: HTTP 429 sk-secretcredential1234",
+			publicReason: "Error",
+		},
+	])(
+		"fails an attempt safely when the model turn ends with a $kind provider error",
+		async ({ message, publicReason }) => {
+			const execution = admittedExecution(createMockModel().model, modelRegistry);
+			const { runtime, cwd } = await createRuntime(execution, async session => {
+				const answer: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: publicReason === "Error" ? "Partial response" : "" }],
+					api: "openai-responses",
+					provider: "mock",
+					model: "mock",
+					timestamp: Date.now(),
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					errorMessage: message,
+				};
+				session.sessionManager.appendMessage(answer);
+				Object.defineProperty(session, "getLastAssistantMessage", {
+					value: () => answer,
+				});
+				return true;
+			});
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "command-provider-error", agentInstanceId: "agent-provider-error",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-provider-error",
+				executionId: "execution-provider-error", attemptId: "attempt-provider-error",
+			}, { cwd, principalId: "owner", input: "fail" }));
+			await runtime.drain();
+			const events = await runtime.store.pendingEvents();
+			const modelEffectId = String(
+				(events.find(event => event.kind === "model_started")?.payload as { effectId?: string })?.effectId,
+			);
+			const modelEffect = await runtime.store.getEffect(modelEffectId);
+			const history = await nativeHistory(runtime, started.agentInstanceId);
+			expect(history.entries).toHaveLength(1);
+			expect(history.entries[0]).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(history.entries[0]).not.toHaveProperty("errorMessage");
+			expect(JSON.stringify(history)).not.toContain("secretcredential");
+			await runtime.dispose();
+			expect(events.find(event => event.kind === "completed")).toBeUndefined();
+			const failed = events.find(event => event.kind === "failed");
+			expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
+			expect(JSON.stringify(failed?.payload)).not.toContain("private.invalid");
+			expect(failed?.payload?.error).toStartWith(`${publicReason} (diagnostic `);
+			expect(failed?.payload).toMatchObject({
+				error: expect.stringContaining("diagnostic"),
+				transcriptRef: `history://${started.engineAgentId}`,
+				transcriptCheckpoint: { revision: 2 },
+			});
+			expect(modelEffect).toMatchObject({
+				effect_kind: "model",
+				state: "settled",
+				outcome: "failed",
+			});
+		},
+		60000,
+	);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
