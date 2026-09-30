@@ -1139,16 +1139,6 @@ async function runLoopBody(
 				// An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				const resumedAtTurnBoundary = await waitWhilePaused(config, signal);
-				if (signal?.aborted) {
-					if (!turnOpen) stream.push({ type: "turn_start" });
-					emitInputMessages(stream, messagesToEmit);
-					messagesToEmit = [];
-					const message = emitAbortedAssistantMessage(null, false, new Set(), currentContext, config, stream, signal);
-					newMessages.push(message);
-					await emitTurnEnd(stream, currentContext, message, [], config, signal, { willContinue: false });
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
-					return;
-				}
 				if (resumedAtTurnBoundary && !signal?.aborted) {
 					pendingMessages.push(...((await config.getSteeringMessages?.(signal)) || []));
 				}
@@ -1166,6 +1156,15 @@ async function runLoopBody(
 						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 					}
 					pendingMessages = [];
+				}
+				if (signal?.aborted) {
+					if (!turnOpen) stream.push({ type: "turn_start" });
+					emitInputMessages(stream, turnMessages);
+					const message = emitAbortedAssistantMessage(null, false, new Set(), currentContext, config, stream, signal);
+					newMessages.push(message);
+					await emitTurnEnd(stream, currentContext, message, [], config, signal, { willContinue: false });
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
 				}
 
 				let preparedProviderCall: PreparedProviderCall;

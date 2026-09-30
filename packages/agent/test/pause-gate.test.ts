@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { AgentPauseGate, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { createUserMessage } from "./helpers";
@@ -200,6 +201,60 @@ describe("agentPauseGate", () => {
 		} finally {
 			agentPauseGate.waitUntilResumed = originalWait;
 		}
+	});
+
+	it("retains dequeued steering and asides when a tool turn is paused then aborted", async () => {
+		const gate = new AgentPauseGate();
+		const controller = new AbortController();
+		const dequeued = Promise.withResolvers<void>();
+		const steering: AgentMessage[] = [];
+		const asides: AgentMessage[] = [];
+		let committed = 0;
+		let discarded = 0;
+		const aside = createUserMessage("retained aside");
+		Object.defineProperties(aside, {
+			[ASIDE_MESSAGE_COMMIT]: { value: () => { committed++; } },
+			[ASIDE_MESSAGE_DISCARD]: { value: () => { discarded++; } },
+		});
+		const tool: AgentTool = {
+			...makeEchoTool([]),
+			async execute() {
+				steering.push(createUserMessage("retained steer"));
+				asides.push(aside);
+				return { content: [{ type: "text", text: "completed" }], details: {} };
+			},
+		};
+		const mock = createMockModel({ responses: [{
+			content: [{ type: "toolCall", id: "queue-input", name: "echo", arguments: { msg: "start" } }],
+		}] });
+		const inputEvents: Message[] = [];
+		const stream = agentLoop([createUserMessage("start")], {
+			systemPrompt: ["Test"], messages: [], tools: [tool],
+		}, {
+			model: mock.model, convertToLlm: identityConverter, pauseGate: gate,
+			getSteeringMessages: async () => {
+				const messages = steering.splice(0);
+				if (messages.length) { gate.pause(); dequeued.resolve(); }
+				return messages;
+			},
+			getAsideMessages: () => asides.splice(0),
+		}, controller.signal, mock.stream);
+		const result = (async () => {
+			for await (const event of stream)
+				if (event.type === "message_end" && event.message.role === "user") inputEvents.push(event.message);
+			return stream.result();
+		})();
+		await dequeued.promise;
+		await gate.waitUntilParked();
+		controller.abort("cancel after dequeue");
+		const messages = await result;
+		expect(mock.calls).toHaveLength(1);
+		expect(messages.filter(message => message.role === "user").map(message => message.content))
+			.toEqual(["start", "retained steer", "retained aside"]);
+		expect(inputEvents.map(message => message.content)).toEqual(["start", "retained steer", "retained aside"]);
+		expect(committed).toBe(1);
+		expect(discarded).toBe(0);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
 	});
 
 	it("does not dispatch after aborting a preflight pause", async () => {

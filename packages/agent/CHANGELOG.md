@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Aborting a paused turn, provider preflight, or asynchronous credential lookup now finishes with an aborted result without dispatching another provider request, including when no preflight callback is installed.
+- Aborting a paused turn, provider preflight, or asynchronous credential lookup now finishes with an aborted result without dispatching another provider request, including when no preflight callback is installed. Already-dequeued steering and asides remain committed and visible exactly once.
 
 ## [18.0.7] - 2026-08-26
 

@@ -252,14 +252,23 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 		receipt_hash: receipt.receipt_hash,
 		lease_revision: leaseRevision,
 	};
-	if (t.action === "enqueue" || t.action === "cancel" || t.action === "dequeue")
-		t.tx.routingAdmission = { ...operation, action: t.action, queue_id: t.queue };
-	else if (t.action === "transfer")
-		t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
-			candidate: t.candidate, lease_revision: t.leaseRevision, from_candidate: t.from };
-	else
-		t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
-			candidate: t.candidate, lease_revision: t.leaseRevision };
+	switch (t.action) {
+		case "enqueue":
+		case "cancel":
+		case "dequeue":
+			t.tx.routingAdmission = { ...operation, action: t.action, queue_id: t.queue };
+			break;
+		case "transfer":
+			t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
+				candidate: t.candidate, lease_revision: t.leaseRevision, from_candidate: t.from };
+			break;
+		case "acquire":
+		case "renew":
+		case "release":
+			t.tx.routingAdmission = { ...operation, action: t.action, lease_id: t.lease,
+				candidate: t.candidate, lease_revision: t.leaseRevision };
+			break;
+	}
 	return receipt;
 }
 
