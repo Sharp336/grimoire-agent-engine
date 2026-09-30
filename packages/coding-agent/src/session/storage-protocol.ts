@@ -11,7 +11,7 @@ export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
 export const STORAGE_PROTOCOL_REVISION = 21 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:fd7efd5264605afc9549de95d3e9d44a62b7b12359367cdec93fb9f2c02339b8" as const;
+	"sha256:d003e36c00c85cb57656c5a93742a5785975ff1d348010e5e6d45abf71db49ab" as const;
 
 export type StorageOperation =
 	| "write"

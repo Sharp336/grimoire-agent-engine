@@ -99,6 +99,7 @@ export type DispatchRequirement = {
 	"min_effort": Effort | null;
 	"service_tier": ServiceTier;
 	"downgrade": "forbidden" | "approval" | "allowed";
+	"pin": DispatchPin | null;
 	"require_trusted_provider": boolean;
 	"fallback_mode": "none" | "same_model" | "scope";
 };
@@ -770,6 +771,7 @@ export type DispatchRequirementRequest = {
 	"min_effort"?: Effort | null;
 	"service_tier"?: ServiceTier;
 	"downgrade"?: "forbidden" | "approval" | "allowed";
+	"pin"?: DispatchPin | null;
 	"require_trusted_provider"?: boolean;
 	"fallback_mode"?: "none" | "same_model" | "scope";
 };
@@ -2306,4 +2308,31 @@ export type ExecutorSettingsRequest = {
 	"expected_revision": number;
 	"change": DispatchPresetRequest;
 	"reason": string;
+} | {
+	"kind": "graph";
+	"action": "plan_executor_graph";
+	"source_ref": ArtifactRef | null;
+	"source_revision": number;
+	"source_hash": Hash | null;
+	"payer_principal_id": string;
+	"records": Array<{
+		"ref": ArtifactRef;
+		"expected_revision": number;
+		"data": UserProviderRequest | UserModelRequest | ProviderAccountRequest | AvailableModelRouteRequest;
+	}>;
+} | {
+	"kind": "graph";
+	"action": "publish_executor_graph";
+	"source_ref": ArtifactRef | null;
+	"source_revision": number;
+	"source_hash": Hash | null;
+	"payer_principal_id": string;
+	"records": Array<{
+		"ref": ArtifactRef;
+		"expected_revision": number;
+		"data": UserProviderRequest | UserModelRequest | ProviderAccountRequest | AvailableModelRouteRequest;
+	}>;
+	"expected_graph_hash": Hash;
+	"expected_policy_hash": Hash;
+	"expected_after_policy_hash": Hash;
 };

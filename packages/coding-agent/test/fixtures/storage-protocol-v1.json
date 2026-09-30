@@ -2772,6 +2772,16 @@
               "type": "null"
             }
           ]
+        },
+        "require_trusted_provider": {
+          "type": "boolean"
+        },
+        "fallback_mode": {
+          "enum": [
+            "none",
+            "same_model",
+            "scope"
+          ]
         }
       },
       "required": [
@@ -2787,7 +2797,9 @@
         "min_effort",
         "service_tier",
         "downgrade",
-        "pin"
+        "pin",
+        "require_trusted_provider",
+        "fallback_mode"
       ],
       "additionalProperties": false
     },

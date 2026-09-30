@@ -18705,6 +18705,198 @@
             "reason"
           ],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "graph"
+            },
+            "action": {
+              "const": "plan_executor_graph"
+            },
+            "source_ref": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/artifactRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_hash": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/hash"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "payer_principal_id": {
+              "type": "string",
+              "pattern": "^grimoire:(user|service):[A-Za-z0-9._~-]{1,160}$"
+            },
+            "records": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "$ref": "#/$defs/artifactRef"
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "data": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/userProviderRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/userModelRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/providerAccountRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/availableModelRouteRequest"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ref",
+                  "expected_revision",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "source_ref",
+            "source_revision",
+            "source_hash",
+            "payer_principal_id",
+            "records"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "graph"
+            },
+            "action": {
+              "const": "publish_executor_graph"
+            },
+            "source_ref": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/artifactRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_hash": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/hash"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "payer_principal_id": {
+              "type": "string",
+              "pattern": "^grimoire:(user|service):[A-Za-z0-9._~-]{1,160}$"
+            },
+            "records": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ref": {
+                    "$ref": "#/$defs/artifactRef"
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "data": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/userProviderRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/userModelRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/providerAccountRequest"
+                      },
+                      {
+                        "$ref": "#/$defs/availableModelRouteRequest"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ref",
+                  "expected_revision",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "expected_graph_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "expected_policy_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "expected_after_policy_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "source_ref",
+            "source_revision",
+            "source_hash",
+            "payer_principal_id",
+            "records",
+            "expected_graph_hash",
+            "expected_policy_hash",
+            "expected_after_policy_hash"
+          ],
+          "additionalProperties": false
         }
       ]
     }
