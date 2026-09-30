@@ -117,9 +117,10 @@ export interface TurnRetryPolicy {
 		modelIdentityId: string;
 		selectors: readonly string[];
 	};
-	/** Explicitly approved model/provider order. Only replay-safe failed turns may change models. */
+	/** Admitted frozen routes only. The callback durably transfers the lease before model swap. */
 	orderedRouteFallback?: {
 		selectors: readonly string[];
+		beforeApply(selector: string, signal?: AbortSignal): Promise<boolean>;
 	};
 }
 

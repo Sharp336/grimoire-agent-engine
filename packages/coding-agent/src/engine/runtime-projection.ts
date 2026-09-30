@@ -43,19 +43,20 @@ export function boundedItems<T>(items: T[], maxBytes: number, maxItems: number):
 
 export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 	const payload = event.payload ?? {};
-	if (event.kind === "tool_approval_requested")
+	if (event.kind.endsWith("_approval_requested")) {
+		const approval = payload as unknown as ApprovalRequest;
 		return {
-			kind: "tool_approval",
-			inputId: String(payload.approvalId),
+			kind: "approval",
+			inputId: approval.id,
 			revision: event.eventId,
-			requestedAt: new Date(event.createdAt).toISOString(),
-			prompt: `Разрешить вызов ${String(payload.toolName ?? "tool")}?`,
-			tool: {
-				name: String(payload.toolName ?? "tool"),
-				...(typeof payload.inputHash === "string" ? { inputHash: payload.inputHash } : {}),
-			},
-			options: ["approve", "deny"],
+			requestedAt: approval.created_at,
+			prompt: approval.reason,
+			request: approval,
+			options: approval.requires_human || !["tool", "spawn"].includes(approval.kind)
+				? ["approve", "deny"]
+				: ["approve", "approve_always", "deny"],
 		};
+	}
 	return {
 		kind: "question",
 		inputId: String(payload.inputId),

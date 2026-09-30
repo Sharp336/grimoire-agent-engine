@@ -63,8 +63,21 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
-/** Public settings captured at ordinary Engine launch, never provider credentials. */
-export interface SessionLaunchSnapshot {
+/** Frozen launch provenance for a newly admitted Attempt; legacy v1 remains historical read-only. */
+export type SessionLaunchSnapshot = LegacySessionLaunchSnapshot | {
+	schema: "engine.launch_snapshot.v2";
+	agentInstanceId: string;
+	agentInstanceRef: string;
+	executionId: string;
+	attemptId: string;
+	dispatchRef: string;
+	dispatchHash: string;
+	executionDigest: string;
+	continuationDigest: string;
+	selectedRouteRef: string;
+};
+
+export interface LegacySessionLaunchSnapshot {
 	schema: "engine.launch_snapshot.v1";
 	agentInstanceId: string;
 	agentInstanceRef?: string | null;

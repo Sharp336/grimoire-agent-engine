@@ -193,6 +193,8 @@ export interface RocksTransitionOptions {
 	inboxMutationCausationCommandId?: string;
 	/** Admitted execution provenance written with the Attempt row at acceptance. */
 	execution?: RocksAttempt["execution"];
+	/** Previewed full-roster selection must remain identical at the owner CAS. */
+	routingAdmission?: { request: AdmissionRequest; preview: Extract<AdmissionOutcome, { status: "admitted" }> };
 	previousInboxSessionId?: string;
 	pendingInboxSourceSessionId?: string;
 	restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
@@ -1944,8 +1946,18 @@ export class RocksEngineMutations {
 						transcript_revision: (old?.transcript_revision ?? 0) + 1,
 						...(native ? { transcript_native: native } : {}),
 					});
+				if (options.routingAdmission) {
+					const { request, preview } = options.routingAdmission;
+					const admitted = await stageAdmission(tx, request);
+					if (admitted.status !== "admitted" ||
+						storageCanonicalJson(admitted.frozen) !== storageCanonicalJson(preview.frozen))
+						throw new EngineTargetError("admission_state_unknown", "Routing selection changed before acceptance");
+					if (!options.execution ||
+						candidateRef(row.execution!.executor_choice.selected) !== candidateRef(admitted.frozen[0]))
+						throw new EngineTargetError("admission_state_unknown", "Attempt execution differs from admitted route");
+				}
 				await tx.put("attempt", binding.attemptId, row);
-				// ง6: an actual pause or a terminal state releases the routing lease exactly once, atomically.
+				// ยง6: an actual pause or a terminal state releases the routing lease exactly once, atomically.
 				if ((state === "paused" || terminal.has(state)) && old?.state !== state)
 					await stageRelease(tx, binding.attemptId);
 				if (terminal.has(state))
@@ -2120,6 +2132,13 @@ export class RocksEngineMutations {
 				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
 				if (!binding || !attempt || !this.sameFence(attempt, target) || terminal.has(attempt.state))
 					throw new EngineEffectConflictError(input.effectId);
+				const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+				if (!attempt.execution || !lease || lease.attempt_id !== target.attemptId ||
+					lease.engine_generation !== target.engineGeneration ||
+					lease.dispatch_hash !== attempt.execution.dispatch_hash ||
+					lease.expires_at <= Date.now() ||
+					lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
+					throw new EngineTargetError("stale_target", "Model/tool effect requires an active admitted routing lease");
 				if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
 				const tool = "toolCallId" in input ? input : undefined;
 				const modelCall = "modelCallId" in input ? input.modelCallId : "";
@@ -2148,7 +2167,7 @@ export class RocksEngineMutations {
 				};
 				await tx.put("effect", input.effectId, row);
 				await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
-				// ง5.1: the request is saved with its planned effect before the requested event is emitted.
+				// ยง5.1: the request is saved with its planned effect before the requested event is emitted.
 				if (approval) {
 					if (approval.id !== input.effectId || approval.effect_id !== input.effectId)
 						throw new EngineEffectConflictError(input.effectId);
@@ -2483,9 +2502,18 @@ export class RocksEngineMutations {
 			return this.append(tx, target, { kind: "executor_route_changed", payload: transition });
 		});
 	}
-	/** ง6/ง6.1 atomic device admission: full-roster search, cycle proof, lease or FIFO entry. */
-	async admitRouting(request: AdmissionRequest): Promise<AdmissionOutcome> {
-		return this.mutation("routing", tx => stageAdmission(tx, request));
+	/** No physical write until commitAttemptTransition stages this same selection and the Attempt together. */
+	async previewRouting(request: AdmissionRequest): Promise<AdmissionOutcome> {
+		return stageAdmission(new RuntimeTransaction(this.records, true), request);
+	}
+	/** Queue-only transition must not accidentally acquire a lease without an Attempt. */
+	async queueRouting(request: AdmissionRequest): Promise<Extract<AdmissionOutcome, { status: "queued" }>> {
+		return this.mutation("routing", async tx => {
+			const outcome = await stageAdmission(tx, request);
+			if (outcome.status !== "queued")
+				throw new EngineTargetError("admission_state_unknown", "Routing capacity changed before queue commit");
+			return outcome;
+		});
 	}
 	async cancelRoutingQueue(
 		request: Pick<AdmissionRequest, "principalId" | "deviceId" | "commandId" | "agentInstanceRef" | "attemptId">,

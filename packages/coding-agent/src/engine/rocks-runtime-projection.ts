@@ -3,7 +3,6 @@ import {
 	type EngineEvent,
 	type EngineBindingGate,
 	type EngineInboxItem,
-	type EngineProfileRouteState,
 	type EngineRetryState,
 	type EngineTarget,
 	sameSemanticBinding,
@@ -511,12 +510,12 @@ export async function projectedDetail(
 					row => row.subtype === "input" && row.attempt_id === attempt.attempt_id && !row.resolved,
 				).map(row => row.value)
 			: [];
-	let profileRoute: Record<string, unknown> | undefined;
-	if (attempt?.profile_route_state) {
-		if (Buffer.byteLength(attempt.profile_route_state) > runtimeLimits.bulkPreviewBytes)
-			throw new EngineTargetError("source_unavailable", "Retained profile route exceeds its metadata budget");
-		const { eventSeq, ...state } = JSON.parse(attempt.profile_route_state) as Record<string, unknown>;
-		profileRoute = {
+	let executorRoute: Record<string, unknown> | undefined;
+	if (attempt?.executor_route_state) {
+		if (Buffer.byteLength(attempt.executor_route_state) > runtimeLimits.bulkPreviewBytes)
+			throw new EngineTargetError("source_unavailable", "Executor route exceeds its metadata budget");
+		const { eventSeq, ...state } = JSON.parse(attempt.executor_route_state) as Record<string, unknown>;
+		executorRoute = {
 			state,
 			eventSeq: eventSeq ?? 0,
 			target: {
@@ -529,7 +528,7 @@ export async function projectedDetail(
 				authorityGeneration: attempt.authority_generation,
 			},
 		};
-		validateRuntimeValue("profileRoute", profileRoute);
+		validateRuntimeValue("executorRoute", executorRoute);
 	}
 	const heldPage = boundedItems(holds, runtimeLimits.bulkPreviewBytes * 2, runtimeLimits.httpPageRecords);
 	const inputPage = boundedItems(inputs, runtimeLimits.bulkPreviewBytes * 2, runtimeLimits.httpPageRecords);
@@ -546,7 +545,10 @@ export async function projectedDetail(
 		},
 		state: attempt?.state ?? "registered",
 		retry: attempt ? (retryFromAttempt(attempt) ?? null) : null,
-		...(profileRoute ? { profileRoute } : {}),
+		...(executorRoute ? { executorRoute } : {}),
+		executorChoice: attempt?.execution?.executor_choice ?? null,
+		executionDigest: attempt?.execution?.execution_digest ?? null,
+		continuationDigest: attempt?.execution?.continuation_digest ?? null,
 		manualHold: holds.length > 0,
 		holds: heldPage,
 		holdsHasMore: holds.length > heldPage.length,
@@ -860,16 +862,16 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			),
 		);
 	// The detail reports the route this event made durable, so its sequence is known before projecting.
-	if (event.kind === "profile_route_changed" && attempt) {
-		// commitAttemptProfileRoute stages this payload in the same batch.
-		const route = event.payload?.profileRoute as EngineProfileRouteState;
-		attempt.profile_route_state = JSON.stringify({ ...route, eventSeq: event.seq });
+	if (event.kind === "executor_route_changed" && attempt) {
+		// The route state and immutable choice transition are already staged in the same batch.
+		const state = attempt.executor_route_state && JSON.parse(attempt.executor_route_state) as Record<string, unknown>;
+		if (state) attempt.executor_route_state = JSON.stringify({ ...state, eventSeq: event.seq });
 	}
 	let detail: Record<string, unknown> | null = null;
 	if (
 		summaryEvents.has(event.kind) ||
 		toolEvent ||
-		event.kind === "profile_route_changed" ||
+		event.kind === "executor_route_changed" ||
 		event.kind === "retry_scheduled" ||
 		event.kind === "retry_settled"
 	) {

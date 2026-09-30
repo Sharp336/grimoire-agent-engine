@@ -157,17 +157,15 @@ export const taskSchema = type({
 	"+": "delete",
 });
 
-/** Engine-mode task calls carry a local assignment and an explicit cached AgentProfile. */
+/** Engine-mode delegation always names a real, independently authorized Task or WorkStep. */
 export const engineTaskSchema = type({
-	profileRef: "string",
-	"workStepId?": "string",
+	target: { task_ref: "string", work_step_id: "string | null", "+": "delete" },
 	assignment: "string",
 	"+": "delete",
 });
 
 export interface EngineTaskParams {
-	profileRef?: string;
-	workStepId?: string;
+	target?: { task_ref: string; work_step_id: string | null };
 	assignment?: string;
 }
 const taskSchemaNoIsolation = type({

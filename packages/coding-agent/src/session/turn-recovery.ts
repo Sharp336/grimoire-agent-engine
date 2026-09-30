@@ -1768,6 +1768,9 @@ export class TurnRecovery {
 		// listener reading attribution in that window must already see the incoming
 		// candidate as fallback-routed. Attribution itself is safe regardless — it
 		// names the last model that served, which this swap has not changed.
+		if (this.#turnRetryPolicy?.orderedRouteFallback &&
+			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
+			return false;
 		const routedBeforeSwap = this.#fallbackRoutedFor;
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
@@ -1886,15 +1889,12 @@ export class TurnRecovery {
 				return false;
 			}
 			if (!apiKey) continue;
-			return this.applyRetryFallbackCandidate(
-				this.#turnRetryPolicy?.orderedRouteFallback ? "profile-route" : "same-model-route",
+			if (await this.applyRetryFallbackCandidate(
+				this.#turnRetryPolicy?.orderedRouteFallback ? "executor-route" : "same-model-route",
 				selector,
 				currentSelector,
-				{
-					pinFallback: true,
-					apiKey,
-				},
-			);
+				{ pinFallback: true, apiKey },
+			)) return true;
 		}
 		return false;
 	}

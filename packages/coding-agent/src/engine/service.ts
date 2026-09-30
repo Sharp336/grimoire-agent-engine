@@ -4,20 +4,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { StreamAdmissionError } from "@oh-my-pi/pi-ai/utils/stream-admission";
-import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
-import { type EngineLaunchProfile, EngineBindingPendingError, EngineTargetError, legacyLocalChildBirth, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, validateSemanticBinding } from "./contracts";
+import { type EngineApprovalDecision, type EngineSemanticBindingSnapshot, EngineBindingPendingError, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
-import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
-import { EngineProfileResolver } from "./profile-resolver";
+import { NatsEngineAdapter } from "./nats-adapter";
+import { EngineExecutionResolver } from "./execution-resolver";
 import { ProviderAdmissionClient } from "./provider-admission";
 import { ProviderExecutionClient } from "./provider-execution";
-import { engineAgentInstanceId, engineRouteToken } from "./route";
+import { engineAgentInstanceId } from "./route";
 import { EngineRuntime, type EngineRuntimeOptions } from "./runtime";
-import { EngineCommandConflictError } from "./store";
 import { waitForEngineWake } from "./wake";
 
 export interface EngineServiceConfig {
@@ -67,34 +66,54 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		const providerExecutionClient = config.hosted
 			? new ProviderExecutionClient(providerExecutionUrl(config.hosted.serverUrl), config.hosted.token)
 			: undefined;
-		const profileResolver = config.artifactCacheRoot
-			? new EngineProfileResolver(
-					config.artifactCacheRoot,
-					path.join(config.runtimeDir, "credentials"),
-					config.localCredentialDbPath,
-					providerAdmissionClient,
-					providerExecutionClient,
-				)
-			: undefined;
+		const executionResolver = new EngineExecutionResolver(
+			path.join(config.runtimeDir, "credentials"),
+			config.localCredentialDbPath,
+			providerAdmissionClient,
+			providerExecutionClient,
+		);
 		runtime = await EngineRuntime.create({
 			databasePath,
+			deviceId: config.deviceId,
 			mcpServer: config.hosted ? hostedCoreMcpConfig(config.hosted) : undefined,
 			childHistoryTtlMinutes: config.childHistoryTtlMinutes,
 			childHistoryRetention: config.childHistoryRetention,
-			resolveSessionProfile: profileResolver
-				? (profile, cwd, signal) => profileResolver.resolve(profile, cwd, signal)
+			resolveExecution: (execution, frozen, attempt, cwd, signal) =>
+				executionResolver.resolve(execution, frozen, attempt, cwd, signal),
+			verifyOriginReceipt: rpc
+				? async identity => {
+						const verified = await rpc.call("verify_origin_receipt", identity);
+						if (verified.verified !== true ||
+							(["originReceiptId", "commandId", "agentInstanceRef", "attemptId", "principalId"] as const)
+								.some(key => verified[key] !== identity[key]) ||
+							typeof verified.dispatchHash !== "string" ||
+							typeof verified.authContextId !== "string" ||
+							!verified.bindingSnapshot)
+							throw new EngineTargetError("stale_target", "Origin receipt verification returned a different Start");
+						return verified as unknown as {
+							verified: true;
+							dispatchHash: string;
+							bindingSnapshot: EngineSemanticBindingSnapshot;
+							authContextId: string;
+						};
+					}
 				: undefined,
-			resolveSessionContinuation: profileResolver
-				? (profile, cwd) => profileResolver.continuationDigest(profile, cwd)
+			verifyApprovalReceipt: rpc
+				? async identity => {
+						const verified = await rpc.call("verify_approval_receipt", identity);
+						if (verified.verified !== true || !verified.approvalDecision)
+							throw new EngineTargetError("stale_target", "Approval receipt verification returned no decision");
+						return verified as unknown as { verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"] };
+					}
 				: undefined,
-			launchChild: profileResolver
+			launchChild: rpc
 				? request => {
 						if (!runtime) throw new Error("Engine runtime is unavailable");
-						return launchLocalEngineChild(runtime, profileResolver, {
+						return launchLocalEngineChild(runtime, rpc, {
 							...request,
 							deviceId: config.deviceId,
 							engineId: config.engineId,
-							provisionMailbox: agentInstanceId => adapter?.provisionMailbox(agentInstanceId),
+							provisionMailbox: id => adapter?.provisionMailbox(id),
 						});
 					}
 				: undefined,
@@ -123,7 +142,6 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 				}
 			},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: command => resolveLaunchProfile(command, Boolean(profileResolver)),
 			onError: reportServiceError,
 		});
 		controlQuery = await startEngineControlQueryServer({
@@ -131,13 +149,11 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			runtimeDir: config.runtimeDir,
 			deviceId: config.deviceId,
 			engineId: config.engineId,
-			resolveLaunchProfile: command => resolveLaunchProfile(command, Boolean(profileResolver)),
 			provisionMailbox: agentInstanceId => adapter?.provisionMailbox(agentInstanceId),
 		});
 		if (config.hosted && rpc) {
 			bridge = await HostedEngineBridge.connect({
 				rpc,
-				projectionRpc: new HostedGrimoireRpc({ ...config.hosted, serverUrl: coreMcpUrl(config.hosted.serverUrl) }),
 				eventStore: runtime.store,
 				deviceId: config.deviceId,
 				engineId: config.engineId,
@@ -193,7 +209,7 @@ export function isLateStreamCapacityRejection(reason: unknown): boolean {
 
 export async function launchLocalEngineChild(
 	runtime: EngineRuntime,
-	profileResolver: EngineProfileResolver,
+	rpc: HostedGrimoireRpc,
 	request: Parameters<NonNullable<EngineRuntimeOptions["launchChild"]>>[0] & {
 		deviceId: string;
 		engineId: string;
@@ -201,94 +217,49 @@ export async function launchLocalEngineChild(
 	},
 ): Promise<EngineChildLaunchResult> {
 	request.signal?.throwIfAborted();
-	const assignment = request.assignment?.trim();
-	if (!assignment) throw new Error("Child assignment is required");
-	if (Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES) {
-		throw new Error(`Child assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);
-	}
-	const seed = [request.parentAgentInstanceRef, request.parentAttemptId, request.toolCallId].join("\0");
-	const parent = request.parentBindingSnapshot;
-	validateSemanticBinding(parent, request.parentAgentInstanceRef);
-	if (parent.installationId && !request.principalId)
-		throw new EngineTargetError("invalid_request", "Owned child birth requires its admitted principal");
-	const birthId = `agent_${engineRouteToken(seed)}`;
-	const agentInstanceRef = parent.installationId
-		? `grimoire://agents/~u/${new Bun.CryptoHasher("sha256").update(request.principalId!).digest("hex")}/${birthId}`
-		: `${parent.taskRef}/agents/${birthId}`;
-	const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
-	const commandId = `cmd_local_${engineRouteToken(`${seed}\0command`)}`;
-	const executionId = `exec_local_${engineRouteToken(`${seed}\0execution`)}`;
-	const attemptId = `attempt_local_${engineRouteToken(`${seed}\0attempt`)}`;
-	const retained = await runtime.store.getStartConversationIdentity(commandId);
-	const prior = retained?.serializedCommand
-		? validateEngineCommand(JSON.parse(retained.serializedCommand))
-		: undefined;
-	if (!prior && request.workStepId !== undefined && request.workStepId !== parent.workStepId)
-		throw new EngineTargetError("invalid_request", "Local child must inherit the admitted parent WorkStep");
-	const oldChild = prior?.payload.localChild;
-	if (prior && (
-		prior.commandId !== commandId || prior.op !== "start" ||
-		prior.agentInstanceId !== agentInstanceId || prior.agentInstanceRef !== agentInstanceRef ||
-		prior.parentAgentInstanceId !== request.parentAgentInstanceId ||
-		prior.parentAgentInstanceRef !== request.parentAgentInstanceRef ||
-		prior.executionId !== executionId || prior.attemptId !== attemptId ||
-		prior.authorityGeneration !== request.authorityGeneration || prior.principalId !== request.principalId ||
-		prior.deviceId !== request.deviceId || prior.engineId !== request.engineId ||
-		prior.payload.input !== assignment || prior.payload.cwd !== request.cwd ||
-		!isRecord(oldChild) || oldChild.parentAttemptId !== request.parentAttemptId ||
-		oldChild.toolCallId !== request.toolCallId || oldChild.profileRef !== request.profileRef ||
-		oldChild.maxSpawnDepth !== request.maxSpawnDepth ||
-		(oldChild.workStepId ?? null) !== (prior.bindingSnapshot ? parent.workStepId : request.workStepId ?? null)
-	)) throw new EngineCommandConflictError(commandId);
-	const legacyBindingSnapshot = prior && prior.bindingSnapshot === undefined
-		? legacyLocalChildBirth(prior, parent).bindingSnapshot : undefined;
-	const launchProfile = prior
-		? (prior.payload.launchProfile as EngineLaunchProfile)
-		: await profileResolver.resolveChildLaunchProfile(request.profileRef, request.maxSpawnDepth);
-	const command: EngineCommandEnvelope = prior ?? {
-		schema: "grimoire.engine.command.v1",
-		commandId,
-		op: "start",
-		deviceId: request.deviceId,
-		engineId: request.engineId,
-		engineGeneration: runtime.engineGeneration,
-		agentInstanceId,
-		agentInstanceRef,
-		bindingSnapshot: {
-			agentInstanceRef,
-			taskRef: parent.taskRef,
-			workStepId: parent.workStepId,
-			bindingRevision: parent.installationId ? 1 : 0,
-			installationId: parent.installationId,
-			parentAgentInstanceRef: request.parentAgentInstanceRef,
-			parentAttemptId: request.parentAttemptId,
-			parentBindingRevision: parent.bindingRevision,
-		},
-		parentAgentInstanceId: request.parentAgentInstanceId,
+	const assignment = request.assignment.trim();
+	if (!assignment || Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES)
+		throw new EngineTargetError("invalid_request", "Child assignment must contain 1..32768 UTF-8 bytes");
+	validateSemanticBinding(request.parentBindingSnapshot, request.parentAgentInstanceRef);
+	if (!request.principalId)
+		throw new EngineTargetError("invalid_request", "Child launch requires the admitted principal");
+	if (!request.target.task_ref || (request.target.work_step_id !== null && !request.target.work_step_id))
+		throw new EngineTargetError("invalid_request", "Child launch requires a real Task or WorkStep");
+	const prepared = await rpc.call("prepare_child_start", {
 		parentAgentInstanceRef: request.parentAgentInstanceRef,
-		executionId,
-		attemptId,
-		authorityGeneration: request.authorityGeneration,
+		parentAttemptId: request.parentAttemptId,
+		parentBindingSnapshot: request.parentBindingSnapshot,
 		principalId: request.principalId,
-		issuedAt: Date.now(),
-		payload: {
-			input: assignment,
-			cwd: request.cwd,
-			profileDigest: launchProfile.profileDigest,
-			launchProfile,
-			localChild: {
-				agentInstanceId: birthId,
-				parentAttemptId: request.parentAttemptId,
-				toolCallId: request.toolCallId,
-				profileRef: request.profileRef,
-				maxSpawnDepth: request.maxSpawnDepth,
-				workStepId: parent.workStepId,
-			},
-		},
-	};
-	const cancellationTarget = { agentInstanceId, executionId, attemptId, commandId,
+		authorityGeneration: request.authorityGeneration,
+		target: request.target,
+		assignment,
+		toolCallId: request.toolCallId,
+		cwd: request.cwd,
+	}, request.signal);
+	const command = validateEngineCommand(prepared.command);
+	const agentInstanceRef = prepared.agentInstanceRef;
+	const agentInstanceId = prepared.agentInstanceId;
+	const attemptId = command.attemptId;
+	if (typeof agentInstanceRef !== "string" || typeof agentInstanceId !== "string" ||
+		typeof attemptId !== "string" || command.op !== "start" ||
+		command.agentInstanceRef !== agentInstanceRef || command.agentInstanceId !== agentInstanceId ||
+		engineAgentInstanceId(agentInstanceRef) !== agentInstanceId ||
+		command.parentAgentInstanceId !== request.parentAgentInstanceId ||
+		command.parentAgentInstanceRef !== request.parentAgentInstanceRef ||
+		command.bindingSnapshot?.taskRef !== request.target.task_ref ||
+		command.bindingSnapshot?.workStepId !== request.target.work_step_id ||
+		command.bindingSnapshot?.parentAttemptId !== request.parentAttemptId ||
+		command.bindingSnapshot?.parentBindingRevision !== request.parentBindingSnapshot.bindingRevision ||
+		command.principalId !== request.principalId ||
+		command.authorityGeneration !== request.authorityGeneration ||
+		command.deviceId !== request.deviceId || command.engineId !== request.engineId ||
+		!sameSemanticBinding(prepared.bindingSnapshot as EngineSemanticBindingSnapshot, command.bindingSnapshot))
+		throw new EngineTargetError("stale_target", "Prepared child Start differs from the parent or requested target");
+	const cancellationTarget = {
+		agentInstanceId, executionId: command.executionId!, attemptId, commandId: command.commandId,
 		authorityGeneration: request.authorityGeneration, engineGeneration: runtime.engineGeneration,
-		principalId: request.principalId };
+		principalId: request.principalId,
+	};
 	const cancel = () => {
 		void runtime.cancelAgentInstance(cancellationTarget, "Parent task aborted").catch(reportServiceError);
 	};
@@ -296,16 +267,10 @@ export async function launchLocalEngineChild(
 	try {
 		request.signal?.throwIfAborted();
 		await request.enrollChild(agentInstanceRef, attemptId);
-		request.signal?.throwIfAborted();
 		const runner = {
 			runtime,
 			deviceId: request.deviceId,
 			engineId: request.engineId,
-			legacyBindingSnapshot,
-			resolveLaunchProfile: () => {
-				request.signal?.throwIfAborted();
-				return launchProfile;
-			},
 			provisionMailbox: async (id: string) => {
 				await request.provisionMailbox?.(id);
 				request.signal?.throwIfAborted();
@@ -321,7 +286,7 @@ export async function launchLocalEngineChild(
 				await waitForEngineWake(runtime.store.changeSignal(), 1_000, request.signal);
 			}
 		}
-		const result = await runtime.store.waitAttemptResult(agentInstanceId, commandId, attemptId, request.signal);
+		const result = await runtime.store.waitAttemptResult(agentInstanceId, command.commandId, attemptId, request.signal);
 		if (result.attemptId) await request.enrollChild(agentInstanceRef, result.attemptId);
 		return {
 			agentInstanceId,
@@ -471,7 +436,7 @@ export function hostedCoreMcpConfig(hosted: NonNullable<EngineServiceConfig["hos
 			"X-Grimoire-Client-Version": hosted.clientVersion ?? "0.4.0",
 			"X-Grimoire-Client-Surface": "agent_engine_bridge",
 			"X-Grimoire-Client-Protocol-Version": hosted.protocolVersion ?? "2026-08-01",
-			"X-Grimoire-Client-Features": '["grimoire.task.v4","agent_binding.v1"]',
+			"X-Grimoire-Client-Features": '["grimoire.task.v5","agent_binding.v1","grimoire.dispatch.v2"]',
 			...(hosted.installedSequence !== undefined
 				? { "X-Grimoire-Client-Installed-Sequence": String(hosted.installedSequence) } : {}),
 			...(hosted.sourceSignature ? { "X-Grimoire-Client-Source-Signature": hosted.sourceSignature } : {}),
@@ -580,120 +545,6 @@ function userConfig(nkey: string, publish: string[], subscribe: string[]): strin
 		"      }",
 		"    }",
 	].join("\n");
-}
-
-function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef = false): EngineLaunchProfile {
-	const value = command.payload.launchProfile;
-	if (!value || typeof value !== "object" || Array.isArray(value))
-		throw new Error("start command has no launchProfile");
-	const profile = value as unknown as EngineLaunchProfile;
-	if (profile.spawns !== "" && profile.spawns !== "*") throw new Error("launchProfile.spawns must be empty or *");
-	if (typeof profile.profileDigest !== "string" || profile.profileDigest !== command.payload.profileDigest) {
-		throw new Error("launchProfile digest does not match the command");
-	}
-	if (
-		profile.launchProfileRef !== undefined &&
-		!/^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/.test(profile.launchProfileRef)
-	) {
-		throw new Error("launchProfileRef must be a gctx Artifact ref");
-	}
-	if (requireArtifactRef && !profile.launchProfileRef) {
-		throw new EngineTargetError(
-			"invalid_request",
-			"launchProfileRef is required for artifact-backed Engine profiles",
-		);
-	}
-	if (
-		profile.maxSpawnDepth !== undefined &&
-		(!Number.isSafeInteger(profile.maxSpawnDepth) || profile.maxSpawnDepth < 0 || profile.maxSpawnDepth > 31)
-	) {
-		throw new Error("maxSpawnDepth must be an integer between 0 and 31");
-	}
-	if (
-		profile.maxChildren !== undefined &&
-		(!Number.isSafeInteger(profile.maxChildren) || profile.maxChildren < 0 || profile.maxChildren > 256)
-	) {
-		throw new Error("maxChildren must be an integer between 0 and 256");
-	}
-	const childProfileRefs = profile.childProfileRefs ?? [];
-	if (
-		!Array.isArray(childProfileRefs) ||
-		childProfileRefs.some(
-			ref => typeof ref !== "string" || !/^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/.test(ref),
-		) ||
-		new Set(childProfileRefs).size !== childProfileRefs.length
-	) {
-		throw new Error("childProfileRefs must be a unique array of gctx Artifact refs");
-	}
-	const maxSpawnDepth = profile.maxSpawnDepth ?? 0;
-	const maxChildren = profile.maxChildren ?? 0;
-	if (
-		(profile.spawns === "*") !== (maxSpawnDepth > 0 && maxChildren > 0 && childProfileRefs.length > 0) ||
-		(profile.spawns === "" && (maxSpawnDepth !== 0 || maxChildren !== 0 || childProfileRefs.length !== 0))
-	) {
-		throw new Error("spawn rights require depth, maxChildren and an explicit childProfileRefs catalog");
-	}
-	if (
-		profile.systemPrompt !== undefined &&
-		(typeof profile.systemPrompt !== "string" || profile.systemPrompt.length > 262_144)
-	) {
-		throw new Error("systemPrompt must be a string no larger than 262144 characters");
-	}
-	if (
-		profile.providerPromptCacheKey !== undefined &&
-		(typeof profile.providerPromptCacheKey !== "string" ||
-			!profile.providerPromptCacheKey.trim() ||
-			profile.providerPromptCacheKey.length > 512)
-	) {
-		throw new Error("providerPromptCacheKey must contain 1..512 characters");
-	}
-	if (
-		profile.thinkingLevel !== undefined &&
-		!["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(profile.thinkingLevel)
-	) {
-		throw new Error("thinkingLevel is invalid");
-	}
-	if (profile.minimumThinkingLevel !== undefined && profile.minimumThinkingLevel !== "high") {
-		throw new Error("minimumThinkingLevel must be high");
-	}
-	if (profile.requireYieldTool !== undefined && typeof profile.requireYieldTool !== "boolean") {
-		throw new Error("requireYieldTool must be a boolean");
-	}
-	if (profile.lspShared !== undefined && typeof profile.lspShared !== "boolean") {
-		throw new Error("lspShared must be a boolean");
-	}
-	if (profile.disabledCapabilityProviders !== undefined) {
-		if (
-			!Array.isArray(profile.disabledCapabilityProviders) ||
-			profile.disabledCapabilityProviders.some(
-				provider => typeof provider !== "string" || !provider.trim() || provider.length > 128,
-			)
-		) {
-			throw new Error("disabledCapabilityProviders must contain non-empty provider ids");
-		}
-	}
-	if (profile.toolPolicies !== undefined) {
-		if (!profile.toolPolicies || typeof profile.toolPolicies !== "object" || Array.isArray(profile.toolPolicies)) {
-			throw new Error("toolPolicies must be an object");
-		}
-		for (const [toolName, policy] of Object.entries(profile.toolPolicies)) {
-			if (!toolName.trim() || toolName.length > 128)
-				throw new Error("toolPolicies keys must contain 1..128 characters");
-			if (policy !== "unrestricted" && policy !== "tracked" && policy !== "permit") {
-				throw new Error(`toolPolicies.${toolName} must be unrestricted, tracked or permit`);
-			}
-		}
-	}
-	if (profile.outputSchema !== undefined) {
-		if (!profile.outputSchema || typeof profile.outputSchema !== "object" || Array.isArray(profile.outputSchema)) {
-			throw new Error("outputSchema must be an object");
-		}
-		if (!profile.requireYieldTool) throw new Error("outputSchema requires requireYieldTool");
-		if (JSON.stringify(profile.outputSchema).length > 262_144) {
-			throw new Error("outputSchema must be no larger than 262144 characters");
-		}
-	}
-	return profile;
 }
 
 async function writeStatus(config: EngineServiceConfig, value: Record<string, unknown>): Promise<void> {

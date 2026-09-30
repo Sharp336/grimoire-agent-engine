@@ -13,8 +13,6 @@ import {
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { storageCanonicalJson } from "../session/storage-client";
-import type { EngineChildLaunchResult } from "../tools";
-import { type EngineSemanticBindingSnapshot, legacyLocalChildBirth, validateSemanticBinding } from "./contracts";
 import {
 	type AgentMessageEnvelope,
 	ENGINE_EVENT_STREAM,
@@ -24,7 +22,7 @@ import {
 	type EngineEventEnvelope,
 } from "./nats-adapter";
 import type { RocksEngineStore } from "./rocks-runtime-store";
-import { engineAgentInstanceId, engineRouteToken } from "./route";
+import { engineRouteToken } from "./route";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
 import { waitForEngineWake } from "./wake";
 
@@ -94,7 +92,8 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
 		const internal = tool === "grimoire_agent_engine_dispatch" || tool === "grimoire_agent_engine_bridge"
-			|| tool === "grimoire_agent_engine_child_launch" || tool === "grimoire_job_get" || tool === "grimoire_job_cancel";
+			|| tool === "grimoire_job_get" || tool === "grimoire_job_cancel"
+			|| tool === "verify_origin_receipt" || tool === "verify_approval_receipt" || tool === "prepare_child_start";
 		const id = ++this.#requestId;
 		const envelope = internal
 			? { schema: "grimoire.client_internal_request.v1", operation: "engine_tool", request_id: String(id),
@@ -117,7 +116,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 				"X-Grimoire-Client-Version": this.#options.clientVersion ?? "0.4.0",
 				"X-Grimoire-Client-Surface": "agent_engine_bridge",
 				"X-Grimoire-Client-Protocol-Version": this.#options.protocolVersion ?? "2026-08-01",
-				"X-Grimoire-Client-Features": '["grimoire.task.v4","agent_binding.v1"]',
+				"X-Grimoire-Client-Features": '["grimoire.task.v5","agent_binding.v1","grimoire.dispatch.v2"]',
 				...(this.#options.installedSequence !== undefined
 					? { "X-Grimoire-Client-Installed-Sequence": String(this.#options.installedSequence) } : {}),
 				...(this.#options.sourceSignature
@@ -160,185 +159,8 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 	}
 }
 
-/** Delivered through the existing bounded event outbox, independently of local execution. */
-export async function projectLocalEngineChild(
-	rpc: GrimoireRpc,
-	command: EngineCommandEnvelope,
-	event: EngineEventEnvelope,
-	admittedParent?: EngineSemanticBindingSnapshot,
-): Promise<void> {
-	const states: Record<string, string> = {
-		"attempt.started": "active",
-		"attempt.resumed": "active",
-		"attempt.paused": "waiting",
-		"attempt.waiting_input": "waiting",
-		"attempt.completed": "completed",
-		"attempt.failed": "failed",
-		"attempt.cancelled": "cancelled",
-		"attempt.interrupted": "blocked",
-	};
-	const status = states[event.type];
-	if (!status) return;
-	const ref = command.agentInstanceRef;
-	const child = command.payload.localChild;
-	if (!isRecord(child) || !ref || !command.parentAgentInstanceRef ||
-		command.agentInstanceId !== event.agentInstanceId || command.attemptId !== event.attemptId ||
-		command.executionId !== event.executionId || command.authorityGeneration !== event.authorityGeneration)
-		throw new Error("Local child projection does not match its admitted command");
-	let snapshot = command.bindingSnapshot;
-	let birthId = child.agentInstanceId;
-	if (snapshot === undefined) {
-		let parentSnapshot = admittedParent;
-		if (!parentSnapshot) {
-			const response = await rpc.call("grimoire_agent_instance", {
-				action: "get", agent_instance_ref: command.parentAgentInstanceRef,
-			});
-			const parent = response.agent_instance;
-			if (!isRecord(parent) ||
-				(parent.agent_instance_ref ?? parent.grimoire_uri) !== command.parentAgentInstanceRef ||
-				parent.owner_principal_id !== command.principalId || parent.binding_mode !== "legacy_immutable" ||
-				parent.binding_revision !== 0 || parent.execution_owner_installation_id !== null ||
-				typeof parent.task_ref !== "string" ||
-				(parent.work_step_id !== null && typeof parent.work_step_id !== "string"))
-				throw new Error("Legacy child parent binding is not provably immutable");
-			parentSnapshot = {
-				agentInstanceRef: command.parentAgentInstanceRef,
-				taskRef: parent.task_ref, workStepId: parent.work_step_id,
-				bindingRevision: 0, installationId: null,
-				parentAgentInstanceRef: null, parentAttemptId: null, parentBindingRevision: null,
-			};
-		}
-		const birth = legacyLocalChildBirth(command, parentSnapshot);
-		snapshot = birth.bindingSnapshot;
-		birthId = birth.agentInstanceId;
-	}
-	validateSemanticBinding(snapshot, ref);
-	if (snapshot.parentAgentInstanceRef !== command.parentAgentInstanceRef ||
-		snapshot.parentAttemptId !== child.parentAttemptId || typeof birthId !== "string")
-		throw new Error("Local child projection differs from its frozen birth");
-	const created = await rpc.call("grimoire_agent_instance", {
-		action: "create",
-		task_ref: snapshot.taskRef,
-		agent_instance_id: birthId,
-		parent_agent_ref: command.parentAgentInstanceRef,
-		work_step_id: snapshot.workStepId,
-		...(snapshot.installationId ? { installation_id: snapshot.installationId } : {}),
-		objective: String(command.payload.input).slice(0, 16_000),
-		status,
-		context_refs: [child.profileRef],
-		visibility: "private",
-		requested_execution: {
-			role: "executor",
-			parent_attempt_id: child.parentAttemptId,
-			parent_binding_revision: snapshot.parentBindingRevision,
-			agent_profile_ref: child.profileRef,
-			selection: { mode: "manual" },
-		},
-	});
-	const agent = created.agent_instance as Record<string, unknown> | undefined;
-	if (
-		!agent ||
-		(agent.agent_instance_ref ?? agent.grimoire_uri) !== ref ||
-		agent.parent_agent_ref !== command.parentAgentInstanceRef ||
-		agent.owner_principal_id !== command.principalId
-		|| agent.task_ref !== snapshot.taskRef
-		|| (agent.work_step_id ?? null) !== snapshot.workStepId
-		|| agent.binding_revision !== snapshot.bindingRevision
-		|| (agent.execution_owner_installation_id ?? null) !== snapshot.installationId
-	) {
-		throw new Error("Local child projection returned a different identity or owner");
-	}
-	if (agent.status !== status) {
-		await rpc.call("grimoire_agent_instance", {
-			action: "update",
-			agent_instance_ref: ref,
-			expected_revision: agent.revision,
-			expected_binding_revision: snapshot.bindingRevision,
-			status,
-			current_focus: `Local Engine Attempt ${command.attemptId}: ${status}`,
-		});
-	}
-}
-
-export async function launchHostedEngineChild(
-	rpc: GrimoireRpc,
-	request: {
-		deviceId: string;
-		engineId: string;
-		parentAgentInstanceRef: string;
-		parentAttemptId: string;
-		profileRef: string;
-		workStepId: string;
-		cwd: string;
-		maxSpawnDepth: number;
-		signal?: AbortSignal;
-		cancelLocal(agentInstanceId: string): Promise<void>;
-		enrollChild?(agentInstanceRef: string, attemptId?: string): Promise<void>;
-		waitLocal(
-			agentInstanceId: string,
-			commandId: string,
-			attemptId?: string,
-			signal?: AbortSignal,
-		): Promise<{ attemptId?: string; state: string; payload: Record<string, unknown> }>;
-	},
-): Promise<EngineChildLaunchResult> {
-	request.signal?.throwIfAborted();
-	if (typeof request.waitLocal !== "function") throw new Error("Exact local Attempt result wait is unavailable");
-	const launched = await rpc.call("grimoire_agent_engine_child_launch", {
-		device_id: request.deviceId,
-		engine_id: request.engineId,
-		parent_agent_instance_ref: request.parentAgentInstanceRef,
-		parent_attempt_id: request.parentAttemptId,
-		profile_ref: request.profileRef,
-		work_step_id: request.workStepId,
-		cwd: request.cwd,
-		max_spawn_depth: request.maxSpawnDepth,
-	});
-	const agent = launched.agent_instance as Record<string, unknown> | undefined;
-	const job = launched.job as Record<string, unknown> | undefined;
-	const agentInstanceRef = String(agent?.agent_instance_ref ?? agent?.grimoire_uri ?? "");
-	const agentInstanceId = agentInstanceRef ? engineAgentInstanceId(agentInstanceRef) : "";
-	const jobId = String(job?.job_id ?? "");
-	if (!agentInstanceId || !agentInstanceRef || !jobId)
-		throw new Error("Grimoire child launch returned no durable identity");
-	const envelope =
-		job?.payload && typeof job.payload === "object"
-			? ((job.payload as Record<string, unknown>).command as Record<string, unknown> | undefined)
-			: undefined;
-	const attemptId =
-		typeof envelope?.attemptId === "string"
-			? envelope.attemptId
-			: typeof launched.attempt_id === "string"
-				? launched.attempt_id
-				: undefined;
-	try {
-		await request.enrollChild?.(agentInstanceRef, attemptId);
-		const result = await request.waitLocal(agentInstanceId, jobId, attemptId, request.signal);
-		if (result.attemptId) await request.enrollChild?.(agentInstanceRef, result.attemptId);
-		return {
-			agentInstanceId,
-			agentInstanceRef,
-			status: result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed",
-			assistantFinal: typeof result.payload.assistantFinal === "string" ? result.payload.assistantFinal : undefined,
-			...(result.state === "completed" && result.payload.structuredOutput
-				? { structuredOutput: result.payload.structuredOutput as EngineChildLaunchResult["structuredOutput"] }
-				: {}),
-			transcriptRef: typeof result.payload.transcriptRef === "string" ? result.payload.transcriptRef : undefined,
-			...(result.payload.outputTruncated === true ? { outputTruncated: true } : {}),
-			...(result.state === "completed" ? {} : { error: String(result.payload.error ?? result.state) }),
-		};
-	} catch (error) {
-		if (!request.signal?.aborted) throw error;
-		await request.cancelLocal(agentInstanceId).catch(() => {});
-		await rpc.call("grimoire_job_cancel", { job_id: jobId, reason: "parent task aborted" }).catch(() => {});
-		return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
-	}
-}
-
 export interface HostedEngineBridgeOptions {
 	rpc: GrimoireRpc;
-	/** Optional lifecycle projection for locally admitted children; never schedules execution. */
-	projectionRpc?: GrimoireRpc;
 	eventStore?: RocksEngineStore;
 	deviceId: string;
 	engineId: string;
@@ -560,8 +382,8 @@ export class HostedEngineBridge {
 					"deviceId", "engineId", "engineGeneration", "op"] as const).some(field => next[field] !== command![field]) ||
 				!next.bindingSnapshot || !command.bindingSnapshot ||
 				storageCanonicalJson(next.bindingSnapshot) !== storageCanonicalJson(command.bindingSnapshot) ||
-				!isRecord(next.payload) ||
-				["cwd", "input", "profileDigest", "launchProfile", "selectedRouteRef", "profileSelectionRevision"].some(field =>
+				["cwd", "input", "dispatchRef", "dispatchHash", "executionConfiguration",
+					"originReceiptId", "executionKind", "specialRef"].some(field =>
 					command!.payload[field] !== undefined && !(field === "cwd" && !command!.payload[field]) &&
 					(next.payload[field] === undefined ||
 						storageCanonicalJson(next.payload[field]) !== storageCanonicalJson(command!.payload[field])));
@@ -730,18 +552,6 @@ export class HostedEngineBridge {
 			return true;
 		}
 		const jobId = await this.#eventJobId(event);
-		const localStart = await this.#options.eventStore?.getStartConversationIdentity(jobId);
-		if (localStart?.serializedCommand) {
-			const command = JSON.parse(localStart.serializedCommand) as EngineCommandEnvelope;
-			if (isRecord(command.payload.localChild)) {
-				const parentAttemptId = command.payload.localChild.parentAttemptId;
-				const parent = typeof parentAttemptId === "string"
-					? await this.#options.eventStore?.getAttempt(parentAttemptId) : undefined;
-				if (this.#options.projectionRpc)
-					await projectLocalEngineChild(this.#options.projectionRpc, command, event, parent?.binding_snapshot);
-				return true;
-			}
-		}
 		let claim = this.#active.get(jobId);
 		if (
 			!claim &&

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import {
+	type EngineExecutionConfiguration,
 	type EngineAttemptState,
 	type EngineBindingGate,
 	type EngineBindingResult,
@@ -10,10 +11,11 @@ import {
 	type EngineEvent,
 	type EngineInboxMutation,
 	type EngineInboxSource,
-	type EngineProfileRouteState,
+	type ExecutorRouteState,
 	type EngineSemanticBindingSnapshot,
 	type EngineTarget,
 	EngineTargetError,
+	sameSemanticBinding,
 } from "./contracts";
 import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
@@ -21,6 +23,7 @@ import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
 import { retryFromAttempt } from "./rocks-runtime-projection";
 import { type EngineRuntime, nativeArchiveUnsupported } from "./runtime";
+import { storageCanonicalJson } from "../session/storage-client";
 import type { EngineAttachmentStageRequest } from "./runtime-attachments";
 import { RuntimeQueryError } from "./runtime-projection";
 import {
@@ -60,6 +63,8 @@ export type EngineControlQueryMethod =
 	| "runtime.tools"
 	| "runtime.events.wait"
 	| "runtime.command.get"
+	| "approval.get"
+	| "approval.authorize"
 	| "runtime.context"
 	| "runtime.usage"
 	| "runtime.queue"
@@ -129,8 +134,9 @@ export interface EnginePublicSnapshot {
 	manualHold: boolean;
 	intentRevision: number;
 	retry?: import("./contracts").EngineRetryState;
-	profileRoute?: EngineProfileRouteState;
-	profileDigest?: string;
+	executorRoute?: ExecutorRouteState;
+	executionDigest?: string;
+	continuationDigest?: string;
 	transcriptRef?: string;
 	updatedAt: number;
 	controlReadiness: { steer: boolean; pause: boolean; resume: boolean; cancel: boolean };
@@ -146,7 +152,6 @@ interface ServerOptions {
 	runtimeDir: string;
 	deviceId: string;
 	engineId: string;
-	resolveLaunchProfile: Parameters<typeof dispatchEngineCommand>[0]["resolveLaunchProfile"];
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
 }
 
@@ -377,6 +382,62 @@ async function dispatchRequest(
 			return await options.runtime.store.runtimeMessages(params as unknown as RuntimePageRequest);
 		case "runtime.tools":
 			return await options.runtime.store.runtimeTools(params as unknown as RuntimePageRequest);
+		case "approval.get":
+		case "approval.authorize": {
+			const id = requiredString(params, "requestId");
+			const principalId = requiredString(params, "principalId");
+			const approval = await options.runtime.store.getApproval(id);
+			const request = approval?.request;
+			if (!request || request.principal_id !== principalId)
+				throw new EngineTargetError("agent_not_found", "Approval request is not accessible");
+			const attempt = await options.runtime.store.getAttempt(request.requester_attempt_id);
+			if (!attempt || !attempt.execution || attempt.execution.dispatch_hash !== request.dispatch_hash)
+				throw new EngineTargetError("stale_target", "Requester Attempt has no admitted approval");
+			const inputRevision = attempt.input_revision;
+			if (params.expectedInputRevision !== undefined &&
+				requiredInteger(params, "expectedInputRevision") !== inputRevision)
+				throw new EngineTargetError("stale_target", "Approval input revision changed");
+			if (request.method === "approval.authorize" &&
+				(request.status !== "pending" || approval.state !== "pending"))
+				throw new EngineTargetError("too_late", "Approval request is no longer pending");
+			if (request.method === "approval.authorize") {
+				const caller = params.callerContext as Record<string, unknown> | undefined;
+				if (!caller || request.requires_human || request.addressed_to.kind !== "attempt" ||
+					caller.agentInstanceRef !== request.addressed_to.agent_ref ||
+					caller.attemptId !== request.addressed_to.attempt_id ||
+					caller.attemptId === request.requester_attempt_id)
+					throw new EngineTargetError("stale_target", "Caller is not the addressed ancestor");
+				const actor = await options.runtime.store.getAttempt(String(caller.attemptId));
+				const actorCommand = actor && await options.runtime.store.getStartConversationIdentity(actor.command_id);
+				const rawConfig = actorCommand?.serializedCommand &&
+					(JSON.parse(actorCommand.serializedCommand) as EngineCommandEnvelope).payload.executionConfiguration;
+				if (rawConfig) validateRuntimeValue("engineExecutionConfiguration", rawConfig);
+				const actorConfig = rawConfig as EngineExecutionConfiguration | undefined;
+				if (!actor || !actor.execution || !actorCommand || !actorConfig ||
+					actor.state !== "running" ||
+					actorCommand.agentInstanceRef !== caller.agentInstanceRef ||
+					!sameSemanticBinding(actor.binding_snapshot, caller.bindingSnapshot as EngineSemanticBindingSnapshot) ||
+					actor.execution.dispatch_hash !== caller.dispatchHash ||
+					request.requester_attempt_id !== attempt.attempt_id ||
+					attempt.binding_snapshot?.parentAttemptId !== actor.attempt_id ||
+					!["tool", "spawn"].includes(request.kind) ||
+					(request.kind === "tool" && !actorConfig.continuationConfiguration.tools_permit.includes(request.subject.tool_name)) ||
+					(request.kind === "spawn" && actorConfig.dispatch.spawn.allowed === "no"))
+					throw new EngineTargetError("stale_target", "Caller lacks the current approval ceiling");
+				const actorReceipt = await options.runtime.store.runtimeCommand(actor.command_id, { principalId });
+				if (actorReceipt.stage !== "applied" ||
+					!actorReceipt.lease || typeof actorReceipt.lease !== "object" ||
+					!("held" in actorReceipt.lease) || actorReceipt.lease.held !== true)
+					throw new EngineTargetError("stale_target", "Approving ancestor has no live lease");
+			}
+			const subject_hash = `sha256:${createHash("sha256").update(storageCanonicalJson(request.subject)).digest("hex")}`;
+			return {
+				request,
+				inputRevision,
+				ceiling_hash: "ceiling_hash" in request.subject ? request.subject.ceiling_hash : request.settings_hash,
+				subject_hash,
+			};
+		}
 		case "runtime.command.get":
 			return await options.runtime.store.runtimeCommand(
 				requiredString(params, "commandId"),
@@ -656,10 +717,7 @@ function finishRuntimeHistory(result: { work: RuntimeWork }, started: number): v
 }
 
 export async function runEngineCommand(
-	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "resolveLaunchProfile" | "provisionMailbox"> & {
-		/** Proven enrichment for an already-admitted pre-S0 local child; never part of command identity. */
-		legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
-	},
+	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "provisionMailbox">,
 	command: EngineCommandEnvelope,
 ): Promise<EngineCommandReceipt> {
 	if (command.deviceId !== options.deviceId || command.engineId !== options.engineId) {
@@ -689,9 +747,7 @@ export async function runEngineCommand(
 		const detail = await dispatchEngineCommand({
 			runtime: options.runtime,
 			command,
-			resolveLaunchProfile: options.resolveLaunchProfile,
 			provisionMailbox: options.provisionMailbox,
-			legacyBindingSnapshot: options.legacyBindingSnapshot,
 		});
 		// Native start commits its receipt atomically with the Attempt. Preserve that exact receipt.
 		const committed = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
@@ -708,6 +764,13 @@ export async function runEngineCommand(
 		if (error instanceof EngineBindingPendingError) {
 			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
 			throw error;
+		}
+		// A Start can fail while materializing credentials after its atomic applied Attempt admission.
+		// Never rewrite that immutable receipt as rejected; the Attempt carries the terminal failure.
+		if (command.op === "start") {
+			const committed = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
+			if (committed.status === "replay" && committed.receipt.outcome === "applied")
+				return committed.receipt;
 		}
 		const message = error instanceof Error ? error.message.slice(0, 2_048) : String(error).slice(0, 2_048);
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
@@ -821,6 +884,8 @@ async function runtimeAgent(
 	const agentInstanceRef = requiredString(params, "agentInstanceRef");
 	validateRuntimeValue("agi", agentInstanceRef);
 	const attemptId = requireAttempt ? requiredString(params, "attemptId") : optionalString(params.attemptId);
+	if (attemptId)
+		await runtime.store.assertHistoricalAttemptAccess(attemptId, requiredString(params, "principalId"));
 	const target = await runtime.store.runtimeTarget({
 		agentInstanceRef,
 		...(attemptId ? { attemptId } : {}),
@@ -881,10 +946,11 @@ async function snapshotFromAttempt(
 		manualHold: binding?.manualHold ?? false,
 		intentRevision: binding?.intentRevision ?? 0,
 		retry: retryFromAttempt(attempt),
-		profileDigest: exactBinding?.profileDigest,
-		...(attempt.profile_route_state
-			? { profileRoute: JSON.parse(attempt.profile_route_state) as EngineProfileRouteState }
-			: {}),
+		executorRoute: attempt.executor_route_state
+			? JSON.parse(attempt.executor_route_state) as ExecutorRouteState
+			: undefined,
+		executionDigest: attempt.execution?.execution_digest,
+		continuationDigest: attempt.execution?.continuation_digest,
 		transcriptRef: attempt.transcript_session_id
 			? `history://${binding?.engineAgentId ?? engineAgentId(attempt.agent_instance_id)}`
 			: undefined,
@@ -1169,6 +1235,8 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"runtime.tools",
 			"runtime.events.wait",
 			"runtime.command.get",
+			"approval.get",
+			"approval.authorize",
 			"runtime.context",
 			"runtime.usage",
 			"runtime.queue",

@@ -138,12 +138,6 @@ export interface DeferredDiagnosticsEntry {
 	isStale(): boolean;
 }
 
-/** Engine-only delegation target compiled from the principal's cached AgentProfile artifacts. */
-export interface EngineChildProfile {
-	profileRef: string;
-	displayName: string;
-	description?: string;
-}
 
 /** Native Attempt result retained independently of bounded assistant text. */
 export interface EngineChildLaunchResult {
@@ -159,10 +153,8 @@ export interface EngineChildLaunchResult {
 
 export interface EngineChildLauncher {
 	readonly parentAgentInstanceRef: string;
-	profiles: readonly EngineChildProfile[];
 	launch(request: {
-		profileRef: string;
-		workStepId?: string;
+		target: { task_ref: string; work_step_id: string | null };
 		assignment: string;
 		toolCallId: string;
 		signal?: AbortSignal;

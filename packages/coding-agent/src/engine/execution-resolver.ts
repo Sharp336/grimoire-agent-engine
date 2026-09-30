@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, StoredAuthCredential } from "@oh-my-pi/pi-ai";
+import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, SimpleStreamOptions, StoredAuthCredential } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -25,7 +25,7 @@ import type {
 	ProviderExecutionMaterial,
 } from "./provider-execution";
 
-/** Admitted Attempt facts every credential/admission request is bound to (ง3, ง8.3). */
+/** Admitted Attempt facts every credential/admission request is bound to (ยง3, ยง8.3). */
 export type ExecutionAttemptIdentity = Omit<
 	ProviderExecutionIdentity,
 	| "routeRef"
@@ -54,10 +54,14 @@ export interface ResolvedEngineExecution {
 	>;
 	/** Native retry selector per admitted frozen route unit (index-aligned); undefined = unusable here. */
 	selectors: Array<string | undefined>;
+	/** Recheck current route/credential authorization before a lease transfer or model swap. */
+	verifyCandidate(index: number, signal?: AbortSignal): Promise<void>;
 	dispose(): void;
 }
 
 type RouteExecution = EngineExecutionRoute["execution"];
+type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
+const BROKER_CREDENTIAL_PLACEHOLDER = "gri_pbr_pending";
 
 const LOCAL_OMP_REF = /^localomp:\/([A-Za-z0-9][A-Za-z0-9._~@-]{0,254})(?:#([1-9][0-9]{0,15}))?$/;
 const CLIENT_CREDENTIAL_REF = /^(?:wincred|clientcred):\/[/]?[A-Za-z0-9][A-Za-z0-9._~-]{0,254}$/;
@@ -150,7 +154,9 @@ export class EngineExecutionResolver {
 				cacheDbPath: path.join(attemptDir, "models.sqlite"),
 			});
 			const apiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
+			const externalProviders = new Map<string, ProviderExecutionBinding>();
 			const selectors: Array<string | undefined> = [];
+			const candidateBindings: Array<ProviderExecutionBinding | undefined> = [];
 			let model: Model | undefined;
 			let thinkingLevel: ResolvedThinkingLevel | undefined;
 			for (const [index, route] of frozen.entries()) {
@@ -166,7 +172,7 @@ export class EngineExecutionResolver {
 						const ref = execution.credential.local_ref ?? execution.credential.hosted_ref;
 						if (
 							execution.credential.method !== "api_key" ||
-							__omp_shell("ref ||")
+							!ref ||
 							(execution.credential.local_ref && !CLIENT_CREDENTIAL_REF.test(execution.credential.local_ref))
 						)
 							throw new Error(`Credential method ${execution.credential.method} is unsupported for this route`);
@@ -174,12 +180,15 @@ export class EngineExecutionResolver {
 						const identity = Object.freeze({ ...attempt, ...routeIdentity(route), modelId: route.modelId });
 						material = await this.providerExecutionClient.resolve(identity, signal);
 						const marker = `clientexec://sha256:${createHash("sha256").update(stableStringifyJson(identity), "utf8").digest("hex")}`;
-						external.set(marker, {
+						const binding = {
 							identity,
 							transport: executionTransport(material),
 							executionPin: material.executionPin,
-						});
+						};
+						external.set(marker, binding);
+						candidateBindings[index] = binding;
 						provider = `artel-route-${route.route_ref.slice(5)}`;
+						externalProviders.set(provider, binding);
 						await authStorage.set(provider, { type: "api_key", key: marker });
 					}
 					const candidate = buildModel(toModelSpec(route, provider, material)) as Model;
@@ -213,21 +222,41 @@ export class EngineExecutionResolver {
 					selectors.push(undefined);
 				}
 			}
+			const quotaHook = this.providerAdmissionClient?.createHook(
+				admission, authStorage, primary.execution.base_url, apiKeyRoutes,
+			);
+			const executionClient = this.providerExecutionClient;
+			const refreshFetch = (runtimeModel: Model, fetch: Fetch): Fetch => async (input, init) => {
+				const binding = externalProviders.get(runtimeModel.provider);
+				if (!binding) return fetch(input, init);
+				if (!executionClient) throw new Error("Provider execution material is unavailable");
+				// Every physical request rechecks live Engine admission and current Core ACL/credential fences.
+				const current = await executionClient.resolve(binding.identity, init?.signal ?? undefined, binding.executionPin);
+				if (stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
+					throw new Error("Provider execution transport changed; start a new Attempt");
+				if (binding.transport.mode !== "hosted_broker") return fetch(input, init);
+				const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+				let replaced = false;
+				for (const [key, value] of headers) {
+					if (!value.includes(BROKER_CREDENTIAL_PLACEHOLDER)) continue;
+					headers.set(key, value.replaceAll(BROKER_CREDENTIAL_PLACEHOLDER, current.credential));
+					replaced = true;
+				}
+				if (!replaced) throw new Error("Hosted broker request has no replaceable authorization header");
+				return fetch(input, { ...init, headers });
+			};
 			return {
 				options: {
 					settings: sessionSettings,
 					authStorage,
 					modelRegistry,
 					model,
-					providerRequestHook:
-						this.providerAdmissionClient && (admission || apiKeyRoutes.length > 0)
-							? this.providerAdmissionClient.createHook(
-									admission,
-									authStorage,
-									primary.execution.base_url,
-									apiKeyRoutes,
-								)
-							: undefined,
+					providerRequestHook: {
+						wrapFetch: (runtimeModel, fetch) => {
+							const guarded = refreshFetch(runtimeModel, fetch);
+							return quotaHook ? quotaHook.wrapFetch(runtimeModel, guarded) : guarded;
+						},
+					},
 					thinkingLevel,
 					toolNames: settings.restrictToolNames ? settings.toolNames : undefined,
 					restrictToolNames: settings.restrictToolNames,
@@ -236,6 +265,16 @@ export class EngineExecutionResolver {
 					maxSpawnDepth,
 				},
 				selectors,
+				verifyCandidate: async (index, signal) => {
+					const binding = candidateBindings[index];
+					if (!binding || !this.providerExecutionClient)
+						throw new Error("Admitted fallback credential is unavailable");
+					const current = await this.providerExecutionClient.resolve(
+						binding.identity, signal, binding.executionPin,
+					);
+					if (stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
+						throw new Error("Provider execution transport changed; start a new Attempt");
+				},
 				dispose: () => authStorage.close(),
 			};
 		} catch (error) {
@@ -302,6 +341,7 @@ async function resolveProviderExecutionCredential(
 ): Promise<string | undefined> {
 	const binding = identities.get(value);
 	if (!binding) return process.env[value] || value;
+	if (binding.transport.mode === "hosted_broker") return BROKER_CREDENTIAL_PLACEHOLDER;
 	if (!client) throw new Error("Provider execution material is unavailable");
 	const material = await client.resolve(binding.identity, signal, binding.executionPin);
 	if (stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport)) {

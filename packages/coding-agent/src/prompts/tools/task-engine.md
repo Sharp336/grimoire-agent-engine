@@ -1,17 +1,7 @@
-Launch a local child AgentSession with a bounded assignment in the current task.
+Delegate a bounded assignment to a child AgentInstance on a real Task or WorkStep.
 
-Current task: {{taskRef}}
 Parent AgentInstance: {{parentAgentInstanceRef}}
 
-These identities come from this session's Engine binding. Calls always launch under this parent and task.
+Supply `target` as `{task_ref, work_step_id}`. Use `work_step_id: null` for an unoccupied Task-level writer; use an existing authorized WorkStep or real Child Task when the Task already has a responsible writer. The parent Attempt supplies provenance, not the child's work target or authority. The ClientHost checks target membership, current ACL, parent state and spawn ceilings before admission.
 
-Provide `assignment` with the concrete objective, necessary context or references, constraints and expected result (at most 32 KiB of UTF-8). The child receives this text locally; include enough context to work without fetching a hosted WorkStep. `workStepId` is optional metadata for an existing WorkStep, not a prerequisite for execution. Hosted availability does not gate local launch when cached profile and provider prerequisites are ready.
-
-Select `profileRef` explicitly from the catalog below; the parent's profile is never inherited. A failed result means the child did not complete successfully; resolve the reported cause before retrying.
-
-Available AgentProfiles:
-{{#each profiles}}
-- {{profileRef}}: {{displayName}}{{#if description}} — {{description}}{{/if}}
-{{else}}
-- No child AgentProfiles are allowed by the pinned profile.
-{{/each}}
+Supply `assignment` with the objective, context, constraints and expected result (at most 32 KiB UTF-8). The child launch uses the current authorized executor roster; neither profile refs nor model-selected special execution are accepted.

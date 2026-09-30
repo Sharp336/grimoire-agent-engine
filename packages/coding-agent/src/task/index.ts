@@ -516,8 +516,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const lines: string[] = [];
 		if (this.session.engineChildLauncher) {
 			const engine = args as EngineTaskParams;
-			if (typeof engine.profileRef === "string") lines.push(`Profile: ${truncateForPrompt(engine.profileRef)}`);
-			if (typeof engine.workStepId === "string") lines.push(`WorkStep: ${truncateForPrompt(engine.workStepId)}`);
+			if (engine.target) lines.push(`Target: ${truncateForPrompt(`${engine.target.task_ref}${engine.target.work_step_id ? ` / ${engine.target.work_step_id}` : ""}`)}`);
 			if (typeof engine.assignment === "string") lines.push(`Assignment: ${truncateForPrompt(engine.assignment)}`);
 			return lines;
 		}
@@ -616,8 +615,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const params = args as EngineTaskParams;
 			return renderTaskCall(
 				{
-					agent: params.profileRef,
-					task: params.assignment?.trim() || `Grimoire WorkStep ${params.workStepId ?? ""}`,
+					agent: "task",
+					task: params.assignment?.trim() || `Grimoire Task ${params.target?.task_ref ?? ""}`,
 				},
 				options,
 				theme,
@@ -632,8 +631,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const launcher = this.session.engineChildLauncher;
 			return prompt.render(engineTaskDescriptionTemplate, {
 				parentAgentInstanceRef: launcher.parentAgentInstanceRef,
-				taskRef: launcher.parentAgentInstanceRef.replace(/\/agents\/[^/]+$/, ""),
-				profiles: launcher.profiles,
 			});
 		}
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
@@ -1105,23 +1102,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const launcher = this.session.engineChildLauncher!;
-		const profileRef = typeof params.profileRef === "string" ? params.profileRef.trim() : "";
-		const workStepId = typeof params.workStepId === "string" ? params.workStepId.trim() || undefined : undefined;
+		const target = params.target;
 		const assignment = typeof params.assignment === "string" ? params.assignment.trim() : "";
-		if (!profileRef) return createTaskModeError("profileRef is required");
+		if (!target?.task_ref?.trim() || !/^grimoire:\/\/tasks\/[^/]+\/[^/]+$/.test(target.task_ref) ||
+			(target.work_step_id !== null && (!target.work_step_id || typeof target.work_step_id !== "string")))
+			return createTaskModeError("A real Task or WorkStep target is required");
 		if (!assignment) return createTaskModeError("assignment is required");
 		if (Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES) {
 			return createTaskModeError(`assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);
 		}
-		const profile = launcher.profiles.find(candidate => candidate.profileRef === profileRef);
-		if (!profile) return createTaskModeError(`AgentProfile ${profileRef} is not in the pinned child catalog`);
 		const startedAt = Date.now();
 		onUpdate?.({
-			content: [{ type: "text", text: `Launching ${profile.displayName}...` }],
+			content: [{ type: "text", text: `Launching child for ${target.task_ref}...` }],
 			details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 		});
 		try {
-			const child = await launcher.launch({ profileRef, workStepId, assignment, toolCallId, signal });
+			const child = await launcher.launch({ target, assignment, toolCallId, signal });
 			const durationMs = Date.now() - startedAt;
 			const output = child.assistantFinal ?? child.error ?? "";
 			const transcriptNotice =
@@ -1135,7 +1131,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const result: SingleResult = {
 				index: 0,
 				id: child.agentInstanceId,
-				agent: profile.displayName,
+				agent: "task",
 				...(child.agentInstanceRef ? { agentInstanceRef: child.agentInstanceRef } : {}),
 				agentSource: "user",
 				task: assignment,

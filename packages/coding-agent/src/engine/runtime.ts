@@ -22,7 +22,7 @@ import {
 } from "@oh-my-pi/pi-utils/latency-audit";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
-import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
+import { withSettingsScope } from "../config/settings";
 import {
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
@@ -51,7 +51,7 @@ import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session
 import type {
 	SessionEntry,
 	SessionHeader,
-	SessionLaunchSnapshot,
+	LegacySessionLaunchSnapshot,
 	SessionMessageIdentity,
 } from "../session/session-entries";
 import {
@@ -59,8 +59,7 @@ import {
 	type SessionDurabilityCheckpoint,
 	SessionManager,
 } from "../session/session-manager";
-import { readStorageBinding, StorageClient, StorageClientError } from "../session/storage-client";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import { readStorageBinding, StorageClient, StorageClientError, storageCanonicalJson } from "../session/storage-client";
 import type { StructuredSubagentOutput, YieldItem } from "../task/types";
 import { arrayValuedLabels, assembleYieldResult } from "../task/yield-assembly";
 import type { EngineChildLaunchResult, EngineInboxToolRequest } from "../tools";
@@ -127,7 +126,7 @@ import {
 } from "./runtime-history";
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
-import { candidateIdentity, candidateRef, frozenCandidate, LEASE_HEARTBEAT_MS } from "./routing-admission";
+import { type AdmissionRequest, candidateIdentity, candidateRef, frozenCandidate, LEASE_HEARTBEAT_MS } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
@@ -266,6 +265,7 @@ function terminalYield(
 
 interface LiveBinding extends EngineBindingSnapshot {
 	previousInboxSessionId?: string;
+	principalId: string;
 	pendingInboxSourceSessionId?: string;
 	uncommittedForkSessionFile?: string;
 	manualHold: boolean;
@@ -301,8 +301,10 @@ interface LiveBinding extends EngineBindingSnapshot {
 		config: EngineExecutionConfiguration;
 		frozen: EngineExecutionRoute[];
 		selectors: Array<string | undefined>;
+		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
 		choice: ExecutorChoice;
 	};
+	leaseHeartbeat?: NodeJS.Timeout;
 	executorRouteState?: ExecutorRouteState;
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
@@ -426,14 +428,21 @@ export interface EngineRuntimeOptions {
 		cwd: string,
 		signal?: AbortSignal,
 	) => Promise<ResolvedEngineExecution>;
-	/** Resolves the exact server-private origin receipt; an opaque id alone is never trusted. */
+	/** Resolves the exact server-private origin receipt; no opaque id alone is trusted. */
 	verifyOriginReceipt?: (receipt: {
 		originReceiptId: string;
 		commandId: string;
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<void>;
+	}) => Promise<{ verified: true; dispatchHash: string; bindingSnapshot: EngineSemanticBindingSnapshot; authContextId: string }>;
+	verifyApprovalReceipt?: (receipt: {
+		originReceiptId: string;
+		commandId: string;
+		agentInstanceRef: string;
+		attemptId: string;
+		principalId: string;
+	}) => Promise<{ verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"] }>;
 	launchChild?: (request: {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
@@ -478,8 +487,10 @@ export class EngineRuntime {
 		kind?: HistoryDispatchKind,
 		images?: ImageContent[],
 	) => Promise<boolean>;
-	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
-	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
+	readonly #resolveExecution: EngineRuntimeOptions["resolveExecution"];
+	readonly #verifyOriginReceipt: EngineRuntimeOptions["verifyOriginReceipt"];
+	readonly #verifyApprovalReceipt: EngineRuntimeOptions["verifyApprovalReceipt"];
+	readonly #deviceId: string;
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
 	readonly #childHistoryRetention: "local" | "off" | "grimoire";
 	readonly #streamAdmissionLimits: EngineRuntimeOptions["streamAdmissionLimits"];
@@ -518,8 +529,10 @@ export class EngineRuntime {
 				}
 				return session.prompt(input, { ...identity, ...(images?.length ? { images } : {}) });
 			});
-		this.#resolveSessionProfile = options.resolveSessionProfile;
-		this.#resolveSessionContinuation = options.resolveSessionContinuation;
+		this.#resolveExecution = options.resolveExecution;
+		this.#verifyOriginReceipt = options.verifyOriginReceipt;
+		this.#verifyApprovalReceipt = options.verifyApprovalReceipt;
+		this.#deviceId = options.deviceId;
 		this.#launchChild = options.launchChild;
 		const childHistoryTtlMinutes = options.childHistoryTtlMinutes ?? 60;
 		if (!Number.isSafeInteger(childHistoryTtlMinutes) || childHistoryTtlMinutes < 1) {
@@ -639,15 +652,12 @@ export class EngineRuntime {
 		return this.agentRegistry.get(agentInstanceId)?.id;
 	}
 
-	start(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
+	start(request: EngineStartRequest): Promise<EngineStartResult> {
 		validateStartRequest(request);
-		if (request.bindingSnapshot) request = { ...request, bindingSnapshot: { ...request.bindingSnapshot } };
+		request = { ...request, bindingSnapshot: { ...request.bindingSnapshot } };
 		if (request.attachmentUploadIds !== undefined) {
 			const references = this.#messageAttachments(request);
 			request = { ...request, attachmentUploadIds: references!.uploadIds };
-		}
-		if (!profile.profileDigest.trim()) {
-			throw new EngineTargetError("invalid_request", "profileDigest must be a non-empty string");
 		}
 		const laneIds = request.historyEdit
 			? [request.agentInstanceId, request.historyEdit.source.agentInstanceId]
@@ -672,7 +682,7 @@ export class EngineRuntime {
 		audit?.mark("start_enter");
 		return this.#inLanes(laneIds, () => {
 			audit?.mark("lane_ready");
-			return this.#startInLane(request, profile, pending.controller.signal, audit);
+			return this.#startInLane(request, pending.controller.signal, audit);
 		})
 			.catch(async error => {
 				audit?.mark("start_error");
@@ -1199,25 +1209,33 @@ export class EngineRuntime {
 		throw new EngineTargetError("agent_not_found", `Unknown pending Attempt ${request.attemptId}`);
 	}
 
-	resolveToolApproval(request: EngineToolApprovalDecision): Promise<void> {
-		if (!request.commandId.trim() || !request.approvalId.trim()) {
-			throw new EngineTargetError("invalid_request", "commandId and approvalId must be non-empty strings");
-		}
-		if (request.decision !== "approve" && request.decision !== "deny") {
-			throw new EngineTargetError("invalid_request", "decision must be approve or deny");
-		}
+	resolveApproval(request: EngineApprovalDecision): Promise<void> {
+		const decision = request.approvalDecision;
+		validateRuntimeValue("approvalDecision", decision);
+		if (!request.commandId.trim() || decision.command_id !== request.commandId || !this.#verifyApprovalReceipt)
+			throw new EngineTargetError("invalid_request", "A verified approval decision and command are required");
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			const pending = this.#pendingToolApprovals.get(request.approvalId);
-			if (!pending || pending.record.target.bindingId !== binding.bindingId) {
-				throw new EngineTargetError("too_late", `Tool approval ${request.approvalId} is no longer pending`);
-			}
-			const events = await this.store.resolveToolApproval(
-				pending.record.target,
-				request.approvalId,
-				request.decision,
+			const pending = this.#pendingToolApprovals.get(decision.request_id);
+			const approval = await this.store.getApproval(decision.request_id);
+			if (!binding.bindingSnapshot || approval?.state !== "pending" ||
+				approval.request.requester_attempt_id !== binding.attemptId ||
+				approval.request.requester_agent_ref !== binding.bindingSnapshot.agentInstanceRef ||
+				approval.request.principal_id !== decision.decided_by.principal_id)
+				throw new EngineTargetError("stale_target", "Approval requester or principal changed");
+			const verified = await this.#verifyApprovalReceipt({
+				originReceiptId: decision.origin_receipt_id,
+				commandId: request.commandId,
+				agentInstanceRef: binding.bindingSnapshot.agentInstanceRef,
+				attemptId: binding.attemptId,
+				principalId: approval.request.principal_id,
+			});
+			if (verified.verified !== true ||
+				storageCanonicalJson(verified.approvalDecision) !== storageCanonicalJson(decision))
+				throw new EngineTargetError("stale_target", "Approval origin differs from its submitted decision");
+			const events = await this.store.resolveApproval(
+				this.#snapshot(binding), decision.request_id, decision.decision, decision,
 				{
-					...(request.reason ? { reason: request.reason.slice(0, 2_048) } : {}),
 					causationCommandId: request.commandId,
 					settleCommandId: request.commandId,
 					expectedIntentRevision: request.expectedIntentRevision,
@@ -1225,9 +1243,13 @@ export class EngineRuntime {
 				},
 			);
 			this.#notifyEvents(events);
-			if (this.#pendingToolApprovals.get(request.approvalId) !== pending) return;
-			this.#pendingToolApprovals.delete(request.approvalId);
-			pending.resolve({ decision: request.decision, reason: request.reason });
+			if (pending && this.#pendingToolApprovals.get(decision.request_id) === pending) {
+				this.#pendingToolApprovals.delete(decision.request_id);
+				pending.resolve({
+					decision: decision.decision === "deny" ? "deny" : "approve",
+					reason: decision.reason ?? undefined,
+				});
+			}
 		});
 	}
 
@@ -1895,11 +1917,22 @@ export class EngineRuntime {
 
 	async #startInLane(
 		request: EngineStartRequest,
-		profile: EngineLaunchProfile,
 		pendingStartSignal: AbortSignal,
 		audit?: LatencyAudit,
 	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
+		if (!this.#resolveExecution || !this.#verifyOriginReceipt)
+			throw new EngineTargetError("source_unavailable", "Execution resolver and verified origin are required");
+		const origin = await this.#verifyOriginReceipt({
+			originReceiptId: request.originReceiptId,
+			commandId: request.commandId,
+			agentInstanceRef: request.agentInstanceRef,
+			attemptId: request.attemptId,
+			principalId: request.principalId,
+		});
+		if (origin.verified !== true || origin.dispatchHash !== request.dispatchHash ||
+			!sameSemanticBinding(origin.bindingSnapshot, request.bindingSnapshot) || !origin.authContextId)
+			throw new EngineTargetError("stale_target", "Origin receipt differs from admitted dispatch or binding");
 		await this.store.checkSemanticStart(request.agentInstanceId, request.bindingSnapshot, request.principalId);
 		let binding = this.#bindings.get(request.agentInstanceId);
 		const admitted = binding ?? await this.store.getBinding(request.agentInstanceId);
@@ -1912,7 +1945,7 @@ export class EngineRuntime {
 					if (binding.authorityGeneration !== request.authorityGeneration) {
 						throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
 					}
-					return { ...this.#snapshot(binding), duplicate: true };
+					return { ...this.#snapshot(binding), executorChoice: binding.execution.choice, duplicate: true };
 				}
 				throw new EngineTargetError(
 					"invalid_request",
@@ -1936,7 +1969,7 @@ export class EngineRuntime {
 				durableBinding.executionId === request.executionId &&
 				durableBinding.authorityGeneration === request.authorityGeneration
 			) {
-				return { ...durableBinding, duplicate: true };
+				return { ...durableBinding, executorChoice: priorAttempt.execution?.executor_choice, duplicate: true };
 			}
 			throw new EngineTargetError(
 				"too_late",
@@ -2004,7 +2037,7 @@ export class EngineRuntime {
 					if (restored.checkpointNeeded)
 						throw new EngineTargetError("stale_target", "Completed workspace rebind lost its native checkpoint");
 				} else if (restored) {
-					if (!explicitContinue || profile.continuationPolicy === "fresh")
+					if (!explicitContinue || request.executionConfiguration.continuationPolicy === "fresh")
 						throw new EngineTargetError("stale_target", "Restored workspace requires explicit Continue");
 					if ((await canonicalWorkspacePath(request.cwd)) !== (await canonicalWorkspacePath(restored.cwd)))
 						throw new EngineTargetError(
@@ -2047,9 +2080,9 @@ export class EngineRuntime {
 				)
 			: undefined;
 		const images = preparedAttachments?.images;
-		const continuationDigest = await this.#continuationDigest(request, profile);
+		const continuationDigest = await this.#continuationDigest(request);
 		const compatibilityDigest = restoreReceipt
-			? await this.#continuationDigest(request, profile, restoreReceipt.originalCwd)
+			? await this.#continuationDigest(request, restoreReceipt.originalCwd)
 			: undefined;
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		if (request.restoreCheckpoint) throw nativeArchiveUnsupported();
@@ -2061,141 +2094,148 @@ export class EngineRuntime {
 			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 		}
 		const originals = preparedAttachments?.originalAttachments;
-		const reused =
-			binding &&
-			!preparedSession &&
-			profile.continuationPolicy !== "fresh" &&
-			await this.#sameAdmittedBinding(binding, request) &&
-			binding.profileDigest === continuationDigest
-				? binding
-				: undefined;
-		// Attachment support is decided before any live binding is replaced, mutated or opened.
-		let resolved: EngineResolvedSessionProfile | undefined;
-		if (!reused) {
+		const config = request.executionConfiguration;
+		if (executionHash(config.dispatch) !== request.dispatchHash)
+			throw new EngineTargetError("invalid_request", "Dispatch hash does not match the normalized execution");
+		if (!config.roster_complete || config.routes.routes.length === 0)
+			throw new EngineTargetError("admission_state_unknown", "A complete authorized executor roster is required");
+		const { toolNames, restrictToolNames } = config.continuationConfiguration;
+		assertFilesReadable(
+			toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
+			originals,
+		);
+		const admission: AdmissionRequest = {
+			principalId: request.principalId,
+			deviceId: this.#deviceId,
+			engineGeneration: this.engineGeneration,
+			commandId: request.commandId,
+			agentInstanceRef: request.agentInstanceRef,
+			attemptId: request.attemptId,
+			dispatchId: config.dispatch.dispatch_id,
+			dispatchRef: request.dispatchRef,
+			dispatchHash: request.dispatchHash,
+			originReceiptId: request.originReceiptId,
+			authContextId: origin.authContextId,
+			bindingSnapshot: request.bindingSnapshot,
+			executionKind: request.executionKind,
+			limits: config.routingLimits,
+			rosterRevision: config.roster_revision,
+			expectedRevisions: config.record_revisions,
+			candidates: config.routes.routes,
+			callerAttemptId: request.bindingSnapshot.parentAttemptId,
+			frozen: false,
+		};
+		let preview = await this.store.previewRouting(admission);
+		if (preview.status === "queued") {
 			try {
-				pendingStartSignal?.throwIfAborted();
-				audit?.mark("binding_profile_start");
-				resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
-				audit?.mark("binding_profile_done");
-				// Same precedence as the session options: resolved options override the launch profile.
-				// A restricted session without names has no tools; an unrestricted one without names has all.
-				const { toolNames, restrictToolNames } = {
-					toolNames: profile.toolNames,
-					restrictToolNames: profile.restrictToolNames,
-					...resolved?.options,
-				};
-				assertFilesReadable(
-					toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
-					originals,
-				);
-				if (binding) await this.#terminateBinding(binding, "requested");
+				preview = await this.store.queueRouting(admission);
 			} catch (error) {
-				resolved?.dispose();
-				if (!preparedSession) throw error;
-				try {
-					await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
-				} catch (cleanupError) {
-					throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
-				}
-				throw error;
+				if (!(error instanceof EngineTargetError) || error.code !== "admission_state_unknown") throw error;
+				preview = await this.store.previewRouting(admission);
+				if (preview.status === "queued") preview = await this.store.queueRouting(admission);
 			}
-			binding = undefined;
-		} else {
-			this.#assertAttachmentSupport(reused.session, images, originals, reused.launchModel ?? reused.session.model);
-			if (
-				reused.launchModel &&
-				(reused.session.model?.provider !== reused.launchModel.provider ||
-					reused.session.model?.id !== reused.launchModel.id)
-			) {
-				pendingStartSignal?.throwIfAborted();
-				await reused.session.setModelTemporary(reused.launchModel, reused.launchThinkingLevel);
-				pendingStartSignal?.throwIfAborted();
-			}
-			reused.bindingGeneration++;
-			reused.bindingId = `${engineRouteToken(reused.agentInstanceId)}:${reused.bindingGeneration}`;
-			reused.pauseGate.resume();
-			reused.executionId = request.executionId;
-			reused.attemptId = request.attemptId;
-			reused.commandId = request.commandId;
-			reused.authorityGeneration = request.authorityGeneration;
-			reused.bindingSnapshot = request.bindingSnapshot;
-			reused.attemptState = "accepted";
-			reused.state = "idle";
-			reused.steerCommandIds = [];
-			reused.steerCommandSet.clear();
-			reused.activeToolCallIds.clear();
-			reused.childWaits.clear();
-			reused.parkedEffectTools.clear();
-			reused.traceTools.clear();
-			reused.traceWriteTail = Promise.resolve();
-			reused.messageWriteError = undefined;
-			reused.modelCallSequence = 0;
-			reused.childLaunches.clear();
-			reused.profileRouteState = undefined;
-			this.#resetAssistantStream(reused);
-			reused.assistantMessageSequence = 0;
-			reused.lastAssistantMessageId = undefined;
-			reused.activeModelCalls.clear();
-			reused.pauseCommandIds.clear();
-			reused.pauseRequests.clear();
-			reused.resumeCommandIds.clear();
-			reused.session.setAttemptId(request.attemptId);
-			audit?.mark("binding_reused");
 		}
-		if (!binding) {
-			audit?.mark("binding_open_start");
-			binding = await this.#openBinding(
-				request,
-				profile,
-				resolved,
+		if (preview.status === "queued") {
+			if (preparedSession) await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
+			return {
+				bindingId: `${engineRouteToken(request.agentInstanceId)}:${(admitted?.bindingGeneration ?? 0) + 1}`,
+				commandId: request.commandId,
+				bindingSnapshot: request.bindingSnapshot,
+				agentInstanceId: request.agentInstanceId,
+				executionId: request.executionId,
+				attemptId: request.attemptId,
+				engineAgentId: engineAgentId(request.agentInstanceId),
+				executionDigest: executionHash(config),
 				continuationDigest,
-				conversationIdentityDigest,
-				restoreReceipt,
-				compatibilityDigest,
-				preparedSession,
-				pendingStartSignal,
-				audit,
-			);
-			audit?.mark("binding_open_done");
-			// The opened session is authoritative for tools and model; nothing durable references it yet.
-			try {
-				this.#assertAttachmentSupport(binding.session, images, originals);
-			} catch (error) {
-				await this.#discardBinding(binding);
-				throw error;
-			}
-		}
-		if (preparedHistory?.pendingInboxSourceSessionId) {
-			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
-		}
-		if (
-			queuedItem &&
-			queuedItem.sessionId !== binding.session.sessionId &&
-			queuedItem.sessionId !== binding.previousInboxSessionId &&
-			queuedItem.sessionId !== `pending:${request.agentInstanceId}`
-		) {
-			await this.#discardBinding(binding);
-			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
-		}
-		const previousIntent = this.#intentState(binding);
-		try {
-			const holdPendingInbox = preparedHistory?.pendingInboxSourceSessionId !== undefined;
-			binding.manualHold = holdPendingInbox || (initialIntent.manualHold && !explicitContinue);
-			binding.intentRevision = initialIntent.intentRevision + (request.expectedIntentRevision === undefined ? 0 : 1);
-			binding.intentCommandId = request.commandId;
-			binding.state = "running";
-			binding.attemptState = "running";
-			const result = {
-				...this.#controlResult(
-					binding,
-					queuedItem ? "consumed" : "applied",
-					queuedItem ? { ...queuedItem, revision: queuedItem.revision + 1 } : undefined,
-				),
-				...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
+				dispatchRef: request.dispatchRef,
+				dispatchHash: request.dispatchHash,
+				state: "idle",
+				engineGeneration: this.engineGeneration,
+				bindingGeneration: (admitted?.bindingGeneration ?? 0) + 1,
+				authorityGeneration: request.authorityGeneration,
+				manualHold: initialIntent.manualHold,
+				intentRevision: initialIntent.intentRevision,
+				queueId: preview.queueId,
+				duplicate: false,
 			};
-			audit?.mark("acceptance_checkpoint_start");
-			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
-				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
+		}
+		const route = preview.frozen[0];
+		if (!route) throw new EngineTargetError("admission_state_unknown", "Admitted route is missing");
+		const selected: SelectedExecutor = {
+			...candidateIdentity(route),
+			basis: config.dispatch.requirement.pin ? "pin" : route.order_match ? "order" : "rank",
+			order_match: route.order_match,
+		};
+		const candidates = preview.frozen.map(frozenCandidate);
+		const executionDigest = executionHash({
+			schema: "artel.execution.v2",
+			dispatchHash: request.dispatchHash,
+			executionConfiguration: config,
+			record_revisions: config.record_revisions,
+			scope_revision: config.scope_revision,
+			candidates,
+			selected,
+		});
+		const choice: ExecutorChoice = {
+			schema: "grimoire.executor_choice.v1",
+			dispatch_hash: request.dispatchHash,
+			preset_ref: config.dispatch.preset?.ref ?? null,
+			effective_requirement: config.dispatch.requirement,
+			scope_revision: config.scope_revision,
+			candidates,
+			filtered_counts: preview.filtered,
+			selected,
+			execution_digest: executionDigest,
+			shadow_cost_estimate: route.shadow_cost,
+			rules: [],
+			skills: [],
+			transitions: [],
+			actual_cost: null,
+			grants_used: [],
+		};
+		const initial: EngineBindingSnapshot = {
+			bindingId: `${engineRouteToken(request.agentInstanceId)}:${(admitted?.bindingGeneration ?? 0) + 1}`,
+			commandId: request.commandId,
+			bindingSnapshot: request.bindingSnapshot,
+			agentInstanceId: request.agentInstanceId,
+			executionId: request.executionId,
+			attemptId: request.attemptId,
+			engineAgentId: engineAgentId(request.agentInstanceId),
+			executionDigest,
+			continuationDigest,
+			dispatchRef: request.dispatchRef,
+			dispatchHash: request.dispatchHash,
+			state: "running",
+			engineGeneration: this.engineGeneration,
+			bindingGeneration: (admitted?.bindingGeneration ?? 0) + 1,
+			authorityGeneration: request.authorityGeneration,
+			manualHold: initialIntent.manualHold && !explicitContinue,
+			intentRevision: initialIntent.intentRevision + (request.expectedIntentRevision === undefined ? 0 : 1),
+			intentCommandId: request.commandId,
+		};
+		const result = {
+			phase: queuedItem ? "consumed" : "applied",
+			manualHold: initial.manualHold,
+			intentRevision: initial.intentRevision,
+			executorChoice: choice,
+			executionDigest,
+			continuationDigest,
+			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
+		};
+		// Nothing requests a credential or issues an effect until the owner's one atomic acceptance.
+		try {
+			const events = await this.store.commitAttemptTransition(initial, "running", [{ kind: "accepted" }, { kind: "running" }], {
+				routingAdmission: { request: admission, preview },
+				execution: {
+					execution_schema: 2,
+					execution_digest: executionDigest,
+					continuation_digest: continuationDigest,
+					dispatch_ref: request.dispatchRef,
+					dispatch_hash: request.dispatchHash,
+					executor_choice: choice,
+					lease_id: `slot-lease:${request.attemptId}`,
+					queue_id: null,
+				},
 				startIntent: {
 					expectedRevision: request.expectedIntentRevision,
 					explicitContinue,
@@ -2207,9 +2247,9 @@ export class EngineRuntime {
 				settleCommandReceipt: { outcome: "applied", detail: result },
 				...(restoreReceipt ? { restoreWorkspaceReceipt: restoreReceipt } : {}),
 				requireNew: true,
-				inboxSessionId: binding.session.sessionId,
 				...(queuedItem
 					? {
+							inboxSessionId: queuedItem.sessionId,
 							inboxMutation: {
 								mutationId: request.mutationId!,
 								queueId: queuedItem.queueId,
@@ -2220,26 +2260,77 @@ export class EngineRuntime {
 						}
 					: {}),
 			});
-			audit?.mark("acceptance_checkpoint_done");
-			delete binding.previousInboxSessionId;
-			delete binding.pendingInboxSourceSessionId;
-			delete binding.uncommittedForkSessionFile;
+			this.#notifyEvents(events);
 		} catch (error) {
-			this.#restoreIntent(binding, previousIntent);
-			try {
-				await this.#discardBinding(binding);
-			} catch (cleanupError) {
-				throw new AggregateError([error, cleanupError], "Engine admission and cleanup failed");
-			}
-			if (error instanceof EngineAttemptConflictError) {
-				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
-			}
-			if (error instanceof EngineInboxConflictError) {
-				throw new EngineTargetError("stale_target", error.message);
-			}
+			if (preparedSession) await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
 			throw error;
 		}
-		if (references && !queuedItem?.attachments) binding.directUploads.set(request.clientMessageId!, references);
+		let leaseError: unknown;
+		let renewing = false;
+		const heartbeat = setInterval(() => {
+			if (renewing || leaseError) return;
+			renewing = true;
+			void this.store.renewRouting(request.attemptId, this.engineGeneration)
+				.then(renewed => {
+					if (!renewed) throw new EngineTargetError("stale_target", "Routing lease disappeared");
+				})
+				.catch(error => {
+					leaseError = error;
+					if (binding?.attemptId === request.attemptId)
+						binding.session.agent.abort(error instanceof Error ? error : new Error(String(error)));
+				})
+				.finally(() => { renewing = false; });
+		}, LEASE_HEARTBEAT_MS);
+		heartbeat.unref?.();
+		let resolved: ResolvedEngineExecution | undefined;
+		try {
+			if (binding) await this.#terminateBinding(binding, "requested");
+			const attempt: ExecutionAttemptIdentity = {
+				expectedPrincipalId: request.principalId,
+				agentInstanceRef: request.agentInstanceRef,
+				attemptId: request.attemptId,
+				bindingRevision: request.bindingSnapshot.bindingRevision,
+				installationId: request.bindingSnapshot.installationId,
+				dispatchRef: request.dispatchRef,
+				dispatchHash: request.dispatchHash,
+				executionDigest,
+				originReceiptId: request.originReceiptId,
+			};
+			resolved = await this.#resolveExecution(config, preview.frozen, attempt, request.cwd, pendingStartSignal);
+			binding = await this.#openBinding(
+				request, resolved, continuationDigest, conversationIdentityDigest,
+				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
+				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit,
+			);
+			resolved = undefined;
+			this.#assertAttachmentSupport(binding.session, images, originals);
+			if (preparedHistory?.pendingInboxSourceSessionId)
+				binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
+			if (queuedItem && queuedItem.sessionId !== binding.session.sessionId &&
+				queuedItem.sessionId !== binding.previousInboxSessionId &&
+				queuedItem.sessionId !== `pending:${request.agentInstanceId}`)
+				throw new EngineTargetError("stale_target", "Queued message belongs to another session");
+			binding.manualHold = initial.manualHold;
+			binding.intentRevision = initial.intentRevision ?? 0;
+			binding.intentCommandId = request.commandId;
+			binding.state = "running";
+			binding.attemptState = "running";
+			if (leaseError) throw leaseError;
+			binding.leaseHeartbeat = heartbeat;
+			await this.#commitAttemptTransition(binding, "running", [], {
+				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
+				inboxSessionId: binding.session.sessionId,
+			});
+		} catch (error) {
+			clearInterval(heartbeat);
+			if (binding?.attemptId === request.attemptId) await this.#discardBinding(binding);
+			else resolved?.dispose();
+			const events = await this.store.commitAttemptTransition(initial, "failed", [
+				{ kind: "failed", payload: { reason: safeEngineErrorDetail(error) } },
+			], { cause: safeEngineErrorDetail(error) });
+			this.#notifyEvents(events);
+			throw error;
+		}
 		this.#trackRun(
 			this.#runPrompt(
 				binding,
@@ -2261,7 +2352,7 @@ export class EngineRuntime {
 						? "continue"
 						: undefined),
 				request.context,
-				{ profileSelectionRevision: request.profileSelectionRevision, agentInstanceRef: request.agentInstanceRef },
+				{ agentInstanceRef: request.agentInstanceRef },
 				images,
 			),
 		);
@@ -2269,6 +2360,7 @@ export class EngineRuntime {
 		return {
 			...this.#snapshot(binding),
 			duplicate: false,
+			executorChoice: binding.execution.choice,
 			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 			...(queuedItem ? { queueId: queuedItem.queueId, queueRevision: queuedItem.revision + 1 } : {}),
 		};
@@ -2352,10 +2444,14 @@ export class EngineRuntime {
 	/** Takes ownership of `resolved`: it is disposed with the binding or on any startup failure. */
 	async #openBinding(
 		request: EngineStartRequest,
-		profile: EngineLaunchProfile,
-		resolved: EngineResolvedSessionProfile | undefined,
+		resolved: ResolvedEngineExecution,
 		continuationDigest: string,
 		conversationIdentityDigest: string,
+		executionDigest: string,
+		choice: ExecutorChoice,
+		frozen: readonly EngineExecutionRoute[],
+		priorBinding: EngineBindingSnapshot | undefined,
+		bindingGeneration: number,
 		restoreReceipt?: RestoreWorkspaceReceipt,
 		compatibilityDigest?: string,
 		preparedSessionManager?: SessionManager,
@@ -2373,9 +2469,8 @@ export class EngineRuntime {
 				throw new Error("Prepared session was not durably materialized");
 			pendingStartSignal?.throwIfAborted();
 			audit?.mark("binding_history_start");
-			const prior = await this.store.getBinding(request.agentInstanceId);
-			const profileDigest = continuationDigest;
-			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
+			const prior = priorBinding;
+			const config = request.executionConfiguration;
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			let previousInboxSessionId: string | undefined;
@@ -2383,12 +2478,11 @@ export class EngineRuntime {
 				!preparedSessionManager &&
 				prior?.sessionFile &&
 				await this.#sameAdmittedBinding(prior, request) &&
-				(prior.profileDigest === profileDigest ||
+				(prior.continuationDigest === continuationDigest ||
 					(restoreReceipt &&
-						prior.profileDigest === compatibilityDigest &&
-						prior.profileDigest === restoreReceipt.oldProfileDigest &&
+						prior.continuationDigest === compatibilityDigest &&
 						prior.bindingId === restoreReceipt.oldBindingId)) &&
-				profile.continuationPolicy !== "fresh"
+				config.continuationPolicy !== "fresh"
 			) {
 				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
 			} else if (!preparedSessionManager) {
@@ -2396,15 +2490,12 @@ export class EngineRuntime {
 					? await this.#conversationCarrySource(
 							prior,
 							request,
-							profile,
 							conversationIdentityDigest,
 							restoreReceipt,
 						)
 					: undefined;
 				if (prior?.sessionFile && previousInboxSessionId) {
-					// A profile/dependency change needs a fresh AgentSession so none of the old
-					// model, tools, settings, or admission policy survives. Fork only the durable
-					// conversation branch, then rebuild the runtime from the newly resolved profile.
+					// A changed execution gets a fresh runtime; only the durable conversation is forked.
 					const source = this.#nativeSessionStorage(prior.sessionFile);
 					const { familyId } = parseNativeSessionLocator(prior.sessionFile);
 					const target = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
@@ -2413,8 +2504,7 @@ export class EngineRuntime {
 							throw new Error("Retained AgentSession conversation could not be loaded", { cause: error });
 						},
 					);
-					// Workspace roots are executable authority, not conversation history. The
-					// new profile/settings snapshot repopulates its own roots during session setup.
+					// Workspace roots are authority, not conversation history.
 					await sessionManager.setAdditionalDirectories([]);
 				} else {
 					sessionManager = SessionManager.createNative(
@@ -2431,27 +2521,18 @@ export class EngineRuntime {
 			const toolExecutionHook: ToolExecutionHook = {
 				before: (call, signal) => {
 					if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
-					return this.#beforeToolExecution(liveBinding, profile, call, signal);
+					return this.#beforeToolExecution(liveBinding, call, signal);
 				},
 				after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
 			};
-			const childProfiles = resolved?.childProfiles ?? [];
-			const childProfileRefs = profile.childProfileRefs ?? [];
-			const maxChildren = profile.maxChildren ?? 0;
+			const spawn = config.dispatch.spawn;
+			const maxChildren = spawn.allowed === "no" ? 0 : spawn.max_children;
 			const engineChildLauncher =
-				this.#launchChild &&
-				request.agentInstanceRef &&
-				profile.spawns === "*" &&
-				(profile.maxSpawnDepth ?? 0) > 0 &&
-				maxChildren > 0 &&
-				childProfiles.length > 0 &&
-				childProfileRefs.length > 0
+				this.#launchChild && spawn.allowed !== "no" && spawn.max_depth > 0 && maxChildren > 0
 					? {
 							parentAgentInstanceRef: request.agentInstanceRef,
-							profiles: childProfiles,
 							launch: async (child: {
-								profileRef: string;
-								workStepId?: string;
+								target: WorkTarget;
 								assignment: string;
 								toolCallId: string;
 								signal?: AbortSignal;
@@ -2460,27 +2541,19 @@ export class EngineRuntime {
 								if (!parent) throw new Error("Engine child launcher is not bound to its parent Attempt");
 								if (!parent.bindingSnapshot)
 									throw new EngineTargetError("source_unavailable", "Parent Attempt binding is unavailable");
-								if (
-									!childProfileRefs.includes(child.profileRef) ||
-									!childProfiles.some(candidate => candidate.profileRef === child.profileRef)
-								) {
-									throw new Error(`AgentProfile ${child.profileRef} is outside the pinned child catalog`);
-								}
-								if (!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren) {
-									throw new Error(`AgentProfile maxChildren ceiling (${maxChildren}) reached`);
-								}
+								if (!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren)
+									throw new EngineTargetError("capacity_unavailable", "Child spawn ceiling reached");
 								parent.childLaunches.add(child.toolCallId);
 								try {
 									return await this.#launchChild!({
 										...child,
 										parentAgentInstanceId: parent.agentInstanceId,
-										parentAgentInstanceRef: request.agentInstanceRef!,
+										parentAgentInstanceRef: request.agentInstanceRef,
 										parentAttemptId: parent.attemptId,
 										parentBindingSnapshot: parent.bindingSnapshot,
 										principalId: request.principalId,
 										authorityGeneration: request.authorityGeneration,
 										cwd: request.cwd,
-										maxSpawnDepth: Math.max(0, (profile.maxSpawnDepth ?? 0) - 1),
 										enrollChild: async (agentInstanceRef, attemptId) => {
 											const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
 											await this.store.registerAgent({
@@ -2503,24 +2576,24 @@ export class EngineRuntime {
 						}
 					: undefined;
 			audit?.mark("binding_child_history_start");
-			const engineHistory = await this.#retainedDirectChildHistory(request, profile, prior);
+			const engineHistory = await this.#retainedDirectChildHistory(request, prior);
 			audit?.mark("binding_child_history_done");
 			const sessionOptions: CreateAgentSessionOptions = {
 				...this.#sessionDefaults,
 				cwd: request.cwd,
 				sessionManager,
-				systemPrompt: profile.systemPrompt
-					? defaultPrompt => [...defaultPrompt, profile.systemPrompt as string]
+				systemPrompt: config.continuationConfiguration.systemPrompt
+					? defaultPrompt => [...defaultPrompt, config.continuationConfiguration.systemPrompt]
 					: undefined,
-				providerPromptCacheKey: profile.providerPromptCacheKey,
-				spawns: profile.spawns,
-				toolNames: profile.toolNames,
-				restrictToolNames: profile.restrictToolNames,
-				enableMCP: profile.enableMCP,
-				enableLsp: profile.enableLsp,
-				outputSchema: profile.outputSchema,
-				requireYieldTool: profile.requireYieldTool,
-				...resolved?.options,
+				providerPromptCacheKey: config.continuationConfiguration.providerPromptCacheKey ?? undefined,
+				spawns: spawn.allowed === "no" ? "" : "*",
+				toolNames: config.continuationConfiguration.toolNames,
+				restrictToolNames: config.continuationConfiguration.restrictToolNames,
+				enableMCP: config.continuationConfiguration.enableMCP,
+				enableLsp: config.continuationConfiguration.enableLsp,
+				outputSchema: config.continuationConfiguration.outputSchema ?? undefined,
+				requireYieldTool: config.continuationConfiguration.requireYieldTool,
+				...resolved.options,
 				providerRequestHook: {
 					wrapFetch: (model, fetch) => {
 						const wrapped = createProviderRetryBudgetHook(
@@ -2573,8 +2646,44 @@ export class EngineRuntime {
 					exactSchedule: true,
 					allowRetryAfterBeyondMaxDelay: true,
 					deferNestedProviderRetries: true,
-					sameModelRouteFallback: resolved?.sameModelRouteFallback,
-					orderedRouteFallback: resolved?.orderedRouteFallback,
+					orderedRouteFallback: {
+						selectors: resolved.selectors.slice(1).filter((selector): selector is string => selector !== undefined),
+						beforeApply: async (selector, signal) => {
+							const parent = liveBinding;
+							if (!parent || parent.attemptState !== "running") return false;
+							const index = parent.execution.selectors.indexOf(selector);
+							if (index <= 0) return false;
+							const candidate = parent.execution.frozen[index];
+							if (!candidate) return false;
+							await parent.execution.verifyCandidate(index, signal);
+							const updated = {
+								...parent.execution.choice.selected,
+								...candidateIdentity(candidate),
+								order_match: candidate.order_match,
+							};
+							const digest = executionHash({
+								schema: "artel.execution.v2",
+								dispatchHash: parent.dispatchHash,
+								executionConfiguration: parent.execution.config,
+								record_revisions: parent.execution.config.record_revisions,
+								scope_revision: parent.execution.config.scope_revision,
+								candidates: parent.execution.choice.candidates,
+								selected: updated,
+							});
+							const changed = await this.store.commitExecutorRoute(
+								this.#snapshot(parent), candidateIdentity(candidate), "route_fallback",
+								digest, parent.execution.config.routingLimits,
+							);
+							if (!changed) return false;
+							parent.execution.choice = {
+								...parent.execution.choice,
+								execution_digest: digest,
+								transitions: [...parent.execution.choice.transitions, changed.payload as ExecutorChoice["transitions"][number]],
+							};
+							this.#notifyEvents([changed]);
+							return true;
+						},
+					},
 				},
 				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
@@ -2587,25 +2696,41 @@ export class EngineRuntime {
 				sessionOptions.settings = await sessionOptions.settings.cloneForCwd(request.cwd);
 			}
 			if (this.#mcpServer) {
-				// A hosted session never inherits an ambient manager, including from a profile.
+				// A hosted session uses its own signed Attempt context, never ambient MCP authority.
 				sessionOptions.mcpManager = undefined;
 				if (sessionOptions.enableMCP !== false && sessionOptions.restrictToolNames !== true) {
+					const authorization = this.#mcpServer.headers?.Authorization;
+					if (!authorization?.startsWith("Bearer "))
+						throw new EngineTargetError("source_unavailable", "Hosted MCP caller attestation requires local bearer");
+					const callerContext = JSON.stringify({
+						agentInstanceRef: request.agentInstanceRef,
+						attemptId: request.attemptId,
+						bindingRevision: request.bindingSnapshot.bindingRevision,
+						dispatchHash: request.dispatchHash,
+					});
+					const callerAttestation = `hmac-sha256:${crypto.createHmac("sha256", authorization.slice(7))
+						.update("grimoire-client-caller-context-v1\0").update(callerContext).digest("hex")}`;
 					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
 					try {
 						await Promise.all([
 							ready.promise,
-							mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
+							mcpManager.connectServers({ grimoire_engine: {
+								...this.#mcpServer,
+								headers: {
+									...this.#mcpServer.headers,
+									"X-Grimoire-Client-Caller-Context": callerContext,
+									"X-Grimoire-Client-Caller-Attestation": callerAttestation,
+								},
+							} }, {}, event => {
 								if (event.type === "connected") ready.resolve();
 								if (event.type === "failed") ready.reject(new Error(safeHostedMcpFailure(event.error)));
 							}),
 						]);
 					} catch (error) {
-						if (!request.parentAgentInstanceId) throw error;
 						await mcpManager.disconnectAll();
-						mcpManager = undefined;
-						logger.warn("Child is continuing with local tools; hosted MCP is unavailable");
+						throw error;
 					}
 					sessionOptions.mcpManager = mcpManager;
 					audit?.mark("binding_mcp_connect_done");
@@ -2628,6 +2753,7 @@ export class EngineRuntime {
 			}
 
 			const binding: LiveBinding = {
+				principalId: request.principalId,
 				bindingId: `${route}:${bindingGeneration}`,
 				commandId: request.commandId,
 				bindingSnapshot: request.bindingSnapshot,
@@ -2636,7 +2762,10 @@ export class EngineRuntime {
 				attemptId: request.attemptId,
 				engineAgentId: id,
 				sessionFile: created.session.sessionFile,
-				profileDigest,
+				executionDigest: executionDigest,
+				continuationDigest,
+				dispatchRef: request.dispatchRef,
+				dispatchHash: request.dispatchHash,
 				conversationIdentityDigest,
 				...(previousInboxSessionId ? { previousInboxSessionId } : {}),
 				...(uncommittedForkSessionFile ? { uncommittedForkSessionFile } : {}),
@@ -2653,12 +2782,9 @@ export class EngineRuntime {
 				steerCommandIds: [],
 				steerCommandSet: new Set(),
 				unsubscribe: () => {},
-				disposeProfile: resolved?.dispose ?? (() => {}),
-				profileRoutes: resolved?.profileRoutes,
-				launchProfileRef: profile.launchProfileRef,
-				launchModel: resolved?.profileRoutes ? created.session.model : undefined,
-				launchThinkingLevel: created.session.configuredThinkingLevel(),
-				requireYieldTool: profile.requireYieldTool === true,
+				disposeExecution: resolved.dispose,
+				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice, verifyCandidate: resolved.verifyCandidate },
+				requireYieldTool: config.continuationConfiguration.requireYieldTool,
 				outputSchema: sessionOptions.outputSchema,
 				pauseGate,
 				activeToolCallIds: new Set(),
@@ -2758,7 +2884,7 @@ export class EngineRuntime {
 			manager.onEntryAppended = onEntryAppended;
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_start" && event.message.role === "assistant") {
-					this.#queueProfileRoute(binding, "active", event.message);
+					this.#queueExecutorRoute(binding, "active", event.message);
 					this.#beginAssistantStream(binding, event.message.timestamp);
 				}
 				if (
@@ -2814,7 +2940,7 @@ export class EngineRuntime {
 					this.#notifyPauseProgress(binding);
 				}
 				if (event.type === "auto_retry_start") {
-					this.#queueProfileRoute(binding, "loading");
+					this.#queueExecutorRoute(binding, "loading");
 					const model = binding.session.model;
 					const retry = {
 						attempt: event.attempt,
@@ -2843,7 +2969,7 @@ export class EngineRuntime {
 					this.#queueRetryEvent(binding, "retry_settled", retry);
 				}
 				if (event.type === "profile_route_exhausted" && event.reason === "routes_unavailable") {
-					this.#queueProfileRoute(binding, "exhausted");
+					this.#queueExecutorRoute(binding, "exhausted");
 				}
 				if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
 					this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
@@ -2887,7 +3013,6 @@ export class EngineRuntime {
 
 	async #retainedDirectChildHistory(
 		request: EngineStartRequest,
-		profile: EngineLaunchProfile,
 		prior: EngineBindingSnapshot | undefined,
 	): Promise<EngineHistoryAccess> {
 		const access: EngineHistoryAccess = {
@@ -2907,7 +3032,7 @@ export class EngineRuntime {
 		const parentTaskRef = request.bindingSnapshot?.taskRef;
 		if (
 			!prior?.sessionFile ||
-			profile.continuationPolicy === "fresh" ||
+			request.executionConfiguration.continuationPolicy === "fresh" ||
 			prior.authorityGeneration !== request.authorityGeneration ||
 			!(await this.#sameAdmittedBinding(prior, request)) ||
 			!request.bindingSnapshot
@@ -2957,50 +3082,35 @@ export class EngineRuntime {
 			identity.agentInstanceId === request.agentInstanceId &&
 			identity.parentAgentInstanceId === request.parentAgentInstanceId)
 			return true;
-		// Unscoped native SDK sessions have no hosted Task binding.
-		return !request.agentInstanceRef && !request.bindingSnapshot && !identity?.agentInstanceRef;
+		return false;
 	}
 
-	async #continuationDigest(
-		request: EngineStartRequest,
-		profile: EngineLaunchProfile,
-		canonicalCwdOverride?: string,
-	): Promise<string> {
-		if (
-			profile.continuationPolicy !== undefined &&
-			profile.continuationPolicy !== "exact" &&
-			profile.continuationPolicy !== "fresh"
-		) {
-			throw new EngineTargetError("invalid_request", "continuationPolicy must be exact or fresh");
-		}
-		if (this.#resolveSessionProfile && !this.#resolveSessionContinuation) {
-			throw new Error("Engine session profile resolution requires an exact continuation dependency digest");
-		}
+	async #continuationDigest(request: EngineStartRequest, canonicalCwdOverride?: string): Promise<string> {
+		const config = request.executionConfiguration;
 		const canonicalCwd =
 			canonicalCwdOverride === undefined
 				? await canonicalWorkspacePath(request.cwd)
 				: canonicalRetainedWorkspacePath(canonicalCwdOverride);
-		return sessionProfileDigest({
-			agentInstanceId: request.agentInstanceId,
+		return executionHash({
+			schema: "artel.continuation.v2",
 			agentInstanceRef: request.agentInstanceRef,
-			parentAgentInstanceId: request.parentAgentInstanceId,
+			parentAgentInstanceRef: request.parentAgentInstanceRef ?? null,
 			authorityGeneration: request.authorityGeneration,
 			canonicalCwd,
-			continuationPolicy: profile.continuationPolicy ?? "exact",
-			profile,
-			dependencyDigest: await this.#resolveSessionContinuation?.(profile, request.cwd),
-			sessionDefaults: sessionClosure(this.#sessionDefaults),
+			continuationPolicy: config.continuationPolicy,
+			continuationConfiguration: config.continuationConfiguration,
+			stableDependencyDigest: config.stableDependencyDigest,
+			sessionDefaults: config.sessionDefaults,
 		});
 	}
 
 	async #conversationCarrySource(
 		prior: EngineBindingSnapshot,
 		request: EngineStartRequest,
-		profile: EngineLaunchProfile,
 		conversationIdentityDigest: string,
 		restoreReceipt?: RestoreWorkspaceReceipt,
 	): Promise<string | undefined> {
-		if (!prior.sessionFile || profile.continuationPolicy === "fresh") return undefined;
+		if (!prior.sessionFile || request.executionConfiguration.continuationPolicy === "fresh") return undefined;
 		if (prior.authorityGeneration !== request.authorityGeneration) return undefined;
 		if (!(await this.#sameAdmittedBinding(prior, request))) return undefined;
 		const storedDigest = await this.store.getBindingConversationIdentity(request.agentInstanceId);
@@ -3037,7 +3147,7 @@ export class EngineRuntime {
 	}
 
 	async #conversationIdentityDigest(request: EngineStartRequest, canonicalCwdOverride?: string): Promise<string> {
-		return sessionProfileDigest({
+		return executionHash({
 			agentInstanceId: request.agentInstanceId,
 			agentInstanceRef: request.agentInstanceRef,
 			parentAgentInstanceId: request.parentAgentInstanceId,
@@ -3155,7 +3265,6 @@ export class EngineRuntime {
 
 	async #beforeToolExecution(
 		binding: LiveBinding,
-		profile: EngineLaunchProfile,
 		call: ToolExecutionHookCall,
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
@@ -3163,7 +3272,7 @@ export class EngineRuntime {
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) throw binding.messageWriteError;
 		const checkpoint = await this.#effectCheckpoint(binding);
-		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
+		const policy = binding.execution.config.continuationConfiguration.toolPolicies[call.toolName] ?? "unrestricted";
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
 		const invocationId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${call.toolCallId}\0${inputHash}`).slice(0, 32)}`;
@@ -3215,11 +3324,51 @@ export class EngineRuntime {
 		this.#pendingToolApprovals.set(record.invocationId, pending);
 		try {
 			const binding = this.#bindings.get(record.target.agentInstanceId);
-			if (!binding) throw new EngineTargetError("stale_target", "Approval binding was released");
+			if (!binding?.bindingSnapshot) throw new EngineTargetError("stale_target", "Approval binding was released");
+			const parentRef = binding.bindingSnapshot.parentAgentInstanceRef;
+			const parent = parentRef && this.#bindings.get(engineAgentInstanceId(parentRef));
+			const parentCanDecide = parent && parent.attemptId === binding.bindingSnapshot.parentAttemptId &&
+				parent.attemptState === "running" &&
+				parent.execution.config.continuationConfiguration.tools_permit.includes(record.toolName);
+			const addressedTo: ApprovalAddressee = parentCanDecide
+				? { kind: "attempt", agent_ref: parentRef!, attempt_id: parent.attemptId }
+				: { kind: "human", principal_id: binding.principalId };
+			const now = new Date();
+			const timeoutSeconds = 300;
+			const request: ApprovalRequest = {
+				schema: "grimoire.approval_request.v1",
+				id: record.invocationId,
+				principal_id: binding.principalId,
+				requester_agent_ref: binding.bindingSnapshot.agentInstanceRef,
+				requester_attempt_id: binding.attemptId,
+				requester_binding_revision: binding.bindingSnapshot.bindingRevision,
+				dispatch_hash: binding.dispatchHash,
+				effect_id: record.invocationId,
+				kind: "tool",
+				name: record.toolName,
+				subject: {
+					tool_name: record.toolName,
+					call_hash: `sha256:${record.inputHash}`,
+					ceiling_hash: executionHash(binding.execution.config.continuationConfiguration.tools_permit),
+				},
+				requires_human: !parentCanDecide,
+				reason: `Permission requested for ${record.toolName}`,
+				created_at: now.toISOString(),
+				addressed_to: addressedTo,
+				addressed_at: now.toISOString(),
+				expires_at: new Date(now.getTime() + timeoutSeconds * 1000).toISOString(),
+				address_revision: 1,
+				decision_revision: 0,
+				status: "pending",
+				timeout_seconds: timeoutSeconds,
+				settings_revision: 0,
+				settings_hash: executionHash({ approval_timeout_seconds: timeoutSeconds }),
+			};
+			validateRuntimeValue("approvalRequest", request);
 			const checkpoint = await this.#effectCheckpoint(binding);
 			const event = await this.#admitEffect(
 				binding,
-				() => this.store.requestToolApproval(record.target, this.#toolEffect(record), checkpoint),
+				() => this.store.requestToolApproval(record.target, this.#toolEffect(record), request, checkpoint),
 				signal,
 			);
 			this.#notifyEvents([event]);
@@ -3414,8 +3563,7 @@ export class EngineRuntime {
 	): Promise<void> {
 		const approvalId = pending.record.invocationId;
 		if (this.#pendingToolApprovals.get(approvalId) !== pending) return;
-		const events = await this.store.resolveToolApproval(pending.record.target, approvalId, "cancelled", {
-			reason: reason.slice(0, 2_048),
+		const events = await this.store.resolveApproval(pending.record.target, approvalId, "cancelled", null, {
 			causationCommandId,
 		});
 		this.#notifyEvents(events);
@@ -3629,7 +3777,7 @@ export class EngineRuntime {
 			);
 			this.#notifyEvents([started]);
 			audit?.mark("model_started", { eventId: started.eventId });
-			this.#queueProfileRoute(binding, "loading");
+			this.#queueExecutorRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
@@ -3724,7 +3872,7 @@ export class EngineRuntime {
 		identity?: SessionMessageIdentity,
 		kind: HistoryDispatchKind = "prompt",
 		context?: string,
-		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
+		selection?: Pick<EngineStartRequest, "agentInstanceRef">,
 		images?: ImageContent[],
 	): Promise<void> {
 		const configuredLimits = this.#streamAdmissionLimits;
@@ -3752,33 +3900,26 @@ export class EngineRuntime {
 		identity?: SessionMessageIdentity,
 		kind: HistoryDispatchKind = "prompt",
 		context?: string,
-		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
+		selection?: Pick<EngineStartRequest, "agentInstanceRef">,
 		images?: ImageContent[],
 	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
-		// Capture only the initiating prompt. Steering and internal reminders must
-		// not pretend to apply a new profile; native message identity owns the data.
+		// The native user entry keeps the Attempt's immutable admitted execution, not a profile selection.
 		if (kind === "prompt" && identity?.sourceCommandId) {
-			const model = binding.session.model;
-			const previous = binding.session.sessionManager.getLastUserLaunchSnapshot(binding.agentInstanceId);
-			const previousSelectionRevision =
-				previous === undefined ? 0 : (historyLaunchSnapshot(previous ?? undefined)?.selectionRevision ?? null);
 			identity = {
 				...identity,
 				launchSnapshot: {
-					schema: "engine.launch_snapshot.v1",
+					schema: "engine.launch_snapshot.v2",
 					agentInstanceId: binding.agentInstanceId,
-					agentInstanceRef: selection?.agentInstanceRef ?? null,
+					agentInstanceRef: selection?.agentInstanceRef ?? binding.bindingSnapshot!.agentInstanceRef,
 					executionId: binding.executionId,
 					attemptId,
-					profileRef: binding.profileRoutes?.profileRef ?? binding.launchProfileRef ?? null,
-					profileDigest: binding.profileDigest,
-					selectionRevision: selection?.profileSelectionRevision ?? null,
-					previousSelectionRevision,
-					thinkingLevel: binding.session.configuredThinkingLevel() ?? null,
-					model: model ? { provider: model.provider, id: model.id, contextWindow: model.contextWindow } : null,
-					routes: structuredClone(binding.profileRoutes?.routes ?? []),
+					dispatchRef: binding.dispatchRef,
+					dispatchHash: binding.dispatchHash,
+					executionDigest: binding.executionDigest,
+					continuationDigest: binding.continuationDigest,
+					selectedRouteRef: binding.execution.choice.selected.route_ref,
 				},
 			};
 		}
@@ -4319,44 +4460,27 @@ export class EngineRuntime {
 		binding.assistantStream = undefined;
 	}
 
-	#queueProfileRoute(binding: LiveBinding, phase: EngineProfileRouteState["phase"], message?: AssistantMessage): void {
-		const mapping = binding.profileRoutes;
-		if (!mapping) return;
+	#queueExecutorRoute(binding: LiveBinding, phase: ExecutorRouteState["phase"], message?: AssistantMessage): void {
 		const provider = message?.provider ?? binding.session.model?.provider;
 		const modelId = message?.model ?? binding.session.model?.id;
-		const matched = mapping.routes.find(route => route.provider === provider && route.modelId === modelId);
-		if (!matched) return;
-		const previous = binding.profileRouteState;
-		const routeRef = phase === "active" ? matched.routeRef : previous?.routeRef;
-		const profileRoute: EngineProfileRouteState = {
-			profileRef: mapping.profileRef,
-			primaryRouteRef: mapping.primaryRouteRef,
-			...(routeRef ? { routeRef } : {}),
-			...(phase === "loading" ? { pendingRouteRef: matched.routeRef } : {}),
-			...(phase === "active" && matched.slotId
-				? {
-						slotId: matched.slotId,
-						thinkingLevel: binding.session.thinkingLevel ?? null,
-						thinkingSource: matched.thinkingSource,
-					}
-				: phase === "exhausted" && previous?.slotId
-					? {
-							slotId: previous.slotId,
-							thinkingLevel: previous.thinkingLevel,
-							thinkingSource: previous.thinkingSource,
-						}
-					: {}),
-			fallback: matched.routeRef !== mapping.primaryRouteRef,
+		const route = binding.execution.frozen.find(candidate =>
+			candidate.provider === provider && candidate.modelId === modelId);
+		if (!route) return;
+		const previous = binding.executorRouteState;
+		const selected = candidateIdentity(binding.execution.choice.transitions.at(-1)?.to ??
+			binding.execution.choice.selected);
+		const state: ExecutorRouteState = {
+			dispatchHash: binding.dispatchHash,
+			selected: phase === "active" ? candidateIdentity(route) : selected,
+			pending: phase === "loading" ? candidateIdentity(route) : null,
+			fallback: candidateRef(route) !== candidateRef(binding.execution.choice.selected),
 			phase,
+			eventSeq: previous?.eventSeq ?? 0,
 		};
-		if (JSON.stringify(previous) === JSON.stringify(profileRoute)) return;
-		binding.profileRouteState = profileRoute;
-		// Capture identity now: queued writes must not borrow a later Attempt on this binding.
+		if (previous && storageCanonicalJson(previous) === storageCanonicalJson(state)) return;
+		binding.executorRouteState = state;
 		const target = this.#snapshot(binding);
-		void this.#queueBindingWrite(binding, profileRoute, async () => {
-			const event = await this.store.commitAttemptProfileRoute(target, profileRoute);
-			if (event) this.#notifyEvents([event]);
-		});
+		void this.#queueBindingWrite(binding, state, () => this.store.commitExecutorRouteState(target, state));
 	}
 
 	#queueRetryEvent(
@@ -4594,6 +4718,8 @@ export class EngineRuntime {
 		attemptState: EngineAttemptState,
 		beforeSessionDispose?: () => Promise<void>,
 	): Promise<void> {
+		clearInterval(binding.leaseHeartbeat);
+		binding.leaseHeartbeat = undefined;
 		binding.session.beginDispose();
 		const errors: unknown[] = [];
 		await collectFailure(errors, binding.unsubscribe);
@@ -4612,7 +4738,7 @@ export class EngineRuntime {
 		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
 		await collectFailure(errors, () => binding.mcpManager?.disconnectAll());
-		await collectFailure(errors, binding.disposeProfile);
+		await collectFailure(errors, binding.disposeExecution);
 		await collectFailure(errors, () => this.agentRegistry.unregister(binding.engineAgentId, binding.session));
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} resource cleanup failed`);
 	}
@@ -4834,6 +4960,10 @@ export class EngineRuntime {
 			restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
 		} = {},
 	): Promise<void> {
+		if (state === "paused" || TERMINAL_ATTEMPT_STATES.has(state)) {
+			clearInterval(binding.leaseHeartbeat);
+			binding.leaseHeartbeat = undefined;
+		}
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
 			...options,
 			conversationIdentityDigest: binding.conversationIdentityDigest,
@@ -4867,7 +4997,10 @@ export class EngineRuntime {
 			attemptId: binding.attemptId,
 			engineAgentId: binding.engineAgentId,
 			sessionFile: binding.sessionFile,
-			profileDigest: binding.profileDigest,
+			executionDigest: binding.executionDigest,
+			continuationDigest: binding.continuationDigest,
+			dispatchRef: binding.dispatchRef,
+			dispatchHash: binding.dispatchHash,
 			state: binding.state,
 			engineGeneration: binding.engineGeneration,
 			bindingGeneration: binding.bindingGeneration,
@@ -4979,7 +5112,7 @@ export class EngineRuntime {
 	}
 }
 
-function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): SessionLaunchSnapshot | undefined {
+function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): LegacySessionLaunchSnapshot | undefined {
 	const text = (item: unknown): item is string => typeof item === "string" && item.length > 0 && item.length <= 512;
 	const context = (item: unknown) => item === null || (Number.isSafeInteger(item) && Number(item) >= 0);
 	if (
@@ -5418,12 +5551,12 @@ function assertFilesReadable(readEnabled: boolean, originals?: SessionMessageIde
 	if (file)
 		throw new EngineTargetError(
 			"attachment_requires_read",
-			`File "${file.name}" cannot be sent: this profile does not allow the read tool the agent needs to open it. Choose a profile with read or send the message without this file.`,
+			`File "${file.name}" cannot be sent: this execution does not allow the read tool required for attachments.`,
 		);
 }
 
-function sessionProfileDigest(continuation: Record<string, unknown>): string {
-	return `sha256:${sha256(stableStringifyJson(continuation))}`;
+function executionHash(value: unknown): string {
+	return `sha256:${sha256(storageCanonicalJson(value))}`;
 }
 
 async function canonicalWorkspacePath(cwd: string): Promise<string> {
@@ -5435,32 +5568,3 @@ function canonicalRetainedWorkspacePath(cwd: string): string {
 	return process.platform === "win32" ? cwd.toLowerCase() : cwd;
 }
 
-function sessionClosure(options: EngineRuntimeOptions["sessionDefaults"]): Record<string, unknown> {
-	const settings = options?.settings;
-	return {
-		additionalDirectories: options?.additionalDirectories,
-		model: options?.model
-			? {
-					api: options.model.api,
-					baseUrl: options.model.baseUrl,
-					id: options.model.id,
-					provider: options.model.provider,
-				}
-			: undefined,
-		thinkingLevel: options?.thinkingLevel,
-		toolNames: options?.toolNames,
-		restrictToolNames: options?.restrictToolNames,
-		enableMCP: options?.enableMCP,
-		enableLsp: options?.enableLsp,
-		maxSpawnDepth: options?.maxSpawnDepth,
-		skills: options?.skills,
-		rules: options?.rules,
-		contextFiles: options?.contextFiles,
-		promptTemplates: options?.promptTemplates,
-		slashCommands: options?.slashCommands,
-		settings: settings
-			? Object.fromEntries((Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(key => [key, settings.get(key)]))
-			: undefined,
-		extensions: "explicit-disabled",
-	};
-}

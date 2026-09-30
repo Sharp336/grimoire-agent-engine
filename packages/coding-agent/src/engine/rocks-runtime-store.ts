@@ -29,8 +29,10 @@ import type {
 	RocksEffect,
 	RocksIdentity,
 	RocksInbox,
+	RocksSlotLease,
 } from "./rocks-runtime-rows";
 import { RocksEngineMutations } from "./rocks-store";
+import { leaseId } from "./routing-admission";
 import type { EngineNativeHistoryPage } from "./runtime-history";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import {
@@ -339,6 +341,14 @@ export class RocksEngineStore extends RocksEngineMutations {
 	async terminalEvent(attemptId: string): Promise<EngineEvent | undefined> {
 		const row = await this.row<RocksProjection>("projection", projectionId("ownership", "events", attemptId));
 		return row?.value.terminal ? this.row<EngineEvent>("event", String(row.value.terminal)) : undefined;
+	}
+	/** Historical reads use the original Attempt owner; rebind cannot grant access through the current head. */
+	async assertHistoricalAttemptAccess(attemptId: string, principalId: string): Promise<void> {
+		const attempt = await this.row<RocksAttempt>("attempt", attemptId);
+		const command = attempt && await this.row<RocksCommand>("command", attempt.command_id);
+		if (!attempt || !command || command.identity.attemptId !== attemptId ||
+			!principalId || command.identity.principalId !== principalId)
+			throw new EngineTargetError("agent_not_found", "Original Attempt is not accessible");
 	}
 	async waitAttemptResult(
 		agentId: string,
@@ -1243,6 +1253,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 			throw new EngineCommandConflictError(commandId);
 		const agent = await this.row<RocksIdentity>("identity", row.agent_instance_id);
 		const attempt = identity.attemptId ? await this.row<RocksAttempt>("attempt", identity.attemptId) : undefined;
+		const heldLease = attempt?.execution
+			? await this.row<RocksSlotLease>("metadata", leaseId(attempt.attempt_id))
+			: undefined;
 		const receipt = runtimeReceipt(row, agent, attempt);
 		return {
 			commandId,
@@ -1257,6 +1270,22 @@ export class RocksEngineStore extends RocksEngineMutations {
 							: "applied",
 			receipt: projectedReceipt(row) ?? undefined,
 			rawCanonicalHash: row.canonical_hash,
+			// Authoritative Engine admission is the pin/caller fence; CH's dispatch mirror is not.
+			routing: row.routing ?? null,
+			execution: attempt?.execution ?? null,
+			attemptState: attempt?.state ?? null,
+			lease: heldLease && heldLease.attempt_id === attempt?.attempt_id &&
+				heldLease.engine_generation === attempt.engine_generation &&
+				heldLease.dispatch_hash === attempt.execution?.dispatch_hash &&
+				heldLease.expires_at > Date.now()
+				? {
+						held: true,
+						leaseRevision: heldLease.lease_revision,
+						expiresAt: heldLease.expires_at,
+						engineGeneration: heldLease.engine_generation,
+						resources: heldLease.resources,
+					}
+				: { held: false },
 			browserPayloadHash: identity.browserPayloadHash,
 			target: {
 				agentInstanceRef: identity.agentInstanceRef,

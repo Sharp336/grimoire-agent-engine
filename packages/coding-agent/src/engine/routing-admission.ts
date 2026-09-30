@@ -305,8 +305,8 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 	const consultation = request.executionKind === "consultation";
 	if (current.leases.some(lease => lease.attempt_id === request.attemptId))
 		throw new EngineTargetError("stale_target", "Attempt already holds a routing lease");
-	const own = current.queue.find(row => row.admission_id === request.attemptId);
-	const others = current.queue.filter(row => row !== own);
+	const own = current.queue.find(row => row.admission_id === request.attemptId && row.status === "waiting");
+	const others = current.queue.filter(row => row !== own && row.status === "waiting");
 	const waiting: WaitingAdmission[] = [];
 	for (const row of others) waiting.push(await queuedDemand(tx, row));
 	const resources = request.candidates.map(candidate => slotResources(candidate, request.limits, consultation));
@@ -465,7 +465,7 @@ export async function stageQueueCancel(
 	reason: string,
 ): Promise<boolean> {
 	const current = await census(tx, request.principalId, request.deviceId);
-	const own = current.queue.find(row => row.admission_id === request.attemptId);
+	const own = current.queue.find(row => row.admission_id === request.attemptId && row.status === "waiting");
 	if (!own) return false;
 	const key = queueId(own.sequence);
 	await tx.put("metadata", key, { ...own, status, reason } satisfies RocksSlotQueue);

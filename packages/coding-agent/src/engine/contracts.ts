@@ -409,7 +409,7 @@ export interface EngineStartResult extends EngineBindingSnapshot {
 	queueId?: string;
 	queueRevision?: number;
 	historyEdit?: EngineHistoryEditResult;
-	executorChoice: ExecutorChoice;
+	executorChoice?: ExecutorChoice;
 }
 
 export interface EngineHistoryEditResult {

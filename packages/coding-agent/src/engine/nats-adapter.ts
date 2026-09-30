@@ -19,12 +19,13 @@ import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from 
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type {
+	EngineApprovalDecision,
 	EngineControlInitiator,
 	EngineEvent,
 	EngineHistoryEditSource,
-	EngineLaunchProfile,
 	EngineResolveInputRequest,
 	EngineSemanticBindingSnapshot,
+	EngineStartRequest,
 } from "./contracts";
 import { EngineBindingPendingError, EngineTargetError, validateCommandContext, validateSemanticBinding } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
@@ -125,7 +126,6 @@ export interface NatsEngineAdapterOptions {
 	connectionOptions?: NodeConnectionOptions;
 	authorizeCommand: (command: EngineCommandEnvelope) => void | Promise<void>;
 	authorizeMessage: (message: AgentMessageEnvelope) => void | Promise<void>;
-	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	onError?: (error: Error) => void;
 	/** Deliveries of a failing command (or peer message) before it ends terminally; a command settles as a failed receipt. */
 	commandAttempts?: number;
@@ -672,7 +672,6 @@ export class NatsEngineAdapter {
 		return await dispatchEngineCommand({
 			runtime: this.runtime,
 			command,
-			resolveLaunchProfile: this.#options.resolveLaunchProfile,
 			provisionMailbox: agentInstanceId => this.provisionMailbox(agentInstanceId),
 		});
 	}

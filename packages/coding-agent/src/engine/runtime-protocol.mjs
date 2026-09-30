@@ -210,12 +210,20 @@ function validProjection(name, value) {
   return true;
 }
 
+const invalidRuntimeSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 export function canonicalRuntimeJson(value, depth = 0) {
   if (depth > runtimeLimits.maxJsonDepth) throw new RuntimeProtocolError('invalid_params', 'Runtime JSON is nested too deeply.');
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))) return JSON.stringify(value);
+  if (value === null || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'string') {
+    if (invalidRuntimeSurrogate.test(value)) throw new RuntimeProtocolError('invalid_params', 'Runtime JSON contains invalid Unicode.');
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(item => canonicalRuntimeJson(item, depth + 1)).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalRuntimeJson(value[key], depth + 1)}`).join(',')}}`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => {
+    if (invalidRuntimeSurrogate.test(key)) throw new RuntimeProtocolError('invalid_params', 'Runtime JSON contains invalid Unicode.');
+    return `${JSON.stringify(key)}:${canonicalRuntimeJson(value[key], depth + 1)}`;
+  }).join(',')}}`;
   throw new RuntimeProtocolError('invalid_params', 'Runtime JSON contains an unsupported value.');
 }
 
