@@ -27,11 +27,36 @@ const natsServer =
  */
 function localChildPrepareServer(options: {
 	childExecution: () => AdmittedExecutionFixture;
+	executions: () => readonly AdmittedExecutionFixture[];
 	runtime: () => EngineRuntime | undefined;
 	deviceId: string;
 	engineId: string;
 }) {
 	const prepared = new Map<string, { input: string; command: EngineCommandEnvelope }>();
+	const claims = new Map<string, {
+		command: EngineCommandEnvelope;
+		leaseToken: string;
+		receipt: { stage: string; value: string } | null;
+		events: Map<string, string>;
+		terminal: boolean;
+	}>();
+	const projected = new Map<string, {
+		agentInstanceRef: string;
+		parentAttemptId: string;
+		status: string;
+		eventId: string;
+	}>();
+	const wireKinds: Record<string, string> = {
+		accepted: "command.accepted", rejected: "command.rejected",
+		running: "attempt.started", reconciled: "reconcile.snapshot",
+		steered: "command.steered",
+		tool_approval_requested: "tool.approval_requested",
+		tool_approval_resolved: "tool.approval_resolved",
+		input_requested: "input.requested", input_resolved: "input.resolved",
+		tool_started: "tool.started", tool_settled: "tool.settled",
+		model_started: "model.started", model_settled: "model.settled",
+		trace_reasoning: "trace.reasoning", trace_tool: "trace.tool",
+	};
 	const calls: string[] = [];
 	let requests = 0;
 	const server = Bun.serve({
@@ -48,7 +73,7 @@ function localChildPrepareServer(options: {
 			const name = params.name;
 			const args = params.arguments;
 			calls.push(name);
-			let result: Record<string, unknown> = { status: "no_job", generation: 1, changed: false };
+			let result: Record<string, unknown>;
 			if (name === "prepare_child_start") {
 				const runtime = options.runtime();
 				if (!runtime) throw new Error("Prepare arrived before the runtime was created");
@@ -111,6 +136,121 @@ function localChildPrepareServer(options: {
 					agentInstanceId: command.agentInstanceId,
 					bindingSnapshot: command.bindingSnapshot,
 				};
+			} else if (name === "grimoire_agent_engine_bridge") {
+				// The real NATS/HTTP integration needs a short empty long-poll, not a hot RPC loop.
+				if (args.action === "wait") {
+					await Bun.sleep(50);
+					result = { generation: args.wake_generation ?? 0, changed: false };
+				} else if (args.action === "claim" && args.job_id === undefined &&
+					(args.lane === "ordinary" || args.lane === "control")) {
+					result = { status: "no_job" };
+				} else if (args.action === "claim" && typeof args.job_id === "string") {
+					const command = options.executions().flatMap(entry => [...entry.receipts.values()])
+						.find(entry => entry.commandId === args.job_id);
+					const runtime = options.runtime();
+					const stored = command && runtime
+						? await runtime.store.getStartConversationIdentity(command.commandId) : undefined;
+					const identity = command ? engineCommandIdentity(command) : undefined;
+					const row = command && runtime
+						? (await runtime.store.records.get("command", command.commandId)).value : null;
+					if (!command || !stored || !identity ||
+						stored.canonicalHash !== identity.canonicalHash ||
+						stored.serializedCommand !== identity.serializedCommand ||
+						!isRecord(row) || row.state !== "settled" || !isRecord(row.receipt) ||
+						row.receipt.outcome !== "applied")
+						return Response.json({ error: "Unknown or unadmitted Engine job" }, { status: 404 });
+					let claim = claims.get(command.commandId);
+					if (!claim) {
+						claim = {
+							command, leaseToken: `lease:${command.commandId}`, receipt: null,
+							events: new Map(), terminal: false,
+						};
+						claims.set(command.commandId, claim);
+					} else if (storage.storageCanonicalJson(claim.command) !== storage.storageCanonicalJson(command)) {
+						return Response.json({ error: "Engine job command changed" }, { status: 409 });
+					}
+					result = {
+						status: "claimed", job_id: command.commandId, lease_token: claim.leaseToken,
+						operation_type: "agent_engine_command",
+						work: { kind: "command", command }, delivery_receipt: { stage: "applied" },
+					};
+				} else if ((args.action === "event" || args.action === "accepted" ||
+					args.action === "heartbeat") && typeof args.job_id === "string") {
+					const claim = claims.get(args.job_id);
+					if (!claim || args.lease_token !== claim.leaseToken)
+						return Response.json({ error: "Event has no admitted Engine claim" }, { status: 409 });
+					if (args.action === "accepted") {
+						if (!isRecord(args.receipt) || typeof args.receipt.stage !== "string")
+							return Response.json({ error: "Missing command receipt" }, { status: 400 });
+						const receipt = storage.storageCanonicalJson(args.receipt);
+						const previous = claim.receipt;
+						const stage = args.receipt.stage;
+						if (!["engine_accepted", "applied", "execution_terminal", "rejected"].includes(stage) ||
+							(previous && previous.value !== receipt &&
+								!(previous.stage === "engine_accepted" &&
+									(stage === "applied" || stage === "execution_terminal")) &&
+								!(previous.stage === "applied" && stage === "execution_terminal")))
+							return Response.json({ error: "Command receipt changed outside terminal transition" },
+								{ status: 409 });
+						claim.receipt = { stage, value: receipt };
+						result = { status: "accepted" };
+					} else if (args.action === "heartbeat") {
+						result = { status: claim.terminal ? "already_terminal" : "held" };
+					} else {
+						const event = args.event;
+						if (!isRecord(event) || typeof event.eventId !== "string" ||
+							typeof event.type !== "string" ||
+							event.causationCommandId !== claim.command.commandId ||
+							event.agentInstanceId !== claim.command.agentInstanceId ||
+							event.executionId !== claim.command.executionId ||
+							event.attemptId !== claim.command.attemptId ||
+							event.deviceId !== claim.command.deviceId ||
+							event.engineId !== claim.command.engineId ||
+							event.engineGeneration !== claim.command.engineGeneration ||
+							(event.bindingSnapshot !== undefined &&
+								storage.storageCanonicalJson(event.bindingSnapshot) !==
+									storage.storageCanonicalJson(claim.command.bindingSnapshot)))
+							return Response.json({ error: "Event differs from admitted Start" }, { status: 409 });
+						const runtime = options.runtime();
+						const retained = runtime
+							? (await runtime.store.records.get("event", event.eventId)).value : null;
+						if (!isRecord(retained) || retained.eventId !== Number(event.eventId) ||
+							retained.seq !== event.agentSeq || retained.kind === undefined ||
+							(wireKinds[String(retained.kind)] ?? `attempt.${String(retained.kind)}`) !== event.type ||
+							retained.createdAt !== event.at ||
+							retained.causationCommandId !== event.causationCommandId ||
+							retained.bindingId !== event.runtimeBindingId ||
+							retained.bindingGeneration !== event.bindingGeneration ||
+							retained.authorityGeneration !== event.authorityGeneration ||
+							storage.storageCanonicalJson(retained.payload ?? null) !==
+								storage.storageCanonicalJson(event.payload ?? null))
+							return Response.json({ error: "Engine event is not retained by its native owner" },
+								{ status: 409 });
+						const bytes = storage.storageCanonicalJson(event);
+						const previous = claim.events.get(event.eventId);
+						if (previous && previous !== bytes)
+							return Response.json({ error: "Event replay changed payload" }, { status: 409 });
+						if (claim.terminal && !previous)
+							return Response.json({ error: "Event followed terminal outcome" }, { status: 409 });
+						claim.events.set(event.eventId, bytes);
+						const status = event.type.startsWith("attempt.")
+							? event.type.slice("attempt.".length) : event.type;
+						if (["completed", "cancelled", "failed", "interrupted"].includes(status))
+							claim.terminal = true;
+						const parentAttemptId = claim.command.bindingSnapshot?.parentAttemptId;
+						if (parentAttemptId && claim.command.agentInstanceRef) {
+							projected.set(claim.command.agentInstanceRef, {
+								agentInstanceRef: claim.command.agentInstanceRef,
+								parentAttemptId, status, eventId: event.eventId,
+							});
+						}
+						result = previous && claim.terminal ? { status: "already_terminal" } : { status };
+					}
+				} else {
+					return Response.json({ error: "Unsupported Engine bridge action" }, { status: 400 });
+				}
+			} else {
+				return Response.json({ error: "Unknown hosted RPC tool" }, { status: 400 });
 			}
 			return Response.json({ jsonrpc: "2.0", id: body.id, result: { structuredContent: result } });
 		},
@@ -118,6 +258,7 @@ function localChildPrepareServer(options: {
 	return {
 		server,
 		rpc: new HostedGrimoireRpc({ serverUrl: server.url.toString(), token: "test-token", clientId: "fixture" }),
+		projected,
 		url: server.url,
 		calls,
 		get requests() {
@@ -196,6 +337,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 		const hosted = localChildPrepareServer({
 			runtime: () => runtime,
 			childExecution: () => structuredExecution ?? execution,
+			executions: () => executions,
 			deviceId: "fixture-device",
 			engineId: "fixture-engine",
 		});
@@ -500,6 +642,16 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					parentBindingRevision: started.bindingSnapshot?.bindingRevision,
 				});
 				expect((await serviceRuntime.store.getAttempt(child.attemptId))?.state).toBe("completed");
+				// NATS/HTTP owner delivery is asynchronous; fake timers cannot advance the external bridge.
+				const projectionDeadline = Date.now() + 15_000;
+				for (;;) {
+					const projected = hosted.projected.get(serviceChildAgentInstanceRef);
+					if (projected?.parentAttemptId === serviceAttempt && projected.status === "completed")
+						break;
+					if (Date.now() > projectionDeadline)
+						throw new Error("Hosted child lifecycle was not durably projected");
+					await Bun.sleep(25);
+				}
 			} finally {
 				stop.resolve();
 				await service;
