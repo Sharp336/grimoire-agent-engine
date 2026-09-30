@@ -4546,6 +4546,238 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(retainedLifecycle.activities).toEqual(lifecycle.activities);
 		expect(retained.entries).toEqual(page.entries);
 	}, 30_000);
+
+	it("settles a partial assistant snapshot before Stop cancels its Attempt", async () => {
+		const releasePrompt = Promise.withResolvers<void>();
+		const mock = createMockModel();
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "a".repeat(200) }],
+			api: mock.model.api,
+			provider: mock.model.provider,
+			model: mock.model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		let current = partial;
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			const abort = session.abort.bind(session);
+			Object.defineProperty(session, "abort", {
+				value: async (options: { reason?: string } = {}) => {
+					current.stopReason = "aborted";
+					session.agent.emitExternalEvent({ type: "message_end", message: current });
+					releasePrompt.resolve();
+					await abort(options);
+				},
+			});
+			session.agent.emitExternalEvent({ type: "message_start", message: partial });
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a".repeat(200), partial },
+			});
+			current = { ...partial, content: [{ type: "text", text: "a".repeat(400) }] };
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: current,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a".repeat(200), partial: current },
+			});
+			await releasePrompt.promise;
+			return true;
+		});
+		const firstSnapshot = nextEngineEvent(runtime, "assistant_snapshot");
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-assistant-stop", agentInstanceId: "agent-assistant-stop",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-assistant-stop",
+			executionId: "execution-assistant-stop", attemptId: "attempt-assistant-stop",
+		}, { cwd, principalId: "owner", input: "start a long answer" }));
+		await firstSnapshot;
+		await runtime.cancel({ ...started, commandId: "command-stop-assistant", reason: "user stopped" });
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const streamingSnapshots = snapshots.filter(event => event.payload?.status === "streaming");
+		expect(streamingSnapshots).toHaveLength(2);
+		expect(new Set(streamingSnapshots.map(event => event.payload?.assistantMessageId)).size).toBe(1);
+		expect(streamingSnapshots.map(event => event.payload?.revision)).toEqual([1, 2]);
+		expect(snapshots.at(-1)?.payload).toMatchObject({
+			assistantMessageId: snapshots[0]?.payload?.assistantMessageId,
+			text: "a".repeat(400),
+			status: "settled",
+			stopReason: "aborted",
+			historyEntryId: expect.any(String),
+		});
+		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
+		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const retainedAnswer = (await nativeHistory(runtime, started.agentInstanceId)).entries.find(
+			entry => entry.assistantMessageId === snapshots[0]?.payload?.assistantMessageId,
+		);
+		expect(retainedAnswer).toMatchObject({ text: "a".repeat(400), stopReason: "aborted" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("uses only a successful terminal yield from the current Attempt", async () => {
+		const prompts: string[] = [];
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "yield-attempt-a",
+							name: "yield",
+							arguments: { result: { data: { assignment: "A", ok: true } } },
+						},
+					],
+				},
+				{ content: ["Attempt B prose"] },
+				{ content: ["Attempt B reminder one"] },
+				{ content: ["Attempt B reminder two"] },
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "yield-attempt-c",
+							name: "yield",
+							arguments: { result: { data: false } },
+						},
+					],
+				},
+			],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { requireYieldTool: true, outputSchema: { type: "object" } },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => {
+			prompts.push(input);
+			expect(session.getToolByName("yield")).toBeDefined();
+			return session.prompt(input);
+		});
+		const request = (suffix: string) =>
+			startRequest(execution, {
+				commandId: `command-yield-${suffix}`, agentInstanceId: "agent-yield",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-yield",
+				executionId: `execution-yield-${suffix}`, attemptId: `attempt-yield-${suffix}`,
+			}, { cwd, principalId: "owner", input: `finish ${suffix.toUpperCase()}` });
+		const first = await runtime.start(request("a"));
+		await runtime.drain();
+		const firstEvents = await runtime.store.pendingEvents();
+		expect(
+			firstEvents.find(event => event.kind === "completed" && event.attemptId === first.attemptId)?.payload,
+		).toMatchObject({ assistantFinal: '{"assignment":"A","ok":true}' });
+		expect((await runtime.store.getAttempt(first.attemptId))?.result_payload).toMatchObject({
+			assistantFinal: '{"assignment":"A","ok":true}',
+			structuredOutput: {
+				source: "session",
+				status: "valid",
+				data: { assignment: "A", ok: true },
+			},
+		});
+
+		const second = await runtime.start(request("b"));
+		await runtime.drain();
+		const secondEvents = (await runtime.store.pendingEvents()).filter(event => event.attemptId === second.attemptId);
+		expect(secondEvents.find(event => event.kind === "completed")).toBeUndefined();
+		expect(secondEvents.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+		});
+		expect(prompts).toHaveLength(4);
+		expect(prompts[2]).toContain("Call the yield tool now");
+		expect(prompts[3]).toContain("Call the yield tool now");
+		const third = await runtime.start(request("c"));
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(third.attemptId))?.result_payload).toMatchObject({
+			assistantFinal: "false",
+			structuredOutput: { source: "session", status: "valid", data: false },
+		});
+		await runtime.dispose();
+	}, 60000);
+
+	it("does not accept aborted yield results as terminal success", async () => {
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "yield-partial",
+							name: "yield",
+							arguments: { type: ["findings"], result: { data: { finding: "partial" } } },
+						},
+					],
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "yield-aborted",
+							name: "yield",
+							arguments: { result: { error: "cannot finish after partial result" } },
+						},
+					],
+				},
+			],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: {
+				requireYieldTool: true,
+				outputSchema: {
+					type: "object",
+					properties: { findings: { type: "array", items: { type: "object" } } },
+					required: ["findings"],
+				},
+			},
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-aborted-yield", agentInstanceId: "agent-aborted-yield",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-aborted-yield",
+			executionId: "execution-aborted-yield", attemptId: "attempt-aborted-yield",
+		}, { cwd, principalId: "owner", input: "finish" }));
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		expect(events.find(event => event.kind === "completed")).toBeUndefined();
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: expect.stringMatching(/^Error \(diagnostic [0-9a-f]{12}\)$/),
+		});
+		expect((await runtime.store.getAttempt(started.attemptId))?.cause).toBe("cannot finish after partial result");
+		await runtime.dispose();
+	}, 60000);
+
+	it("fails a required-yield attempt after two prose-only reminders", async () => {
+		const prompts: string[] = [];
+		const execution = admittedExecution(createMockModel().model, modelRegistry, {
+			continuation: { requireYieldTool: true, outputSchema: { type: "object" } },
+		});
+		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
+			prompts.push(input);
+			return true;
+		});
+		await runtime.start(startRequest(execution, {
+			commandId: "command-missing-yield", agentInstanceId: "agent-missing-yield",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-missing-yield",
+			executionId: "execution-missing-yield", attemptId: "attempt-missing-yield",
+		}, { cwd, principalId: "owner", input: "finish" }));
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		expect(events.find(event => event.kind === "completed")).toBeUndefined();
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+			transcriptCheckpoint: { revision: 2 },
+		});
+		expect(prompts).toHaveLength(3);
+		await runtime.dispose();
+	}, 60000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
