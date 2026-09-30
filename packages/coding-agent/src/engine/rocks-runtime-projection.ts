@@ -517,10 +517,10 @@ export async function projectedDetail(
 	if (attempt?.executor_route_state) {
 		if (Buffer.byteLength(attempt.executor_route_state) > runtimeLimits.bulkPreviewBytes)
 			throw new EngineTargetError("source_unavailable", "Executor route exceeds its metadata budget");
-		const { eventSeq, ...state } = JSON.parse(attempt.executor_route_state) as Record<string, unknown>;
+		const state = JSON.parse(attempt.executor_route_state) as Record<string, unknown>;
 		executorRoute = {
 			state,
-			eventSeq: eventSeq ?? 0,
+			eventSeq: state.eventSeq,
 			target: {
 				agentInstanceId: identity.agent_instance_id,
 				attemptId: attempt.attempt_id,
