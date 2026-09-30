@@ -640,6 +640,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			};
 			execution.captureCommand(commandA);
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd, execution);
+			execution.captureCommand(commandB);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
 					msgID: commandA.commandId,
@@ -756,7 +757,9 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 
 			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd, execution);
-			await js.publish(adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {
+			execution.captureCommand(permitStart);
+			await js.publish(
+				adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {
 				msgID: permitStart.commandId,
 			});
 			await waitFor(() => permitEvents.some(event => event.type === "tool.approval_requested"));
@@ -832,6 +835,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			hubQueueId = (await runtime.listInbox(initialBindingB))[0]!.queueId;
 			const hubStart = startCommand(runtime.engineGeneration, "agent-b", "native-hub", cwd, execution);
 			hubStart.payload.input = "NATIVE HUB";
+			execution.captureCommand(hubStart);
 			await js.publish(adapter.commandSubject("agent-b", "start"), JSON.stringify(hubStart), {
 				msgID: hubStart.commandId,
 			});
@@ -1027,6 +1031,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				entryId: "source-entry",
 				replacementText: "must not be silently discarded",
 			};
+			execution.captureCommand(invalidHistoryBranch);
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(invalidHistoryBranch), {
 				msgID: invalidHistoryBranch.commandId,
 			});
@@ -1109,7 +1114,9 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 1);
 
 			const commandC = startCommand(runtime.engineGeneration, "agent-c", "c", cwd, execution);
-			await js.publish(adapter.commandSubject("agent-c", "start"), JSON.stringify(commandC), {
+			execution.captureCommand(commandC);
+			await js.publish(
+				adapter.commandSubject("agent-c", "start"), JSON.stringify(commandC), {
 				msgID: commandC.commandId,
 			});
 			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 0);
@@ -1261,7 +1268,9 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 
 			const failed = startCommand(runtime.engineGeneration, "agent-failed", "failed", cwd, refusedExecution);
-			await js.publish(adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
+			refusedExecution.captureCommand(failed);
+			await js.publish(
+				adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
 				msgID: failed.commandId,
 			});
 			await waitFor(() => events.some(event => event.causationCommandId === failed.commandId));
@@ -1293,6 +1302,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 
 			const retainedFirst = startCommand(runtime.engineGeneration, "agent-retained", "retained-first", cwd, retainedExecution);
+		retainedExecution.captureCommand(retainedFirst);
 			await js.publish(
 				adapter.commandSubject(retainedFirst.agentInstanceId, "start"),
 				JSON.stringify(retainedFirst),
@@ -1303,6 +1313,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				runtime.sessionHistoryPage(agentInstanceId, "grimoire://tasks/grimoire/nats/agents/retained");
 			const retainedSessionId = (await retainedHistory(retainedFirst.agentInstanceId)).sessionId;
 			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd, refusedExecution);
+		refusedExecution.captureCommand(retainedRejected);
 			await js.publish(
 				adapter.commandSubject(retainedRejected.agentInstanceId, "start"),
 				JSON.stringify(retainedRejected),
@@ -1318,6 +1329,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect((await retainedHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
 
 			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd, refusedExecution);
+		refusedExecution.captureCommand(unsafe);
 			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
 				msgID: unsafe.commandId,
 			});
@@ -1331,6 +1343,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(publicUnsafeFailure).not.toContain("SUPER_SECRET_PROMPT");
 
 			const pending = startCommand(runtime.engineGeneration, "agent-pending", "pending", cwd, refusedExecution);
+		refusedExecution.captureCommand(pending);
 			await js.publish(adapter.commandSubject(pending.agentInstanceId, "start"), JSON.stringify(pending), {
 				msgID: pending.commandId,
 			});
@@ -1378,11 +1391,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(await runtime.store.getAttempt(pending.attemptId!)).toBeUndefined();
 
 			const reuseFirst = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-first", cwd, reuseExecution);
+		reuseExecution.captureCommand(reuseFirst);
 			await js.publish(adapter.commandSubject(reuseFirst.agentInstanceId, "start"), JSON.stringify(reuseFirst), {
 				msgID: reuseFirst.commandId,
 			});
 			await waitFor(async () => (await runtime.store.getAttempt(reuseFirst.attemptId!))?.state === "completed");
 			const reusePending = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-pending", cwd, refusedExecution);
+		refusedExecution.captureCommand(reusePending);
 			await js.publish(adapter.commandSubject(reusePending.agentInstanceId, "start"), JSON.stringify(reusePending), {
 				msgID: reusePending.commandId,
 			});
@@ -1417,6 +1432,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(await runtime.store.getAttempt(reusePending.attemptId!)).toBeUndefined();
 
 			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd, liveExecution);
+		liveExecution.captureCommand(live);
 			await js.publish(adapter.commandSubject(live.agentInstanceId, "start"), JSON.stringify(live), {
 				msgID: live.commandId,
 			});
@@ -1490,6 +1506,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		};
 		const firstRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true, ...typedOptions });
 		const oldStart = startCommand(firstRuntime.engineGeneration, "agent-upgrade", "upgrade", cwd, countingExecution);
+		countingExecution.captureCommand(oldStart);
 		expect(
 			await firstRuntime.store.admitCommand(engineCommandIdentity(oldStart), firstRuntime.engineGeneration),
 		).toEqual({ status: "claimed" });
@@ -1827,6 +1844,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		auth.setRuntimeApiKey("mock", "isolated-test");
 		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd, execution);
+		execution.captureCommand(start);
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -1916,7 +1934,6 @@ function startCommand(
 			originReceiptId: "origin:command-" + suffix,
 		} : { cwd, input: suffix.toUpperCase() },
 	};
-	if (execution) execution.captureCommand(command);
 	return command;
 }
 
