@@ -1,4 +1,4 @@
-import { type EngineEvent, EngineTargetError } from "./contracts";
+import { type ApprovalRequest, type EngineEvent, EngineTargetError } from "./contracts";
 import {
 	type RuntimeAccess,
 	type RuntimeChange,

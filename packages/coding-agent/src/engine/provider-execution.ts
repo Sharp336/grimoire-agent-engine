@@ -144,6 +144,36 @@ export class ProviderExecutionClient {
 			...(typeof pin === "string" ? { executionPin: pin } : {}),
 		};
 	}
+
+	/** No credential/pin is exposed before the frozen candidate's lease transfer. */
+	async checkCandidate(
+		identity: ProviderExecutionIdentity,
+		candidate: { route_ref: string; account_ref: string; effort: string; service_tier: string },
+		signal?: AbortSignal,
+	): Promise<void> {
+		const response = await this.requestFetch(this.endpoint, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
+			body: JSON.stringify({ schema: "grimoire.provider_execution.request.v1", ...identity,
+				executionMode: "candidate_check", candidate }),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) :
+				AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
+		if (!response.ok) throw new ProviderExecutionError("provider_execution_unavailable",
+			`Provider candidate check returned HTTP ${response.status}`);
+		const result: unknown = await response.json().catch(() => undefined);
+		if (!result || typeof result !== "object" || (result as Record<string, unknown>).schema !==
+			"grimoire.provider_execution.result.v1")
+			throw new ProviderExecutionError("provider_execution_invalid_response", "Provider candidate check is invalid");
+		const value = result as Record<string, unknown>;
+		if (value.allowed !== true || value.status !== "ready" ||
+			value.executionMode !== "candidate_check" ||
+			value.secrets_returned !== false || value.provider_credentials_returned !== false ||
+			value.credential !== undefined || value.executionPin !== undefined ||
+			Object.entries(identity).some(([key, expected]) => value[key] !== expected) ||
+			(value.candidate !== undefined && JSON.stringify(value.candidate) !== JSON.stringify(candidate)))
+			throw new ProviderExecutionError("provider_execution_denied", "Frozen candidate is not currently authorized");
+	}
 }
 
 function typeText(value: unknown): string {

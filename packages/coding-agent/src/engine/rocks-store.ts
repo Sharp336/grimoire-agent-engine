@@ -3043,15 +3043,6 @@ export class RocksEngineMutations {
 				if (!command) break;
 				commandAfter = [command.received_at, command.command_id];
 				if (command.engine_generation >= generation) continue;
-				if (command.operation === "start" && command.identity.bindingSnapshot?.installationId &&
-					(!command.identity.attemptId || !(await this.getAttempt(command.identity.attemptId)))) {
-					await this.mutation(id, async tx => {
-						const current = await tx.get<RocksCommand>("command", command.command_id);
-						if (current?.state === "received" && (!current.binding_pending || current.processor_generation !== null))
-							await tx.put("command", command.command_id, { ...current, binding_pending: true, processor_generation: null });
-					});
-					continue;
-				}
 				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
 				await ensureHold();
 				await this.mutation(id, async tx => {
@@ -3136,6 +3127,7 @@ export class RocksEngineMutations {
 							cause: "engine_lost",
 							retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
 						});
+						await stageRelease(tx, attempt.attempt_id);
 						return [
 							...(await settleRuntimeMessages(tx, target, "interrupted", (tx, target, event) =>
 								this.append(tx, target, event),

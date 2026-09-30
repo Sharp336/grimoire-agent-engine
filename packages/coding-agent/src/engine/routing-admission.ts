@@ -264,7 +264,7 @@ export interface AdmissionRequest {
 	bindingSnapshot: EngineSemanticBindingSnapshot;
 	executionKind: "ordinary" | "automation" | "consultation";
 	limits: RoutingLimits;
-	rosterRevision: number;
+	rosterRevision: `sha256:${string}`;
 	expectedRevisions: Record<string, number>;
 	/** Complete authorized roster (new Start) or the admitted frozen list (Resume), in policy order. */
 	candidates: readonly Candidate[];

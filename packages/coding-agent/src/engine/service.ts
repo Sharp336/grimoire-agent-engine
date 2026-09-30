@@ -86,14 +86,15 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 						if (verified.verified !== true ||
 							(["originReceiptId", "commandId", "agentInstanceRef", "attemptId", "principalId"] as const)
 								.some(key => verified[key] !== identity[key]) ||
-							typeof verified.dispatchHash !== "string" ||
+							(typeof verified.dispatchHash !== "string" && typeof verified.commandHash !== "string") ||
 							typeof verified.authContextId !== "string" ||
-							!verified.bindingSnapshot)
-							throw new EngineTargetError("stale_target", "Origin receipt verification returned a different Start");
+							(typeof verified.dispatchHash === "string" && !verified.bindingSnapshot))
+							throw new EngineTargetError("stale_target", "Origin receipt verification returned a different command");
 						return verified as unknown as {
 							verified: true;
-							dispatchHash: string;
-							bindingSnapshot: EngineSemanticBindingSnapshot;
+							dispatchHash?: string;
+							commandHash?: string;
+							bindingSnapshot?: EngineSemanticBindingSnapshot;
 							authContextId: string;
 						};
 					}

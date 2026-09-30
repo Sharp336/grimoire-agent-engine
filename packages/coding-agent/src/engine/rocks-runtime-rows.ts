@@ -194,7 +194,7 @@ export interface RocksSlotQueue {
 	origin_receipt_id: string;
 	bindingSnapshot: EngineSemanticBindingSnapshot;
 	auth_context_id: string;
-	roster_revision: number;
+	roster_revision: `sha256:${string}`;
 	candidate_refs: string[];
 	requested_at: number;
 	reason: string;

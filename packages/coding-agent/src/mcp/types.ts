@@ -115,6 +115,9 @@ export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	type: "http";
 	url: string;
 	headers?: Record<string, string>;
+	/** Engine-owned per-call ToolEffect attestation; never populated from model arguments. */
+	attestToolCall?: (toolCallId: string, toolName: string, mcpName: string,
+		input: unknown, outbound: Record<string, unknown>) => Promise<Record<string, string>>;
 	/**
 	 * `origin-locked`: configured headers are literal package data pinned to the
 	 * configured URL's origin (Agent Plugins §7.2.1) — never expanded, never
@@ -301,6 +304,8 @@ export interface MCPToolCallResult {
 export interface MCPRequestOptions {
 	/** Abort signal (e.g. Escape-to-interrupt) */
 	signal?: AbortSignal;
+	/** Generated only for this request; safe under parallel tools on one connection. */
+	headers?: Record<string, string>;
 }
 
 /** Transport interface - abstracts stdio/http */

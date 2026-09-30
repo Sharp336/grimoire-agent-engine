@@ -440,12 +440,20 @@ async function dispatchRequest(
 				subject_hash,
 			};
 		}
-		case "runtime.command.get":
+		case "runtime.command.get": {
+			const effectProof = params.effectId === undefined ? undefined : {
+				effectId: requiredString(params, "effectId"),
+				toolCallId: requiredString(params, "toolCallId"),
+				toolName: requiredString(params, "toolName"),
+			};
 			return await options.runtime.store.runtimeCommand(
 				requiredString(params, "commandId"),
 				runtimeAccess(params),
 				optionalString(params.browserPayloadHash),
+				effectProof,
+				params.includeStartCommand === true,
 			);
+		}
 		case "runtime.context":
 			return await options.runtime.sessionContext(await runtimeTarget(options.runtime, params));
 		case "runtime.usage":
@@ -728,6 +736,7 @@ export async function runEngineCommand(
 	if (!(await options.runtime.store.isCurrentEngineGeneration(options.runtime.engineGeneration))) {
 		throw new EngineTargetError("stale_target", "Engine generation lease is no longer current");
 	}
+	await options.runtime.verifyCommandOrigin(command);
 	const identity = engineCommandIdentity(command);
 	let admission = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
 	for (let retry = 0; admission.status === "in_progress" && retry < 100; retry++) {

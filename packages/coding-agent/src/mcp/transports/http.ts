@@ -378,6 +378,11 @@ export class HttpTransport implements MCPTransport {
 		if (this.#sessionId) {
 			generated["Mcp-Session-Id"] = this.#sessionId;
 		}
+		if (options?.headers) {
+			if (method !== "tools/call" || this.config.type !== "http" || !this.config.attestToolCall)
+				throw new Error("Per-call attestation is only available for Engine-owned MCP tools");
+			Object.assign(generated, options.headers);
+		}
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
 		const operation = createMCPTimeout(timeout, options?.signal);

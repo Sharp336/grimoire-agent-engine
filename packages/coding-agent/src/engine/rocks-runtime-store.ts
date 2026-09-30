@@ -506,8 +506,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 				targetEngineGeneration: attempt.engine_generation,
 				bindingId: attempt.binding_id,
 				bindingGeneration: attempt.binding_generation,
+				startCommandId: attempt.command_id,
 				...(payload?.expectedIntentRevision !== undefined
-					? { startCommandId: command!.command_id, startExpectedIntentRevision: payload.expectedIntentRevision }
+					? { startExpectedIntentRevision: payload.expectedIntentRevision }
 					: {}),
 			};
 		} else {
@@ -1233,6 +1234,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 		commandId: string,
 		access?: RuntimeAccess,
 		browserPayloadHash?: string,
+		effectProof?: { effectId: string; toolCallId: string; toolName: string },
+		includeStartCommand = false,
 	): Promise<Record<string, unknown>> {
 		const row = await this.row<RocksCommand>("command", commandId);
 		if (!row)
@@ -1256,9 +1259,19 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const heldLease = attempt?.execution
 			? await this.row<RocksSlotLease>("metadata", leaseId(attempt.attempt_id))
 			: undefined;
+		const effect = effectProof && attempt?.execution
+			? await this.row<RocksEffect>("effect", effectProof.effectId)
+			: undefined;
+		const effectStarted = Boolean(effect && effect.state === "started" && effect.effect_kind === "tool" &&
+			effect.effect_id === effectProof?.effectId && effect.tool_call_id === effectProof.toolCallId &&
+			effect.tool_name === effectProof.toolName && effect.command_id === row.command_id &&
+			effect.attempt_id === attempt?.attempt_id && effect.agent_instance_id === row.agent_instance_id);
 		const receipt = runtimeReceipt(row, agent, attempt);
 		return {
 			commandId,
+			...(includeStartCommand && row.operation === "start" && identity.serializedCommand
+				? { command: JSON.parse(identity.serializedCommand) as unknown }
+				: {}),
 			lookup: row.state === "settled" ? "known" : "pending",
 			stage:
 				row.receipt?.outcome === "rejected"
@@ -1286,6 +1299,11 @@ export class RocksEngineStore extends RocksEngineMutations {
 						resources: heldLease.resources,
 					}
 				: { held: false },
+			...(effectProof ? { effect: effectStarted && heldLease &&
+				heldLease.engine_generation === attempt?.engine_generation && heldLease.expires_at > Date.now()
+				? { started: true, effectId: effect!.effect_id, toolCallId: effect!.tool_call_id,
+					toolName: effect!.tool_name, inputHash: effect!.input_hash }
+				: { started: false } } : {}),
 			browserPayloadHash: identity.browserPayloadHash,
 			target: {
 				agentInstanceRef: identity.agentInstanceRef,

@@ -55,7 +55,8 @@ export interface ResolvedEngineExecution {
 	/** Native retry selector per admitted frozen route unit (index-aligned); undefined = unusable here. */
 	selectors: Array<string | undefined>;
 	/** Recheck current route/credential authorization before a lease transfer or model swap. */
-	verifyCandidate(index: number, signal?: AbortSignal): Promise<void>;
+	verifyCandidate(index: number, currentExecutionDigest: string, signal?: AbortSignal): Promise<void>;
+	activateCandidate(index: number, executionDigest: string): void;
 	dispose(): void;
 }
 
@@ -161,29 +162,33 @@ export class EngineExecutionResolver {
 			let thinkingLevel: ResolvedThinkingLevel | undefined;
 			for (const [index, route] of frozen.entries()) {
 				signal?.throwIfAborted();
+				const fallback = config.dispatch.requirement.fallback_mode;
+				if (index > 0 && (fallback === "none" ||
+					(fallback === "same_model" && route.model_id !== primary.model_id) ||
+					(config.dispatch.requirement.require_trusted_provider && !route.execution.trusted))) {
+					selectors.push(undefined);
+					continue;
+				}
 				try {
 					const execution = route.execution;
 					if (execution.header_refs.length > 0)
 						throw new Error("Route header references need ClientHost header material");
 					let material: ProviderExecutionMaterial | undefined;
 					let provider = route.provider;
-					if (index > 0 || !local) {
-						// Secrets never enter the roster; ClientHost resolves the exact admitted route credential.
+					const externalRoute = index > 0 || !local;
+					if (externalRoute) {
+						// Frozen fallbacks are models only; no credential/pin before a durable transfer.
 						const ref = execution.credential.local_ref ?? execution.credential.hosted_ref;
-						if (
-							execution.credential.method !== "api_key" ||
-							!ref ||
-							(execution.credential.local_ref && !CLIENT_CREDENTIAL_REF.test(execution.credential.local_ref))
-						)
+						if (execution.credential.method !== "api_key" || !ref ||
+							(execution.credential.local_ref && !CLIENT_CREDENTIAL_REF.test(execution.credential.local_ref)))
 							throw new Error(`Credential method ${execution.credential.method} is unsupported for this route`);
 						if (!this.providerExecutionClient) throw new Error("Provider execution material is unavailable");
 						const identity = Object.freeze({ ...attempt, ...routeIdentity(route), modelId: route.modelId });
-						material = await this.providerExecutionClient.resolve(identity, signal);
+						if (index === 0) material = await this.providerExecutionClient.resolve(identity, signal);
 						const marker = `clientexec://sha256:${createHash("sha256").update(stableStringifyJson(identity), "utf8").digest("hex")}`;
-						const binding = {
-							identity,
-							transport: executionTransport(material),
-							executionPin: material.executionPin,
+						const binding: ProviderExecutionBinding = {
+							identity, execution,
+							...(material ? { transport: executionTransport(material), executionPin: material.executionPin } : {}),
 						};
 						external.set(marker, binding);
 						candidateBindings[index] = binding;
@@ -192,7 +197,7 @@ export class EngineExecutionResolver {
 						await authStorage.set(provider, { type: "api_key", key: marker });
 					}
 					const candidate = buildModel(toModelSpec(route, provider, material)) as Model;
-					if (material) {
+					if (externalRoute) {
 						modelRegistry.registerProvider(candidate.provider, {
 							authStorageManaged: true,
 							api: candidate.api,
@@ -232,8 +237,13 @@ export class EngineExecutionResolver {
 				if (!executionClient) throw new Error("Provider execution material is unavailable");
 				// Every physical request rechecks live Engine admission and current Core ACL/credential fences.
 				const current = await executionClient.resolve(binding.identity, init?.signal ?? undefined, binding.executionPin);
-				if (stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
+				if (binding.transport &&
+					stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
 					throw new Error("Provider execution transport changed; start a new Attempt");
+				if (current.api !== nativeProviderApi(binding.execution.api as Api) ||
+					current.baseUrl !== binding.execution.base_url)
+					throw new Error("Provider execution descriptor changed; start a new Attempt");
+				binding.transport ??= executionTransport(current);
 				if (binding.transport.mode !== "hosted_broker") return fetch(input, init);
 				const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 				let replaced = false;
@@ -265,15 +275,21 @@ export class EngineExecutionResolver {
 					maxSpawnDepth,
 				},
 				selectors,
-				verifyCandidate: async (index, signal) => {
+				verifyCandidate: async (index, currentExecutionDigest, signal) => {
 					const binding = candidateBindings[index];
-					if (!binding || !this.providerExecutionClient)
-						throw new Error("Admitted fallback credential is unavailable");
-					const current = await this.providerExecutionClient.resolve(
-						binding.identity, signal, binding.executionPin,
-					);
-					if (stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
-						throw new Error("Provider execution transport changed; start a new Attempt");
+					const candidate = frozen[index];
+					if (!binding || !candidate || !this.providerExecutionClient)
+						throw new Error("Admitted fallback candidate is unavailable");
+					binding.identity = { ...binding.identity, executionDigest: currentExecutionDigest };
+					await this.providerExecutionClient.checkCandidate(binding.identity, {
+						route_ref: candidate.route_ref, account_ref: candidate.account_ref,
+						effort: candidate.effort, service_tier: candidate.service_tier,
+					}, signal);
+				},
+				activateCandidate: (index, executionDigest) => {
+					const binding = candidateBindings[index];
+					if (!binding) throw new Error("Admitted fallback candidate is unavailable");
+					binding.identity = { ...binding.identity, executionDigest };
 				},
 				dispose: () => authStorage.close(),
 			};
@@ -341,18 +357,22 @@ async function resolveProviderExecutionCredential(
 ): Promise<string | undefined> {
 	const binding = identities.get(value);
 	if (!binding) return process.env[value] || value;
-	if (binding.transport.mode === "hosted_broker") return BROKER_CREDENTIAL_PLACEHOLDER;
+	if (binding.transport?.mode === "hosted_broker") return BROKER_CREDENTIAL_PLACEHOLDER;
 	if (!client) throw new Error("Provider execution material is unavailable");
 	const material = await client.resolve(binding.identity, signal, binding.executionPin);
-	if (stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport)) {
-		throw new Error("Provider execution transport changed; start a new Attempt with the refreshed route roster");
-	}
-	return material.credential;
+	if (binding.transport && stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport))
+		throw new Error("Provider execution transport changed; start a new Attempt");
+	if (material.api !== nativeProviderApi(binding.execution.api as Api) ||
+		material.baseUrl !== binding.execution.base_url)
+		throw new Error("Provider execution descriptor changed; start a new Attempt");
+	binding.transport ??= executionTransport(material);
+	return binding.transport.mode === "hosted_broker" ? BROKER_CREDENTIAL_PLACEHOLDER : material.credential;
 }
 
 interface ProviderExecutionBinding {
 	identity: ProviderExecutionIdentity;
-	transport: Omit<ProviderExecutionMaterial, "credential" | "executionPin">;
+	transport?: Omit<ProviderExecutionMaterial, "credential" | "executionPin">;
+	execution: RouteExecution;
 	executionPin?: string;
 }
 

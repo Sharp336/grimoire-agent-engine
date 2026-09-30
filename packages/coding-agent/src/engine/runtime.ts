@@ -65,6 +65,7 @@ import { arrayValuedLabels, assembleYieldResult } from "../task/yield-assembly";
 import type { EngineChildLaunchResult, EngineInboxToolRequest } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
 import { buildOutputValidator } from "../tools/output-schema-validator";
+import type { EngineCommandEnvelope } from "./nats-adapter";
 import {
 	type ApprovalAddressee,
 	type ApprovalRequest,
@@ -302,6 +303,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 		frozen: EngineExecutionRoute[];
 		selectors: Array<string | undefined>;
 		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
+		activateCandidate: ResolvedEngineExecution["activateCandidate"];
 		choice: ExecutorChoice;
 	};
 	leaseHeartbeat?: NodeJS.Timeout;
@@ -435,7 +437,7 @@ export interface EngineRuntimeOptions {
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<{ verified: true; dispatchHash: string; bindingSnapshot: EngineSemanticBindingSnapshot; authContextId: string }>;
+	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string }>;
 	verifyApprovalReceipt?: (receipt: {
 		originReceiptId: string;
 		commandId: string;
@@ -545,6 +547,22 @@ export class EngineRuntime {
 			options.attachmentBlobStore ?? new BlobStore(getBlobsDir()),
 			store.records,
 		);
+	}
+
+	/** Verify current CH authority for every non-Start command before local admission or side effects. */
+	async verifyCommandOrigin(command: EngineCommandEnvelope): Promise<void> {
+		if (command.op === "start") return; // Start verifies its dispatch and binding in #startInLane.
+		if (!this.#verifyOriginReceipt) throw new EngineTargetError("source_unavailable", "Verified command origin is required");
+		const { originReceiptId: ignored, ...payload } = command.payload;
+		if (typeof ignored !== "string" || !ignored || !command.agentInstanceRef || !command.attemptId || !command.principalId)
+			throw new EngineTargetError("invalid_request", "Command requires an exact origin receipt and Attempt identity");
+		const commandHash = `sha256:${crypto.createHash("sha256").update(storageCanonicalJson({ ...command, payload })).digest("hex")}`;
+		const origin = await this.#verifyOriginReceipt({
+			originReceiptId: ignored, commandId: command.commandId, agentInstanceRef: command.agentInstanceRef,
+			attemptId: command.attemptId, principalId: command.principalId,
+		});
+		if (origin.verified !== true || origin.commandHash !== commandHash || !origin.authContextId)
+			throw new EngineTargetError("stale_target", "Command origin differs from its exact frozen envelope");
 	}
 
 	static async create(options: EngineRuntimeOptions): Promise<EngineRuntime> {
@@ -1930,7 +1948,7 @@ export class EngineRuntime {
 			attemptId: request.attemptId,
 			principalId: request.principalId,
 		});
-		if (origin.verified !== true || origin.dispatchHash !== request.dispatchHash ||
+		if (origin.verified !== true || origin.dispatchHash !== request.dispatchHash || !origin.bindingSnapshot ||
 			!sameSemanticBinding(origin.bindingSnapshot, request.bindingSnapshot) || !origin.authContextId)
 			throw new EngineTargetError("stale_target", "Origin receipt differs from admitted dispatch or binding");
 		await this.store.checkSemanticStart(request.agentInstanceId, request.bindingSnapshot, request.principalId);
@@ -2099,6 +2117,10 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "Dispatch hash does not match the normalized execution");
 		if (!config.roster_complete || config.routes.routes.length === 0)
 			throw new EngineTargetError("admission_state_unknown", "A complete authorized executor roster is required");
+		const roster = config.routes.routes.filter(route =>
+			!config.dispatch.requirement.require_trusted_provider || route.execution.trusted);
+		if (!roster.length)
+			throw new EngineTargetError("capacity_unavailable", "No authorized trusted provider route is available");
 		const { toolNames, restrictToolNames } = config.continuationConfiguration;
 		assertFilesReadable(
 			toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
@@ -2121,7 +2143,7 @@ export class EngineRuntime {
 			limits: config.routingLimits,
 			rosterRevision: config.roster_revision,
 			expectedRevisions: config.record_revisions,
-			candidates: config.routes.routes,
+			candidates: roster,
 			callerAttemptId: request.bindingSnapshot.parentAttemptId,
 			frozen: false,
 		};
@@ -2163,7 +2185,7 @@ export class EngineRuntime {
 		if (!route) throw new EngineTargetError("admission_state_unknown", "Admitted route is missing");
 		const selected: SelectedExecutor = {
 			...candidateIdentity(route),
-			basis: config.dispatch.requirement.pin ? "pin" : route.order_match ? "order" : "rank",
+			basis: route.order_match ? "order" : "rank",
 			order_match: route.order_match,
 		};
 		const candidates = preview.frozen.map(frozenCandidate);
@@ -2655,7 +2677,13 @@ export class EngineRuntime {
 							if (index <= 0) return false;
 							const candidate = parent.execution.frozen[index];
 							if (!candidate) return false;
-							await parent.execution.verifyCandidate(index, signal);
+							const requirement = parent.execution.config.dispatch.requirement;
+							if (requirement.fallback_mode === "none" ||
+								(requirement.fallback_mode === "same_model" &&
+									candidate.model_id !== parent.execution.choice.selected.model_id) ||
+								(requirement.require_trusted_provider && !candidate.execution.trusted))
+								return false;
+							await parent.execution.verifyCandidate(index, parent.execution.choice.execution_digest, signal);
 							const updated = {
 								...parent.execution.choice.selected,
 								...candidateIdentity(candidate),
@@ -2675,6 +2703,7 @@ export class EngineRuntime {
 								digest, parent.execution.config.routingLimits,
 							);
 							if (!changed) return false;
+							parent.execution.activateCandidate(index, digest);
 							parent.execution.choice = {
 								...parent.execution.choice,
 								execution_digest: digest,
@@ -2710,6 +2739,36 @@ export class EngineRuntime {
 					});
 					const callerAttestation = `hmac-sha256:${crypto.createHmac("sha256", authorization.slice(7))
 						.update("grimoire-client-caller-context-v1\0").update(callerContext).digest("hex")}`;
+					const attestToolCall: NonNullable<MCPHttpServerConfig["attestToolCall"]> =
+						async (toolCallId, toolName, mcpName, input, outbound) => {
+							const active = liveBinding;
+							const inputHash = sha256(stableStringifyJson(input));
+							const effectId = active
+								? `tool_${sha256(`${active.bindingId}\0${request.attemptId}\0${toolCallId}\0${inputHash}`).slice(0, 32)}`
+								: "";
+							const record = this.#toolInvocations.get(effectId);
+							const effect = effectId ? await this.store.getEffect(effectId) : undefined;
+							if (!active || active.attemptId !== request.attemptId || !record ||
+								record.toolCallId !== toolCallId || record.toolName !== toolName ||
+								record.inputHash !== inputHash || record.target.bindingId !== active.bindingId ||
+								effect?.state !== "started" || effect.effect_kind !== "tool" ||
+								effect.attempt_id !== request.attemptId || effect.binding_id !== active.bindingId ||
+								effect.tool_call_id !== toolCallId || effect.tool_name !== toolName ||
+								effect.input_hash !== inputHash)
+								throw new EngineTargetError("stale_target", "MCP call lacks its persisted started ToolEffect");
+							const canonicalCallHash = `sha256:${crypto.createHash("sha256")
+								.update(storageCanonicalJson({ name: mcpName, arguments: outbound })).digest("hex")}`;
+							const context = JSON.stringify({
+								agentInstanceRef: request.agentInstanceRef, attemptId: request.attemptId,
+								bindingRevision: request.bindingSnapshot.bindingRevision, dispatchHash: request.dispatchHash,
+								effectId, toolCallId, toolName: mcpName, canonicalCallHash,
+							});
+							return {
+								"X-Grimoire-Client-Caller-Context": context,
+								"X-Grimoire-Client-Caller-Attestation": `hmac-sha256:${crypto.createHmac("sha256", authorization.slice(7))
+									.update("grimoire-client-caller-context-v1\0").update(context).digest("hex")}`,
+							};
+						};
 					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
@@ -2718,6 +2777,7 @@ export class EngineRuntime {
 							ready.promise,
 							mcpManager.connectServers({ grimoire_engine: {
 								...this.#mcpServer,
+								attestToolCall,
 								headers: {
 									...this.#mcpServer.headers,
 									"X-Grimoire-Client-Caller-Context": callerContext,
@@ -2783,7 +2843,8 @@ export class EngineRuntime {
 				steerCommandSet: new Set(),
 				unsubscribe: () => {},
 				disposeExecution: resolved.dispose,
-				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice, verifyCandidate: resolved.verifyCandidate },
+				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice,
+					verifyCandidate: resolved.verifyCandidate, activateCandidate: resolved.activateCandidate },
 				requireYieldTool: config.continuationConfiguration.requireYieldTool,
 				outputSchema: sessionOptions.outputSchema,
 				pauseGate,
