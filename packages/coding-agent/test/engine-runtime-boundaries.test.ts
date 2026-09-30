@@ -14,7 +14,7 @@ import { runEngineCommand } from "../src/engine/control-query";
 import type { EngineCommandEnvelope } from "../src/engine/nats-adapter";
 import type { EngineOrdinaryEvent } from "../src/engine/contracts";
 import type { EngineStartResult } from "../src/engine/contracts";
-import { type EngineBindingGate, type EngineBindingResult, type EngineStartRequest, type EngineEvent, EngineTargetError } from "../src/engine/contracts";
+import { type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineStartRequest, type EngineEvent, EngineTargetError } from "../src/engine/contracts";
 import { dispatchEngineCommand, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "../src/engine/runtime";
@@ -621,6 +621,94 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		expect((await runtime.sessionHistoryPage(target.agentInstanceId, ref, undefined, 100, target.attemptId)).entries).toEqual(page.entries);
 	}, 60_000);
 
+	it("keeps configured unknown ancestor evidence pending until authority recovers", async () => {
+		const parentEntered = Promise.withResolvers<void>();
+		const releaseParent = Promise.withResolvers<void>();
+		const deadlineLookup = Promise.withResolvers<void>();
+		const requested = Promise.withResolvers<ApprovalRequest>();
+		const paused = Promise.withResolvers<void>();
+		const principalId = "grimoire:user:approval-authority";
+		const installationId = `install_${"a".repeat(32)}`;
+		const owner = new Bun.CryptoHasher("sha256").update(principalId).digest("hex");
+		const parentRef = `grimoire://agents/~u/${owner}/approval-parent`;
+		const childRef = `grimoire://agents/~u/${owner}/approval-child`;
+		const mock = createMockModel({ handler: async context => {
+			if (JSON.stringify(context.messages.find(message => message.role === "user")?.content).includes("authority-parent")) {
+				parentEntered.resolve();
+				await releaseParent.promise;
+				return { content: ["parent complete"] };
+			}
+			return { content: [{ type: "toolCall", id: "authority-read", name: "read", arguments: { path: "authority.txt" } }] };
+		} });
+		const env = await setup(mock.model, (session, input, identity) => session.prompt(input, identity));
+		const parentExecution = admittedExecution(mock.model, env.registry, {
+			spawn: { allowed: "auto", max_depth: 1, max_children: 1, on_exceed: "deny" },
+			continuation: { toolNames: ["read"], restrictToolNames: true },
+		});
+		const childExecution = admittedExecution(mock.model, env.registry, {
+			continuation: { toolNames: ["read"], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"] },
+		});
+		env.executions.push(parentExecution, childExecution);
+		fs.writeFileSync(path.join(env.cwd, "authority.txt"), "must remain approval-fenced");
+		const verify = env.options.verifyOriginReceipt!;
+		env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
+			approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("authority-deadline") } });
+		let available = false;
+		let lookups = 0;
+		let parent: EngineStartResult | undefined;
+		env.options.approvalAncestor = async identity => {
+			if (!available) {
+				if (++lookups >= 2) deadlineLookup.resolve();
+				return { unknown: true };
+			}
+			if (identity.agentInstanceRef === parentRef && identity.attemptId === parent?.attemptId) return { root: true };
+			if (identity.agentInstanceRef !== childRef || !parent) throw new Error("Unexpected ancestry lookup");
+			return { agent_ref: parentRef, attempt_id: parent.attemptId, binding_revision: 1, installation_id: installationId,
+				ceiling: { tools: parentExecution.config.dispatch.tools, tools_permit: parentExecution.config.dispatch.tools_permit,
+					spawn: parentExecution.config.dispatch.spawn, trusted: true }, terminal_known: false };
+		};
+		await env.runtime.dispose();
+		const runtime = await open(env.options);
+		runtime.verifyInstallation(installationId, principalId);
+		const childId = engineAgentInstanceId(childRef);
+		runtime.subscribe(event => {
+			if (event.agentInstanceId !== childId) return;
+			if (event.kind === "tool_approval_requested") requested.resolve(event.payload);
+			if (event.kind === "paused") paused.resolve();
+		});
+		try {
+			parent = await env.start("authority-parent", { agentInstanceId: engineAgentInstanceId(parentRef),
+				agentInstanceRef: parentRef, principalId, input: "authority-parent",
+				bindingSnapshot: { ...semanticBinding(parentRef, parentExecution.taskRef), installationId, bindingRevision: 1 } },
+				runtime, parentExecution);
+			await withTimeout(parentEntered.promise, 5_000, "Parent did not start");
+			const child = await env.start("authority-child", { agentInstanceId: childId, agentInstanceRef: childRef,
+				principalId, input: "authority-child", parentAgentInstanceId: parent.agentInstanceId, parentAgentInstanceRef: parentRef,
+				bindingSnapshot: { ...semanticBinding(childRef, childExecution.taskRef), installationId, bindingRevision: 1,
+					parentAgentInstanceRef: parentRef, parentAttemptId: parent.attemptId, parentBindingRevision: 1 } },
+				runtime, childExecution);
+			const approval = await withTimeout(requested.promise, 5_000, "Tool approval was not created");
+			expect(approval.addressed_to).toEqual({ kind: "attempt", agent_ref: parentRef, attempt_id: parent.attemptId });
+			await withTimeout(deadlineLookup.promise, 5_000, "Configured authority was not retried at expiry");
+			expect((await runtime.store.getApproval(approval.id))?.request).toMatchObject({
+				status: "pending", address_revision: 1, requires_human: false, addressed_to: approval.addressed_to,
+			});
+			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("running");
+			expect((await runtime.store.getEffect(approval.effect_id))?.state).toBe("planned");
+			available = true;
+			await withTimeout(paused.promise, 7_000, "Recovered ancestry did not escalate its expired request");
+			expect((await runtime.store.getApproval(approval.id))?.request).toMatchObject({
+				status: "waiting_human_paused", address_revision: 2, expires_at: null,
+				addressed_to: { kind: "human", principal_id: principalId }, requires_human: false,
+			});
+			expect((await runtime.store.getEffect(approval.effect_id))?.state).toBe("planned");
+			await runtime.cancel({ ...child, commandId: "cancel-authority-child" });
+		} finally {
+			releaseParent.resolve();
+			await withTimeout(runtime.dispose(), 5_000, "Authority fixture cleanup did not finish");
+		}
+	}, 30_000);
+
 	for (const action of ["pause", "stop", "fifo", "approval-fifo"] as const) it(`keeps nested task waits quiescent under parent ${action} while an independent root completes`, async () => {
 		const fifo = action === "fifo" || action === "approval-fifo";
 		const leafEntered = Promise.withResolvers<void>();
@@ -773,8 +861,16 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				});
 				const waitingMiddle = (await runtime.store.records.get("command", middle.commandId)).value as unknown as RocksCommand;
 				const deadlinePause = action === "approval-fifo" ? nextEvent("paused", leaf.attemptId) : undefined;
+				const approvalRequested = Promise.withResolvers<ApprovalRequest>();
+				if (deadlinePause) runtime.subscribe(event => {
+					if (event.kind === "tool_approval_requested" && event.attemptId === leaf.attemptId)
+						approvalRequested.resolve(event.payload);
+				});
 				releaseResumedLeaf.resolve();
 				if (deadlinePause) {
+					expect(await withTimeout(approvalRequested.promise, 5_000, "Legacy child approval was not created"))
+						.toMatchObject({ addressed_to: { kind: "human", principal_id: "owner" },
+							address_revision: 1, requires_human: false });
 					await withTimeout(deadlinePause, 15_000, "Resumed leaf did not reach its new approval pause");
 					await expect(runEngineCommand({ runtime, deviceId: command.deviceId, engineId: command.engineId }, command))
 						.rejects.toMatchObject({ code: "binding_pending" });

@@ -659,7 +659,8 @@ export class EngineRuntime {
 	async #addressApproval(binding: LiveBinding, kind: ApprovalRequest["kind"], name: string,
 		subject?: ApprovalRequest["subject"], timedOut: readonly string[] = []): Promise<ApprovalAddressee | "unknown"> {
 		if (kind === "escalation") return { kind: "human", principal_id: binding.principalId };
-		if (!binding.bindingSnapshot?.installationId || !this.#approvalAncestor) return "unknown";
+		if (!binding.bindingSnapshot?.installationId || !this.#approvalAncestor)
+			return { kind: "human", principal_id: binding.principalId };
 		let agentInstanceRef = binding.bindingSnapshot.agentInstanceRef;
 		let attemptId = binding.attemptId;
 		let installationId = binding.bindingSnapshot.installationId;

@@ -180,6 +180,7 @@ export async function admittedFixtureStart(
 	principalId: string,
 	execution: AdmittedExecutionFixture,
 	deviceId = "device",
+	startIntent?: { expectedRevision: number; explicitContinue: true },
 ): Promise<EngineBindingSnapshot> {
 	const cwd = process.cwd();
 	const bindingSnapshot = initial.bindingSnapshot ??
@@ -193,7 +194,8 @@ export async function admittedFixtureStart(
 		agentInstanceRef, executionId: initial.executionId, attemptId: initial.attemptId,
 	}, {
 		cwd, principalId, input: "runtime v1 fixture",
-		bindingSnapshot, expectedIntentRevision: 0,
+		bindingSnapshot, expectedIntentRevision: startIntent?.expectedRevision ?? 0,
+		...(startIntent ? { explicitContinue: true } : {}),
 	});
 	const envelope = startEnvelope({ engineGeneration: initial.engineGeneration }, execution, request,
 		{ deviceId, engineId: "engine" });
@@ -224,6 +226,7 @@ export async function admittedFixtureStart(
 	};
 	await store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
 		requireNew: true, settleCommandId: start.commandId,
+		...(startIntent ? { startIntent } : {}),
 		routingAdmission: { request: admission, preview },
 		execution: {
 			execution_schema: 2, execution_digest: target.executionDigest,

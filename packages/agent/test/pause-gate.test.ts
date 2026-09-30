@@ -237,7 +237,7 @@ describe("agentPauseGate", () => {
 				if (messages.length) { gate.pause(); dequeued.resolve(); }
 				return messages;
 			},
-			getAsideMessages: () => asides.splice(0),
+			getAsideMessages: async () => asides.splice(0),
 		}, controller.signal, mock.stream);
 		const result = (async () => {
 			for await (const event of stream)

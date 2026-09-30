@@ -627,21 +627,20 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			error => error,
 		);
 		expect(malformed).toMatchObject({ code: "stale_target" });
-		// A new Attempt on the same Engine generation advances its binding generation.
-		const restartedAttempt = {
-			...target,
-			attemptId: "newer-attempt",
-			executionId: "newer-execution",
-			bindingGeneration: 2,
-		};
-		await store.commitAttemptTransition(restartedAttempt, "running", [{ kind: "running" }]);
-		const stale = await store.runtimeHolds({ ...request, cursor }).then(
+		await store.commitAttemptTransition(target, "cancelled", [{ kind: "cancelled" }]);
+		const restartedAttempt = await admittedFixtureStart(store, {
+			...binding("root"), commandId: "newer-start", attemptId: "newer-attempt",
+			executionId: "newer-execution", bindingGeneration: 2,
+		}, agent.agentInstanceRef, agent.principalId, admittedExecutionFixture(agent.bindingSnapshot.taskRef!),
+		"device", { expectedRevision: 2, explicitContinue: true });
+		await store.branchIntent(agent.agentInstanceId, "newer-hold", "pause", 3);
+		const stale = await store.runtimeHolds({ ...request, revision: 4, cursor }).then(
 			() => undefined,
 			error => error,
 		);
 		expect(stale).toMatchObject({ code: "stale_target" });
-		const current = await store.runtimeHolds({ ...request, attemptId: restartedAttempt.attemptId });
-		expect(current.items).toMatchObject([{ commandId: "hold-pause" }]);
+		const current = await store.runtimeHolds({ ...request, revision: 4, attemptId: restartedAttempt.attemptId });
+		expect(current.items).toMatchObject([{ commandId: "newer-hold" }]);
 	});
 
 	it("reopens bounded active tool baselines and rejects a continuation after exact lifecycle changes", async () => {
@@ -743,14 +742,16 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		await expect(store.runtimeTools({ ...request, principalId: "foreign", cursor })).rejects.toMatchObject({
 			code: "agent_not_found",
 		});
-		await expect(store.runtimeTools({ ...request, attemptId: "other-attempt", cursor })).rejects.toMatchObject({
-			code: "stale_target",
-		});
 		const rootSummary = (before.agents[0] as { revision: number }).revision;
 		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark));
 		expect(catalog.changes.filter(change => change.kind === "summary")).toHaveLength(1); // pending permit needs attention
 		expect(catalog.changes.every(change => change.kind !== "tool")).toBeTrue();
 		expect(Number(catalog.changes[0]?.revision)).toBeGreaterThan(rootSummary);
+		const other = await active(store, "other");
+		await expect(store.runtimeTools({
+			...request, agentInstanceRef: identity("other").agentInstanceRef,
+			attemptId: other.attemptId, cursor,
+		})).rejects.toMatchObject({ code: "stale_target" });
 		store = reopen();
 		const reopened = await store.runtimeSnapshot(scope, request);
 		expect(reopened.agents[0].tools).toEqual(tools);

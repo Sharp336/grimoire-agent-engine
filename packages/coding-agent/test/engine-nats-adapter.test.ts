@@ -1145,7 +1145,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}
 	}, 60000);
 
-	it("settles launch failures once and lets Stop cancel a command before an Attempt exists", async () => {
+	it("preserves admitted Start receipts on material failure and lets Stop cancel before admission", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-launch-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
@@ -1158,16 +1158,10 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const liveExecution = admittedExecution(mock.model, modelRegistry);
 		const retainedExecution = admittedExecution(mock.model, modelRegistry);
 		const reuseExecution = admittedExecution(mock.model, modelRegistry);
-		let pendingReject: ((error: Error) => void) | undefined;
-		let reuseReject: ((error: Error) => void) | undefined;
-		let pendingResolverEntered = false;
-		let reuseResolverEntered = false;
-		let pendingGateResolve: (() => void) | undefined;
-		let reuseGateResolve: (() => void) | undefined;
-		const pendingGate = new Promise<void>(resolve => { pendingGateResolve = resolve; });
-		const reuseGate = new Promise<void>(resolve => { reuseGateResolve = resolve; });
-		const pendingFail = new Promise<void>((_resolve, reject) => { pendingReject = reject; });
-		const reuseFail = new Promise<void>((_resolve, reject) => { reuseReject = reject; });
+		let pendingOriginEntered = false;
+		let reuseOriginEntered = false;
+		const pendingOrigin = Promise.withResolvers<void>();
+		const reuseOrigin = Promise.withResolvers<void>();
 		const plainExecution = admittedExecution(mock.model, modelRegistry);
 		// agent-failed / agent-unsafe-error / retained-rejected resolve through a refusing typed resolver.
 		const refusingBase = plainExecution.optionsFor({ deviceId: "device-1" });
@@ -1179,7 +1173,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						"Failed to open auth database at 'C:/Users/private/.omp/agent/agent.db': database is locked",
 					);
 					databaseError.name = "ConfigurationError";
-					throw new Error("No usable AvailableModelRoute in AgentProfile", {
+					throw new Error("Executor material resolution failed", {
 						cause: new Error(
 							'ProviderAccount credential token=do-not-expose Authorization: Bearer bearer-secret "access_token":"json-secret" sk-proj-0123456789abcdef is unavailable',
 							{ cause: databaseError },
@@ -1189,17 +1183,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				if (attempt.attemptId === "attempt-unsafe")
 					throw new Error("custom startup failed with raw prompt SUPER_SECRET_PROMPT");
 				if (attempt.attemptId === "attempt-retained-rejected")
-					throw new Error("replacement profile is unavailable");
-				if (attempt.attemptId === "attempt-pending") {
-					pendingResolverEntered = true;
-					await Promise.race([pendingGate, pendingFail]);
-					return refusingResolve(config, frozen, attempt, resolverCwd, signal);
-				}
-				if (attempt.attemptId === "attempt-reuse-pending") {
-					reuseResolverEntered = true;
-					await Promise.race([reuseGate, reuseFail]);
-					return refusingResolve(config, frozen, attempt, resolverCwd, signal);
-				}
+					throw new Error("Replacement executor material is unavailable");
 				return refusingResolve(config, frozen, attempt, resolverCwd, signal);
 		};
 		const runtime = await EngineRuntime.create({
@@ -1221,6 +1205,14 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			} }),
 			resolveExecution,
 			verifyOriginReceipt: async identity => {
+				if (identity.commandId === "command-pending") {
+					pendingOriginEntered = true;
+					await pendingOrigin.promise;
+				}
+				if (identity.commandId === "command-reuse-pending") {
+					reuseOriginEntered = true;
+					await reuseOrigin.promise;
+				}
 				const selected = [liveExecution, retainedExecution, reuseExecution, refusedExecution]
 					.find(execution => execution.receipts.has(identity.originReceiptId));
 				if (!selected) throw new Error("Unknown fixture command receipt");
@@ -1279,33 +1271,26 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
 				msgID: failed.commandId,
 			});
-			await waitFor(() => events.some(event => event.causationCommandId === failed.commandId));
+			await waitFor(() => events.some(event =>
+				event.causationCommandId === failed.commandId && event.type === "attempt.failed"));
 			const failedAdmission = await runtime.store.admitCommand(
 				engineCommandIdentity(failed),
 				runtime.engineGeneration,
 			);
 			expect(failedAdmission).toMatchObject({
-				status: "replay",
-				receipt: {
-					outcome: "rejected",
-					detail: {
-						code: "launch_failed",
-						message:
-							'Agent session initialization failed: No usable AvailableModelRoute in AgentProfile: ProviderAccount credential token="[redacted]" Authorization: Bearer [redacted] "access_token":"[redacted]" [redacted credential] is unavailable: Failed to open auth database at \'[local auth database]\': database is locked',
-					},
-				},
+				status: "replay", receipt: { outcome: "applied" },
 			});
-			const publicFailure = JSON.stringify(failedAdmission);
+			const publicFailure = JSON.stringify({ failedAdmission,
+				events: events.filter(event => event.causationCommandId === failed.commandId) });
 			expect(publicFailure).not.toContain("do-not-expose");
 			expect(publicFailure).not.toContain("bearer-secret");
 			expect(publicFailure).not.toContain("json-secret");
 			expect(publicFailure).not.toContain("0123456789abcdef");
-			expect(await runtime.store.getAttempt(failed.attemptId!)).toBeUndefined();
-			const failedEvent = events.find(event => event.causationCommandId === failed.commandId);
-			expect(failedEvent).toMatchObject({
-				type: "command.rejected",
-				payload: { code: "launch_failed", sessionState: "absent" },
-			});
+			expect(await runtime.store.getAttempt(failed.attemptId!)).toMatchObject({ state: "failed" });
+			expect(events.filter(event => event.causationCommandId === failed.commandId && event.type === "attempt.failed"))
+				.toHaveLength(1);
+			expect(events.filter(event => event.causationCommandId === failed.commandId && event.type === "command.rejected"))
+				.toEqual([]);
 
 			const retainedFirst = startCommand(runtime.engineGeneration, "agent-retained", "retained-first", cwd, retainedExecution);
 		retainedExecution.captureCommand(retainedFirst);
@@ -1325,13 +1310,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				JSON.stringify(retainedRejected),
 				{ msgID: retainedRejected.commandId },
 			);
-			await waitFor(() => events.some(event => event.causationCommandId === retainedRejected.commandId));
-			const retainedRejectedEvent = events.find(event => event.causationCommandId === retainedRejected.commandId);
-			expect(retainedRejectedEvent).toMatchObject({
-				type: "command.rejected",
-				payload: { code: "launch_failed" },
-			});
-			expect((retainedRejectedEvent?.payload as Record<string, unknown> | undefined)?.sessionState).toBeUndefined();
+			await waitFor(() => events.some(event =>
+				event.causationCommandId === retainedRejected.commandId && event.type === "attempt.failed"));
+			expect(await runtime.store.admitCommand(engineCommandIdentity(retainedRejected), runtime.engineGeneration))
+				.toMatchObject({ status: "replay", receipt: { outcome: "applied" } });
+			expect(events.filter(event => event.causationCommandId === retainedRejected.commandId &&
+				event.type === "attempt.failed")).toHaveLength(1);
 			expect((await retainedHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
 
 			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd, refusedExecution);
@@ -1339,13 +1323,15 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
 				msgID: unsafe.commandId,
 			});
-			await waitFor(() => events.some(event => event.causationCommandId === unsafe.commandId));
+			await waitFor(() => events.some(event =>
+				event.causationCommandId === unsafe.commandId && event.type === "attempt.failed"));
 			const unsafeAdmission = await runtime.store.admitCommand(
 				engineCommandIdentity(unsafe),
 				runtime.engineGeneration,
 			);
-			const publicUnsafeFailure = JSON.stringify(unsafeAdmission);
-			expect(publicUnsafeFailure).toContain("Error (diagnostic ");
+			expect(unsafeAdmission).toMatchObject({ status: "replay", receipt: { outcome: "applied" } });
+			const publicUnsafeFailure = JSON.stringify({ unsafeAdmission,
+				events: events.filter(event => event.causationCommandId === unsafe.commandId) });
 			expect(publicUnsafeFailure).not.toContain("SUPER_SECRET_PROMPT");
 
 			const pending = startCommand(runtime.engineGeneration, "agent-pending", "pending", cwd, refusedExecution);
@@ -1353,7 +1339,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await js.publish(adapter.commandSubject(pending.agentInstanceId, "start"), JSON.stringify(pending), {
 				msgID: pending.commandId,
 			});
-			await waitFor(() => pendingResolverEntered);
+			await waitFor(() => pendingOriginEntered);
 			const cancel: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1",
 				commandId: "command-cancel-pending",
@@ -1363,6 +1349,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				engineGeneration: runtime.engineGeneration,
 				agentInstanceId: pending.agentInstanceId,
 				agentInstanceRef: pending.agentInstanceRef, principalId: pending.principalId,
+				bindingSnapshot: pending.bindingSnapshot,
 				executionId: pending.executionId,
 				attemptId: pending.attemptId,
 				authorityGeneration: pending.authorityGeneration,
@@ -1382,7 +1369,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						(event.payload as Record<string, unknown>).code === "cancelled",
 				),
 			);
-			pendingReject?.(new Error("late profile resolution must not revive the Attempt"));
+			pendingOrigin.resolve();
 			await waitFor(async () => {
 				const admission = await runtime.store.admitCommand(engineCommandIdentity(cancel), runtime.engineGeneration);
 				return admission.status === "replay";
@@ -1408,11 +1395,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await js.publish(adapter.commandSubject(reusePending.agentInstanceId, "start"), JSON.stringify(reusePending), {
 				msgID: reusePending.commandId,
 			});
-			await waitFor(() => reuseResolverEntered);
+			await waitFor(() => reuseOriginEntered);
 			const reuseCancel: EngineCommandEnvelope = {
 				...cancel,
 				commandId: "command-cancel-reuse-pending",
 				agentInstanceId: reusePending.agentInstanceId,
+				agentInstanceRef: reusePending.agentInstanceRef,
+				bindingSnapshot: reusePending.bindingSnapshot,
 				executionId: reusePending.executionId,
 				attemptId: reusePending.attemptId,
 				issuedAt: Date.now(),
@@ -1435,7 +1424,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				intentRevision: 1,
 				intentCommandId: reuseCancel.commandId,
 			});
-			reuseReject?.(new Error("late reused profile must not revive the Attempt"));
+			reuseOrigin.resolve();
 			expect(await runtime.store.getAttempt(reusePending.attemptId!)).toBeUndefined();
 
 			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd, liveExecution);
@@ -1478,11 +1467,16 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			reuseSubscription.unsubscribe();
 			retainedSubscription.unsubscribe();
 		} finally {
+			const stopping = adapter.stopAdmission();
+			const disposing = runtime.dispose({ closeStore: false });
 			livePrompt.resolve(true);
-			reuseReject?.(new Error("test cleanup"));
+			pendingOrigin.resolve();
+			reuseOrigin.resolve();
+			await stopping;
+			await disposing;
 			await client.drain();
 			await adapter.dispose();
-			await runtime.dispose();
+			await runtime.store.close();
 			authStorage.close();
 			broker.process.kill();
 			await broker.process.exited;

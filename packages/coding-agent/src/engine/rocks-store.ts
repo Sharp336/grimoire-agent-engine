@@ -44,6 +44,7 @@ import {
 	boundedReceipt,
 	eventReadKeys,
 	projectionId,
+	projectedDetail,
 	type RocksProjection,
 	retainedInputPayload,
 	retainInputParts,
@@ -2741,7 +2742,16 @@ export class RocksEngineMutations {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
 			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return;
 			await this.assertFence(tx, target);
-			await tx.put("attempt", target.attemptId, { ...row, executor_route_state: JSON.stringify(state) });
+			const identity = await tx.get<RocksIdentity>("identity", target.agentInstanceId);
+			const detailId = projectionId("detail", target.agentInstanceId, target.attemptId);
+			const previous = await tx.get<RocksProjection>("projection", detailId);
+			if (!identity || !previous)
+				throw new EngineTargetError("stale_target", "Attempt detail projection is unavailable");
+			const updated = { ...row, executor_route_state: JSON.stringify(state) };
+			const detail = await projectedDetail(tx, identity, updated, row.detail_revision);
+			validateRuntimeValue("detailState", detail);
+			await tx.put("attempt", target.attemptId, updated);
+			await tx.put("projection", detailId, { ...previous, value: detail });
 		});
 	}
 	/**
@@ -3575,6 +3585,8 @@ export class RocksEngineMutations {
 				if (!command) break;
 				commandAfter = [command.received_at, command.command_id];
 				if (command.engine_generation >= generation) continue;
+				if (command.operation === "start" && command.binding_pending && command.identity.attemptId &&
+					!(await this.records.get("attempt", command.identity.attemptId, true)).value) continue;
 				if (command.operation === "resume") await this.cancelResumeQueues(command.command_id, command.canonical_hash, generation);
 				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
 				if (!onlyDurable || command.operation === "resume") await ensureHold();
