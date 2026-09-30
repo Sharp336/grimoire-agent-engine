@@ -1301,7 +1301,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			);
 			await waitFor(async () => (await runtime.store.getAttempt(retainedFirst.attemptId!))?.state === "completed");
 			const retainedHistory = (agentInstanceId: string) =>
-				runtime.sessionHistoryPage(agentInstanceId, "grimoire://tasks/grimoire/nats/agents/retained");
+				runtime.sessionHistoryPage(agentInstanceId, retainedFirst.agentInstanceRef!, undefined, undefined, retainedFirst.attemptId);
 			const retainedSessionId = (await retainedHistory(retainedFirst.agentInstanceId)).sessionId;
 			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd, refusedExecution);
 		refusedExecution.captureCommand(retainedRejected);

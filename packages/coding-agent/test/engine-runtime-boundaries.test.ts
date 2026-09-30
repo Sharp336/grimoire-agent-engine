@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { engineAgentId, engineRouteToken } from "../src/engine/route";
-import type { RocksAttempt, RocksCommand } from "../src/engine/rocks-runtime-rows";
+import type { RocksCommand } from "../src/engine/rocks-runtime-rows";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "../src/config/model-registry";
@@ -28,7 +28,7 @@ import { resolveProviderCandidates } from "../src/web/search/provider";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { admittedExecution, admitStart, approvalDecisionFor, startEnvelope, startRequest, type AdmittedExecutionFixture } from "./helpers/engine-runtime-admitted-fixture";
 import { startStorageWorker, storageBlobsDir, storageTestExecutable, storageTestRunRoot, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { binding as fixtureBinding, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const hash = (value: unknown) => `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
 
@@ -478,25 +478,49 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			const id = name === "legacy" ? engineAgentInstanceId(ref) : name;
 			childIds.push(id);
 			const sourceRef = sourceParent === parent ? parentRef : `${execution.taskRef}/agents/other-parent`;
+			if (name === "legacy") {
+				// Seed a retained, non-routed historical birth. Never rewrite an admitted Start.
+				const native = SessionManager.createNative(env.cwd,
+					new RocksNativeSessionStorage(env.runtime.store.storageClient, id, "legacy-history"));
+				const target = { ...fixtureBinding("legacy-history"), bindingSnapshot: undefined,
+					agentInstanceId: id, engineAgentId: engineAgentId(id), state: "released" as const,
+					engineGeneration: env.runtime.engineGeneration, sessionFile: native.getSessionFile()! };
+				const wire: EngineCommandEnvelope = {
+					schema: "grimoire.engine.command.v1", op: "start", commandId: target.commandId,
+					deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+					engineGeneration: target.engineGeneration, agentInstanceId: id, agentInstanceRef: ref,
+					parentAgentInstanceId: parent.agentInstanceId, parentAgentInstanceRef: parentRef,
+					executionId: target.executionId, attemptId: target.attemptId,
+					authorityGeneration: target.authorityGeneration, principalId: "owner", issuedAt: Date.now(),
+					payload: { cwd: env.cwd, input: "private-marker-legacy",
+						localChild: { parentAttemptId: parent.attemptId, toolCallId: legacyCall } },
+				};
+				const retained = engineCommandIdentity(wire);
+				await env.runtime.store.registerAgent({ agentInstanceId: id, agentInstanceRef: ref,
+					parentAgentInstanceId: parent.agentInstanceId, principalId: "owner", authorityGeneration: 1 });
+				await env.runtime.store.mutation(id, async tx => {
+					await tx.create("command", target.commandId, {
+						command_id: target.commandId, agent_instance_id: id, processor_generation: null,
+						state: "settled", canonical_hash: retained.canonicalHash,
+						payload_bytes: Buffer.byteLength(retained.serializedCommand!), control_admission: 0,
+						engine_generation: target.engineGeneration, operation: "start", identity: retained,
+						receipt: { outcome: "applied" }, received_at: Date.now(), updated_at: Date.now(),
+						pending_accounted: false,
+					} satisfies RocksCommand);
+				});
+				native.appendMessage({ role: "user", content: "private-marker-legacy", timestamp: Date.now() },
+					{ sourceCommandId: target.commandId });
+				const transcriptCheckpoint = await native.flushAndCheckpoint();
+				await env.runtime.store.commitAttemptTransition(target, "completed", [{ kind: "completed" }],
+					{ requireNew: true, transcriptCheckpoint });
+				await native.close();
+				continue;
+			}
 			const child = await env.start(`child-${name}`, { agentInstanceId: id, agentInstanceRef: ref,
 				parentAgentInstanceId: sourceParent.agentInstanceId, parentAgentInstanceRef: sourceRef,
 				bindingSnapshot: { ...semanticBinding(ref, selected.taskRef), parentAgentInstanceRef: sourceRef,
 					parentAttemptId: sourceParent.attemptId, parentBindingRevision: 0 }, input: `private-marker-${name}` }, env.runtime, selected);
 			expect((await env.runtime.store.waitAttemptResult(child.agentInstanceId, child.commandId, child.attemptId)).state).toBe("completed");
-			if (name === "legacy") await env.runtime.store.mutation(id, async tx => {
-				const row = (await tx.get<RocksCommand>("command", child.commandId))!;
-				const wire = JSON.parse(row.identity.serializedCommand!);
-				delete wire.bindingSnapshot;
-				wire.payload.localChild = { parentAttemptId: parent.attemptId, toolCallId: legacyCall };
-				const retained = engineCommandIdentity(wire);
-				await tx.put("command", row.command_id, { ...row, identity: retained, canonical_hash: retained.canonicalHash,
-					payload_bytes: Buffer.byteLength(retained.serializedCommand!) });
-				const attempt = (await tx.get<RocksAttempt>("attempt", child.attemptId))!;
-				const effects = await tx.get<{ count: number }>("metadata", `effects:${attempt.attempt_id}:${attempt.binding_id}`);
-				expect(effects?.count ?? 0).toBe(0);
-				delete attempt.binding_snapshot;
-				await tx.put("attempt", child.attemptId, attempt);
-			});
 		}
 		releaseParents.resolve();
 		await env.runtime.drain();

@@ -1755,10 +1755,17 @@ export class TurnRecovery {
 		if (this.#turnRetryPolicy?.orderedRouteFallback &&
 			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
 			return false;
-		const apiKey =
-			options?.apiKey ??
-			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
+		let apiKey = options?.apiKey;
+		if (apiKey === undefined) {
+			try {
+				apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal });
+			} catch (error) {
+				if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
+				throw error;
+			}
+		}
 		if (!apiKey) {
+			if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
 		if (options?.signal?.aborted) return false;
