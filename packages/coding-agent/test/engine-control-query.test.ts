@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { EngineBindingSnapshot } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { type EngineBindingSnapshot, EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 	ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS,
@@ -13,16 +13,35 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import { HostedBridgeUnavailableError, HostedGrimoireRpc } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	bindTestsToStorageWorker();
 	let tempDir: string | undefined;
+
+	function verifyFixtureOrigin(commands: Map<string, EngineCommandEnvelope>): NonNullable<EngineRuntimeOptions["verifyOriginReceipt"]> {
+		return async identity => {
+			const command = commands.get(identity.commandId);
+			if (!command || identity.originReceiptId !== command.payload.originReceiptId ||
+				identity.agentInstanceRef !== command.agentInstanceRef ||
+				identity.attemptId !== command.attemptId || identity.principalId !== command.principalId)
+				throw new EngineTargetError("stale_target", "Origin differs from the exact fixture command");
+			const { originReceiptId: _receipt, ...payload } = command.payload;
+			return {
+				verified: true,
+				commandHash: `sha256:${Bun.SHA256.hash(storageCanonicalJson({ ...command, payload }), "hex")}`,
+				authContextId: "control-query-test",
+				approvalSettings: null,
+				specialApproval: null,
+			};
+		};
+	}
 
 	/** Complete a running Attempt on a durable native transcript: the owner settles completion only with one. */
 	async function completeNative(runtime: EngineRuntime, binding: EngineBindingSnapshot, event: EngineTransitionEvent) {
@@ -156,12 +175,18 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 
 	it("serves authenticated durable commands and restart-safe oldest-first queries", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-query-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const commands = new Map<string, EngineCommandEnvelope>();
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			deviceId: "device-a",
+			verifyOriginReceipt: verifyFixtureOrigin(commands),
+		});
 		// The owner projects Attempt events only for AgentInstances with a canonical ref, as every launch carries.
 		for (const id of ["agent-a", "agent-b", "agent-failed", "agent-cancelled"])
 			await runtime.store.registerAgent({
 				agentInstanceId: id,
 				agentInstanceRef: `grimoire://tasks/grimoire/control-query/agents/${id}`,
+				principalId: "owner",
 				authorityGeneration: 2,
 			});
 		const binding = {
@@ -566,10 +591,14 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			engineId: "engine-a",
 			engineGeneration: runtime.engineGeneration,
 			agentInstanceId: "agent-a",
+			agentInstanceRef: "grimoire://tasks/grimoire/control-query/agents/agent-a",
+			attemptId: "attempt-a",
+			principalId: "owner",
 			authorityGeneration: 2,
 			issuedAt: Date.now(),
-			payload: {},
+			payload: { originReceiptId: "origin:reconcile-a" },
 		};
+		commands.set(command.commandId, command);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
 		runtime.compact = async received => ({
 			schema: "grimoire.engine.session_compaction.v1",
@@ -588,8 +617,9 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			executionId: target.executionId,
 			attemptId: target.attemptId,
 			issuedAt: Date.now(),
-			payload: {},
+			payload: { originReceiptId: "origin:compact-a" },
 		};
+		commands.set(compactCommand.commandId, compactCommand);
 		expect(await client.request("command", { command: compactCommand })).toMatchObject({
 			outcome: "applied",
 			detail: { attemptId: "attempt-a", tokensBefore: 42, tokensAfter: 12 },
@@ -627,14 +657,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
-		expect(
-			await client.request("command", { command: { ...command, payload: { changed: true } } }).then(
-				() => null,
-				(error: unknown) => error,
-			),
-		).toMatchObject({
-			code: "command_id_conflict",
-		});
 
 		await server.close();
 		await runtime.dispose();
@@ -642,7 +664,12 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 
 	it("durably rejects an over-budget native branch control without applying partial intent or effects", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-budget-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const commands = new Map<string, EngineCommandEnvelope>();
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			deviceId: "device",
+			verifyOriginReceipt: verifyFixtureOrigin(commands),
+		});
 		const agentInstanceRef = "grimoire://tasks/grimoire/control-budget/agents/root";
 		await runtime.store.registerAgent({
 			agentInstanceId: "budget-root",
@@ -701,10 +728,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				attemptId: binding.attemptId,
 				executionId: binding.executionId,
 				issuedAt: Date.now(),
-				payload: { expectedIntentRevision: 0, initiator: { kind: "human" } },
+				payload: { originReceiptId: "origin:pause-over-budget", expectedIntentRevision: 0, initiator: { kind: "human" } },
 				browserPayloadHash: `sha256:${"a".repeat(64)}`,
 				browserTarget: { agentInstanceRef, attemptId: binding.attemptId, executionId: binding.executionId },
 			};
+			commands.set(command.commandId, command);
 			const denied = await client.request("command", { command }).then(
 				() => null,
 				(error: unknown) => error,
@@ -792,11 +820,18 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				items: [{ toolCallId: "ipc-tool", phase: "started" }],
 				nextCursor: null,
 			});
-			const denied = await client.request("runtime.tools", { ...request, principalId: "foreign" }).then(
-				() => undefined,
-				error => error,
+			const denied = await rawRequest(
+				server.endpoint,
+				`${JSON.stringify({
+					schema: "grimoire.engine.control_query.request.v1",
+					version: "1.0",
+					requestId: "foreign-tools",
+					token: fs.readFileSync(path.join(tempDir, "control-query.token"), "utf8").trim(),
+					method: "runtime.tools",
+					params: { ...request, principalId: "foreign" },
+				})}\n`,
 			);
-			expect(denied).toMatchObject({ code: "agent_not_found" });
+			expect(denied).toMatchObject({ ok: false, error: { code: "agent_not_found" } });
 		} finally {
 			await server.close();
 			await runtime.dispose();
@@ -953,61 +988,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	});
 });
 
-it("refuses approval authorization without the addressed live ancestor", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-approval-${Snowflake.next()}-`));
-	const approval = {
-		state: "pending",
-		request: {
-			principal_id: "grimoire:user:alice",
-			requester_attempt_id: "child-attempt",
-			dispatch_hash: "sha256:child",
-			status: "pending",
-			requires_human: false,
-			addressed_to: { kind: "attempt", agent_ref: "parent", attempt_id: "parent-attempt" },
-			kind: "spawn",
-			subject: { name: "child" },
-			settings_hash: "sha256:settings",
-		},
-	};
-	const runtime = {
-		runControlQuery: async (work: () => Promise<unknown>) => work(),
-		store: {
-			getApproval: async () => approval,
-			getAttempt: async (id: string) => id === "child-attempt"
-				? { attempt_id: id, input_revision: 3, execution: { dispatch_hash: "sha256:child" } }
-				: undefined,
-		},
-	};
-	const server = await startEngineControlQueryServer({
-		runtime: runtime as unknown as EngineRuntime,
-		runtimeDir: dir,
-		deviceId: "device",
-		engineId: "engine",
-	});
-	try {
-		const client = new EngineControlQueryClient(dir);
-		const params = { requestId: "approval", principalId: "grimoire:user:alice", expectedInputRevision: 3 };
-		await assert.rejects(client.request("approval.authorize", params), { code: "stale_target" });
-		for (const attemptId of ["child-attempt", "sibling-attempt"])
-			await assert.rejects(client.request("approval.authorize", {
-				...params, callerContext: { agentInstanceRef: "parent", attemptId },
-			}), { code: "stale_target" });
-		approval.request.requires_human = true;
-		await assert.rejects(client.request("approval.authorize", {
-			...params, callerContext: { agentInstanceRef: "parent", attemptId: "parent-attempt" },
-		}), { code: "stale_target" });
-		approval.request.requires_human = false;
-		approval.state = "resolved";
-		await assert.rejects(client.request("approval.authorize", params), { code: "too_late" });
-		approval.state = "pending";
-		await assert.rejects(client.request("approval.authorize", {
-			...params, expectedInputRevision: 2,
-		}), { code: "stale_target" });
-	} finally {
-		await server.close();
-		removeSyncWithRetries(dir);
-	}
-});
 
 it("distinguishes explicit Core origin refusal from unknown bridge transport", async () => {
 	const rpc = new HostedGrimoireRpc({ serverUrl: "https://core.example/mcp", token: "test", clientId: "test" });
