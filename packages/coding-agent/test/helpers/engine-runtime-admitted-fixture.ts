@@ -1,4 +1,5 @@
 import type {
+	ApprovalRequest,
 	EngineExecutionConfiguration,
 	EngineSemanticBindingSnapshot,
 	EngineTarget,
@@ -249,24 +250,24 @@ export function approvalDecisionFor(
 	execution: AdmittedExecutionFixture,
 	target: EngineTarget & { principalId?: string },
 	commandId: string,
-	requestId: string,
+	request: ApprovalRequest,
 	decision: "approve" | "deny",
 	reason?: string,
 ): ApprovalDecision {
 	const approvalDecisionValue: ApprovalDecision = {
 		schema: "grimoire.approval_decision.v1",
-		request_id: requestId,
-		expected_address_revision: 1,
-		expected_decision_revision: 0,
+		request_id: request.id,
+		expected_address_revision: request.address_revision,
+		expected_decision_revision: request.decision_revision,
 		command_id: commandId,
 		decision,
 		reason: reason ?? null,
 		origin_receipt_id: `origin:${commandId}`,
 		decided_by: { kind: "human", principal_id: target.principalId ?? "owner" },
 		authority: {
-			ceiling_hash: hash({ tools_permit: [] }),
-			subject_hash: hash({ request_id: requestId }),
-			dispatch_hash: execution.dispatchHash,
+			ceiling_hash: hash(execution.config.continuationConfiguration.tools_permit),
+			subject_hash: hash(request.subject),
+			dispatch_hash: request.dispatch_hash,
 		},
 		decided_at: new Date().toISOString(),
 	};

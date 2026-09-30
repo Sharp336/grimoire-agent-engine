@@ -111,7 +111,7 @@ import {
 	type WorkTarget,
 } from "./contracts";
 import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
-import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
+import { markProviderLatency, setProviderObservationModel, withProviderObservationContext } from "./provider-admission";
 import type { BillingPoolProposal } from "./provider-execution";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
@@ -308,6 +308,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	recoveryCallIds?: string[];
 	consultantEffectId?: string;
 	modelCallSequence: number;
+	modelEffect?: EngineModelEffectInput;
 	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
 	execution: {
 		config: EngineExecutionConfiguration;
@@ -324,6 +325,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	assistantStream?: AssistantStreamState;
 	/** Final provider usage per native assistant response; null means accounting was unavailable. */
 	measuredUsage: Map<string, { input: number; output: number; cached: number } | null>;
+	lastAssistantNativeEntry?: { messageId: string; entryId: string };
 	lastAssistantMessageId?: string;
 	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
@@ -3233,6 +3235,18 @@ export class EngineRuntime {
 				try {
 					previousEntryAppended?.(entry);
 				} finally {
+					if (entry.type === "message" && entry.message.role === "assistant" &&
+						entry.assistantMessageId && binding.measuredUsage.has(entry.assistantMessageId)) {
+						const message = entry.message;
+						binding.lastAssistantNativeEntry = { messageId: entry.assistantMessageId, entryId: entry.id };
+						// The final snapshot is already queued. Its native entry and ownership pointer
+						// must be durable before the model effect closes and any tool can be admitted.
+						void this.#queueBindingWrite(binding, entry.id, async () => {
+							await this.#settleActiveModelEffect(binding,
+								message.stopReason === "error" || message.stopReason === "aborted" ? "failed" : "completed",
+								message.errorMessage);
+						});
+					}
 					if (entry.type === "message" && entry.message.role === "user") {
 						const target = this.#snapshot(binding);
 						const sessionId = manager.getSessionId();
@@ -3292,6 +3306,18 @@ export class EngineRuntime {
 				}
 			};
 			manager.onEntryAppended = onEntryAppended;
+			const detachModelAdmission = session.agent.addBeforeModelCallHook(async signal => {
+				const checkpoint = await this.#effectCheckpoint(binding);
+				await binding.traceWriteTail;
+				if (binding.messageWriteError) throw binding.messageWriteError;
+				if (binding.modelEffect) return;
+				const effect = this.#nextModelEffect(binding, sha256(stableStringifyJson(session.messages)));
+				const started = await this.#admitEffect(binding,
+					() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), signal);
+				binding.modelEffect = effect;
+				setProviderObservationModel(effect);
+				this.#notifyEvents([started]);
+			});
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_start" && event.message.role === "assistant") {
 					this.#queueExecutorRoute(binding, "active", event.message);
@@ -3389,6 +3415,7 @@ export class EngineRuntime {
 				observingEntries = false;
 				binding.session.setMessagePersistedHandler(null);
 				unsubscribe();
+				detachModelAdmission();
 				if (manager.onEntryAppended === onEntryAppended) manager.onEntryAppended = previousEntryAppended;
 			};
 			unsubscribeCreated = binding.unsubscribe;
@@ -3679,9 +3706,9 @@ export class EngineRuntime {
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
 		// The tool's source blocks must be durable before publishing its admission.
+		const checkpoint = await this.#effectCheckpoint(binding);
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) throw binding.messageWriteError;
-		const checkpoint = await this.#effectCheckpoint(binding);
 		const policy = binding.execution.config.continuationConfiguration.toolPolicies[call.toolName] ?? "unrestricted";
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
@@ -4528,6 +4555,31 @@ export class EngineRuntime {
 		);
 	}
 
+	#nextModelEffect(binding: LiveBinding, inputHash: string): EngineModelEffectInput {
+		const modelCallId = `model-${++binding.modelCallSequence}`;
+		return {
+			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
+			modelCallId,
+			inputHash,
+		};
+	}
+
+	async #settleActiveModelEffect(
+		binding: LiveBinding,
+		outcome: "completed" | "failed",
+		error?: string,
+	): Promise<EngineEvent | undefined> {
+		const effect = binding.modelEffect;
+		if (!effect) return;
+		const checkpoint = await this.#effectCheckpoint(binding);
+		const event = await this.store.settleModelEffect(
+			this.#snapshot(binding), effect, outcome, error?.slice(0, 2_048), checkpoint,
+		);
+		binding.modelEffect = undefined;
+		this.#notifyEvents([event]);
+		return event;
+	}
+
 	async #dispatchModel(
 		binding: LiveBinding,
 		input: string,
@@ -4537,13 +4589,8 @@ export class EngineRuntime {
 	): Promise<boolean> {
 		const completed = Promise.withResolvers<void>();
 		binding.activeModelCalls.add(completed.promise);
-		const modelCallId = `model-${++binding.modelCallSequence}`;
-		const inputHash = modelInputHash(input, identity?.originalAttachments, images);
-		const effect: EngineModelEffectInput = {
-			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
-			modelCallId,
-			inputHash,
-		};
+		const effect = this.#nextModelEffect(binding, modelInputHash(input, identity?.originalAttachments, images));
+		const modelCallId = effect.modelCallId;
 		const audit = createLatencyAudit({
 			commandId: identity?.sourceCommandId ?? binding.commandId,
 			clientMessageId: identity?.clientMessageId,
@@ -4569,6 +4616,7 @@ export class EngineRuntime {
 				this.#notifyEvents([started]);
 				audit?.mark("model_started", { eventId: started.eventId });
 			}
+			binding.modelEffect = effect;
 			this.#queueExecutorRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
@@ -4593,27 +4641,16 @@ export class EngineRuntime {
 			} catch (error) {
 				audit?.mark("model_failed");
 				const message = error instanceof Error ? error.message : String(error);
-				const checkpoint = await this.#effectCheckpoint(binding);
-				const settled = await this.store.settleModelEffect(
-					this.#snapshot(binding),
-					effect,
-					"failed",
-					message.slice(0, 2_048),
-					checkpoint,
-				);
-				this.#notifyEvents([settled]);
+				await binding.session.settleInFlightMessagePersistence();
+				await binding.traceWriteTail;
+				if (!binding.messageWriteError) await this.#settleActiveModelEffect(binding, "failed", message);
 				throw error;
 			}
-			const checkpoint = await this.#effectCheckpoint(binding);
-			const settled = await this.store.settleModelEffect(
-				this.#snapshot(binding),
-				effect,
-				"completed",
-				undefined,
-				checkpoint,
-			);
-			this.#notifyEvents([settled]);
-			audit?.mark("model_completed", { eventId: settled.eventId });
+			await binding.session.settleInFlightMessagePersistence();
+			await binding.traceWriteTail;
+			if (binding.messageWriteError) throw binding.messageWriteError;
+			const settled = await this.#settleActiveModelEffect(binding, "completed");
+			audit?.mark("model_completed", { eventId: settled?.eventId });
 			return dispatched;
 		} finally {
 			audit?.finish("model_settled");
@@ -5242,13 +5279,7 @@ export class EngineRuntime {
 		state.text = fullText.slice(0, MAX_ASSISTANT_FINAL_CHARS);
 		state.textTruncated = fullText.length > MAX_ASSISTANT_FINAL_CHARS;
 		state.settled = true;
-		const usage = message.usage;
-		const counts = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite];
-		binding.measuredUsage.set(state.assistantMessageId,
-			usage.unavailable || counts.some(value => !Number.isSafeInteger(value) || value < 0)
-				? null
-				: { input: usage.input + usage.cacheRead + usage.cacheWrite,
-					output: usage.output, cached: usage.cacheRead });
+		binding.measuredUsage.set(state.assistantMessageId, measuredAssistantUsage(message.usage));
 		binding.lastAssistantMessageId = state.assistantMessageId;
 		binding.session.rememberMessageIdentity(message, {
 			assistantMessageId: state.assistantMessageId,
@@ -5282,9 +5313,8 @@ export class EngineRuntime {
 			let historyEntryId: string | undefined;
 			if (status === "settled") {
 				await binding.session.settleInFlightMessagePersistence();
-				historyEntryId = binding.session.sessionManager
-					.getContextBranch()
-					.find(entry => entry.type === "message" && entry.assistantMessageId === state.assistantMessageId)?.id;
+				if (binding.lastAssistantNativeEntry?.messageId === state.assistantMessageId)
+					historyEntryId = binding.lastAssistantNativeEntry.entryId;
 			}
 			await this.#emit(binding, "assistant_snapshot", {
 				...payload,
@@ -5816,6 +5846,32 @@ export class EngineRuntime {
 		}
 	}
 
+	async #restoreMeasuredUsage(binding: LiveBinding, native: SessionDurabilityCheckpoint["native"]): Promise<void> {
+		const owners = await this.store.attemptMessageOwnership(binding.agentInstanceId, binding.attemptId);
+		binding.assistantMessageSequence = Math.max(owners.size,
+			binding.session.messages.filter(message => message.role === "assistant").length);
+		// Recovery cannot call a post-restart-only sum complete when its earlier response source is absent.
+		if (!owners.size) binding.measuredUsage.set("recovered-usage-unavailable", null);
+		for (const [messageId, entryId] of owners) {
+			binding.measuredUsage.set(messageId, null);
+			if (!native || !entryId) continue;
+			const page = await this.store.storageClient.readContext({
+				familyId: native.familyId, generationId: native.generationId, cutSeq: native.throughSeq,
+				leafId: entryId, maxRecords: 1, maxBytes: runtimeLimits.httpPageBytes,
+			}).catch((error: unknown) => {
+				if (error instanceof StorageClientError && (error.code === "not_found" || error.code === "schema_error"))
+					return undefined;
+				throw error;
+			});
+			const retained = page?.events[0];
+			if (!retained || retained.entryId !== entryId) continue;
+			// A missing/corrupt body makes usage unavailable, not zero. Transport/fence failures above still fail.
+			const entry = await decodeNativeEntry(retained, this.attachmentUploads.blobs).catch(() => undefined);
+			if (entry?.type === "message" && entry.message.role === "assistant" && entry.assistantMessageId === messageId)
+				binding.measuredUsage.set(messageId, measuredAssistantUsage(entry.message.usage));
+		}
+	}
+
 	async #rehydratePausedApproval(target: EngineBindingSnapshot): Promise<LiveBinding> {
 		const current = await this.store.getBinding(target.agentInstanceId);
 		const attempt = await this.store.getAttempt(target.attemptId);
@@ -5888,6 +5944,7 @@ export class EngineRuntime {
 			await this.#conversationIdentityDigest(request), choice.execution_digest, choice, remaining, current,
 			current.bindingGeneration, undefined, undefined, undefined, undefined, undefined,
 			origin.approvalSettings ?? undefined, true);
+		await this.#restoreMeasuredUsage(binding, attempt.transcript_native);
 		await this.#repairExecutorRuleMessages(binding, choice, config);
 		binding.manualHold = current.manualHold;
 		binding.intentRevision = current.intentRevision;
@@ -6038,6 +6095,7 @@ export class EngineRuntime {
 		options: {
 			cause?: string;
 			terminalResult?: Record<string, unknown>;
+			actualCost?: ExecutorChoice["actual_cost"];
 			intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number };
 			startIntent?: {
 				expectedRevision?: number;
@@ -6701,6 +6759,15 @@ function assertFilesReadable(readEnabled: boolean, originals?: SessionMessageIde
 			"attachment_requires_read",
 			`File "${file.name}" cannot be sent: this execution does not allow the read tool required for attachments.`,
 		);
+}
+
+function measuredAssistantUsage(usage: AssistantMessage["usage"] | undefined):
+	{ input: number; output: number; cached: number } | null {
+	if (!usage || usage.unavailable ||
+		[usage.input, usage.output, usage.cacheRead, usage.cacheWrite].some(value => !Number.isSafeInteger(value) || value < 0))
+		return null;
+	const input = usage.input + usage.cacheRead + usage.cacheWrite;
+	return Number.isSafeInteger(input) ? { input, output: usage.output, cached: usage.cacheRead } : null;
 }
 
 function modelInputHash(input: string, originals?: SessionMessageIdentity["originalAttachments"],

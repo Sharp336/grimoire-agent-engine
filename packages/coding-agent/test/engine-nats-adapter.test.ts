@@ -771,7 +771,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const approvalId = approvalPayload.id;
 			const permitTarget = runtime.getBinding("agent-permit")!;
 			const decision = approvalDecisionFor(execution, { ...permitTarget, principalId: "owner" },
-				"command-resolve-permit", approvalId, "approve");
+				"command-resolve-permit", (await runtime.store.getApproval(approvalId))!.request, "approve");
 			const resolveApproval: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1",
 				commandId: "command-resolve-permit",

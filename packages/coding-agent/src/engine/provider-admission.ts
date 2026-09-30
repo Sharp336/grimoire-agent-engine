@@ -149,6 +149,15 @@ export async function withProviderObservationContext<T>(
 	);
 }
 
+/** A tool loop can contain several model responses inside one dispatched prompt. */
+export function setProviderObservationModel(identity: { effectId: string; modelCallId: string }): void {
+	const context = providerObservationContext.getStore();
+	if (!context || context.effectId === identity.effectId) return;
+	context.effectId = identity.effectId;
+	context.modelCallId = identity.modelCallId;
+	context.physicalRequestOrdinal = 0;
+}
+
 export function markProviderLatency(stage: string): void {
 	const context = providerObservationContext.getStore();
 	context?.audit?.mark(stage, { physicalRequestOrdinal: context.physicalRequestOrdinal + 1 });

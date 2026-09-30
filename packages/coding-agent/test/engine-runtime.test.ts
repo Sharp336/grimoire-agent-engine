@@ -818,7 +818,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
 		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
 
-		const decision = approvalDecisionFor(execution, started, "command-approve", approvalId, "approve");
+		const decision = approvalDecisionFor(execution, started, "command-approve", (await runtime.store.getApproval(approvalId))!.request, "approve");
 		await runtime.resolveApproval({ ...started, commandId: "command-approve", approvalDecision: decision });
 		await runtime.drain();
 		expect(toolResultOf(mock, "read-permit")).toMatchObject({ isError: false });
@@ -895,7 +895,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}, { cwd, principalId: "owner", input: "read" }));
 		const approvalId = (await requested).payload?.id;
 		if (typeof approvalId !== "string") throw new Error("Approval request identity is missing");
-		const decision = approvalDecisionFor(execution, started, "command-deny", approvalId, "deny", "not now");
+		const decision = approvalDecisionFor(execution, started, "command-deny", (await runtime.store.getApproval(approvalId))!.request, "deny", "not now");
 		await runtime.resolveApproval({ ...started, commandId: "command-deny", approvalDecision: decision });
 		await runtime.drain();
 		expect(executed).toBeFalse();
@@ -2471,7 +2471,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					state: "planned",
 				});
 				if (decision === "approve") {
-					const decisionValue = approvalDecisionFor(execution, started, "approve-xd", approvalId, "approve");
+					const decisionValue = approvalDecisionFor(execution, started, "approve-xd", (await runtime.store.getApproval(approvalId))!.request, "approve");
 					await runtime.resolveApproval({ ...started, commandId: "approve-xd", approvalDecision: decisionValue });
 				} else {
 					await runtime.cancel({ ...started, commandId: "cancel-xd" });

@@ -41,6 +41,7 @@ import {
 	boundedReceipt,
 	eventReadKeys,
 	projectionId,
+	type RocksProjection,
 	retainedInputPayload,
 	retainInputParts,
 	runtimeReceipt,
@@ -3330,6 +3331,27 @@ export class RocksEngineMutations {
 			effects.push(...page.records.map(row => row.value as unknown as RocksEffect));
 		}
 		return effects;
+	}
+
+	/** Stable response owners survive compaction and event retention; pointers name exact native entries. */
+	async attemptMessageOwnership(agentId: string, attemptId: string): Promise<Map<string, string | null>> {
+		const messages = new Map<string, string | null>();
+		let cursor: string | undefined;
+		do {
+			const page = await this.records.query("projection_attempt", ["ownership", attemptId], cursor);
+			for (const record of page.records) {
+				const owner = record.value as unknown as RocksProjection;
+				if (owner.subtype !== "ownership" || owner.agent_instance_id !== agentId || owner.attempt_id !== attemptId)
+					throw new EngineTargetError("stale_target", "Response ownership changed its Attempt");
+				if (typeof owner.value.messageId === "string")
+					messages.set(owner.value.messageId,
+						typeof owner.value.historyEntryId === "string" ? owner.value.historyEntryId : null);
+			}
+			if (page.nextCursor && page.nextCursor === cursor)
+				throw new EngineTargetError("source_unavailable", "Response ownership cursor did not advance");
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		return messages;
 	}
 
 	/** Only native tool effects fenced by their own undecided or decided-but-unapplied approval survive. */

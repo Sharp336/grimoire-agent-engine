@@ -821,9 +821,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			runtime = await open(env.options);
 			const binding = (await runtime.store.getBinding(started.agentInstanceId))!;
 			const approval = (await runtime.store.getApproval(requestId))!;
-			const decision = approvalDecisionFor(execution, { ...binding, principalId: "owner" }, "late-fallback-approval", requestId, "approve");
-			decision.expected_address_revision = approval.request.address_revision;
-			decision.expected_decision_revision = approval.request.decision_revision;
+			const decision = approvalDecisionFor(execution, { ...binding, principalId: "owner" }, "late-fallback-approval", approval.request, "approve");
 			const command: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1", op: "resolve_approval", commandId: decision.command_id,
 				deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine", engineGeneration: runtime.engineGeneration,
@@ -847,4 +845,76 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			expect(JSON.stringify(fallback.calls[1].context.messages)).toContain("effect-executed");
 		} finally { await runtime.dispose(); find.mockRestore(); key.mockRestore(); }
 	}, 60_000);
+
+	it.each(["measured", "zero", "unavailable"] as const)(
+		"recovers only the same Attempt's measured usage after a real approval pause: %s", async availability => {
+			const mock = createMockModel({ id: `recovered-usage-${availability}`, responses: [
+				{ content: ["previous Attempt"], usage: { input: 900, output: 90, cacheRead: 9 } },
+				{ content: [{ type: "toolCall", id: "usage-read", name: "read", arguments: { path: "effect.txt" } }],
+					usage: availability === "measured"
+						? { input: 10, output: 3, cacheRead: 2, cacheWrite: 1 }
+						: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, unavailable: availability === "unavailable" } },
+				{ content: ["same Attempt complete"], usage: { input: 20, output: 4, cacheRead: 3, cacheWrite: 2 } },
+			] });
+			const env = await setup(mock, (session, input) => session.prompt(input));
+			const execution = admittedExecution(mock, env.registry, {
+				continuation: { toolNames: ["read"], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"] },
+			});
+			env.executions.push(execution);
+			fs.writeFileSync(path.join(env.cwd, "effect.txt"), "one retained tool execution");
+			const verify = env.options.verifyOriginReceipt!;
+			env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
+				approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("usage-deadline") } });
+			await env.runtime.dispose();
+			let runtime = await open(env.options);
+			try {
+				const prior = await env.start("usage-prior", { agentInstanceId: "usage-agent" }, runtime, execution);
+				await runtime.drain();
+				expect((await runtime.store.getAttempt(prior.attemptId))?.state).toBe("completed");
+				const paused = Promise.withResolvers<void>();
+				let requestId = "";
+				runtime.subscribe(event => {
+					if (event.kind === "tool_approval_requested") requestId = event.payload.id;
+					if (event.kind === "paused" && event.payload?.cause) paused.resolve();
+				});
+				const started = await env.start("usage-current", { agentInstanceId: "usage-agent",
+					explicitContinue: true, expectedIntentRevision: (await runtime.store.intent("usage-agent")).intentRevision },
+					runtime, execution);
+				await withTimeout(paused.promise, 15_000, "Measured response did not reach its approval pause");
+				expect((await runtime.store.attemptToolEffects(started.attemptId))
+					.filter(effect => effect.effect_kind === "model").map(effect => [effect.state, effect.outcome]))
+					.toEqual([["settled", "completed"]]);
+				expect(await runtime.store.durableApprovalPause(started.attemptId)).toBeDefined();
+				expect(mock.calls).toHaveLength(2);
+				await runtime.dispose();
+				runtime = await open(env.options);
+				const binding = (await runtime.store.getBinding(started.agentInstanceId))!;
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+				const approval = (await runtime.store.getApproval(requestId))!;
+				const decision = approvalDecisionFor(execution, { ...binding, principalId: "owner" },
+					"usage-late-approval", approval.request, "approve");
+				const command: EngineCommandEnvelope = {
+					schema: "grimoire.engine.command.v1", op: "resolve_approval", commandId: decision.command_id,
+					deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine", engineGeneration: runtime.engineGeneration,
+					agentInstanceId: binding.agentInstanceId, agentInstanceRef: binding.bindingSnapshot!.agentInstanceRef,
+					bindingSnapshot: binding.bindingSnapshot, runtimeBindingId: binding.bindingId, bindingGeneration: binding.bindingGeneration,
+					authorityGeneration: binding.authorityGeneration, executionId: binding.executionId, attemptId: binding.attemptId,
+					principalId: "owner", issuedAt: Date.now(), payload: { originReceiptId: decision.origin_receipt_id, approvalDecision: decision },
+				};
+				execution.captureCommand(command);
+				const options = { runtime, deviceId: command.deviceId, engineId: command.engineId };
+				expect((await runEngineCommand(options, command)).outcome).toBe("applied");
+				await withTimeout(runtime.drain(), 15_000, "Recovered measured Attempt did not complete");
+				const attempt = (await runtime.store.getAttempt(started.attemptId))!;
+				expect(attempt.state).toBe("completed");
+				expect(attempt.execution!.executor_choice.actual_cost).toMatchObject(availability === "unavailable"
+					? { input_tokens: null, output_tokens: null, cached_input_tokens: null, source: "provider_usage_unavailable" }
+					: { input_tokens: availability === "measured" ? 38 : 25,
+						output_tokens: availability === "measured" ? 7 : 4,
+						cached_input_tokens: availability === "measured" ? 5 : 3, source: "provider_response" });
+				expect((await runEngineCommand(options, command)).outcome).toBe("applied");
+				expect(mock.calls).toHaveLength(3);
+			} finally { await runtime.dispose(); }
+		}, 60_000,
+	);
 });
