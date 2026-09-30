@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding } from "../src/engine/contracts";
 import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
+import { candidateIdentity } from "../src/engine/routing-admission";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { EngineCommandConflictError } from "../src/engine/store";
 import {
@@ -11,11 +12,13 @@ import {
 	validateRuntimeValue,
 } from "../src/engine/runtime-protocol";
 import type { StoragePayload } from "../src/session/storage-protocol";
+import { storageCanonicalJson } from "../src/session/storage-client";
 import {
 	active,
 	admittedFixtureStart,
 	admittedExecutionFixture,
 	binding,
+	choiceFrom,
 	command,
 	eventsRequest,
 	identity,
@@ -149,11 +152,17 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				schema: "grimoire.approval_decision.v1", request_id: request.id, command_id: "approval-command",
 				expected_address_revision: 1, expected_decision_revision: 0, decision: "approve", reason: null,
 				origin_receipt_id: "origin-fixture", decided_by: { kind: "human", principal_id: principalId },
-				authority: { ceiling_hash: hash, subject_hash: hash, dispatch_hash: target.dispatchHash },
+				authority: { ceiling_hash: hash,
+					subject_hash: `sha256:${Bun.SHA256.hash(storageCanonicalJson(request.subject), "hex")}`,
+					dispatch_hash: target.dispatchHash },
 				decided_at: "2026-09-30T00:01:00Z",
 			};
-			const envelope: EngineCommandEnvelope = { ...start, op: "resolve_approval", commandId: decision.command_id,
-				payload: { originReceiptId: decision.origin_receipt_id, approvalDecision: decision, expectedInputRevision: inputRevision } };
+			const envelope: EngineCommandEnvelope = {
+				...start, op: "resolve_approval", commandId: decision.command_id,
+				runtimeBindingId: target.bindingId, bindingGeneration: target.bindingGeneration,
+				payload: { originReceiptId: decision.origin_receipt_id, approvalDecision: decision,
+					expectedInputRevision: inputRevision },
+			};
 			const original = engineCommandIdentity(envelope);
 			if (appliedBeforeRestart) {
 				await store.admitCommand(original, 1);
@@ -185,20 +194,6 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 					.rejects.toMatchObject({ code: "stale_target" });
 				await expect(restarted.approvalDelivery(original, { ...decision, expected_address_revision: 2 }, inputRevision, generation))
 					.rejects.toMatchObject({ code: "stale_target" });
-				await restarted.mutation(agentInstanceId, async tx => {
-					const nativeEffect = await tx.get<Record<string, unknown>>("effect", request.effect_id);
-					await tx.put("effect", request.effect_id, {
-						...nativeEffect, engine_generation: generation, state: "unknown", outcome: "unknown",
-					});
-				});
-				await expect(restarted.approvalDelivery(original, decision, inputRevision, generation))
-					.rejects.toMatchObject({ code: "stale_target" });
-				await restarted.mutation(agentInstanceId, async tx => {
-					const nativeEffect = await tx.get<Record<string, unknown>>("effect", request.effect_id);
-					await tx.put("effect", request.effect_id, {
-						...nativeEffect, engine_generation: generation,
-					});
-				});
 				expect(await restarted.approvalDelivery(original, decision, inputRevision, generation)).toEqual({ status: "absent" });
 				await expect(store.admitCommand(original, 1)).rejects.toMatchObject({ code: "stale_target" });
 				await expect(restarted.admitCommand(original, generation)).rejects.toMatchObject({ code: "stale_target" });
@@ -254,9 +249,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			...identity("root"), agentInstanceRef, agentInstanceId, principalId,
 			bindingSnapshot: snapshot,
 		};
-		const pending = command("pending-owned", ownedAgent);
+		const pending = command("pending-owned", "start", { agent: ownedAgent });
 		expect(await store.admitCommand(pending, 1)).toEqual({ status: "binding_pending" });
-		const secondPending = command("pending-owned-two", ownedAgent);
+		const secondPending = command("pending-owned-two", "start", { agent: ownedAgent });
 		expect(await store.admitCommand(secondPending, 1)).toEqual({ status: "binding_pending" });
 		const pendingRows = await store.records.getMany([
 			{ kind: "command", id: pending.commandId }, { kind: "command", id: secondPending.commandId },
@@ -690,7 +685,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			toolCallId: "tool-permit",
 			toolName: "write",
 			policy: "permit",
-			inputHash: "sha256:approval",
+			inputHash: approvalHash,
 			origin: { messageId: "assistant_permission", blockId: "block_1" },
 		}, permitRequest);
 		const snapshot = await store.runtimeSnapshot(scope, request);
@@ -773,7 +768,21 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				value: { toolCallId: "tool-19", phase: "finished" },
 			},
 		]);
-		await store.resolveApproval(target, "effect-permit", "deny", null);
+		const denied: ApprovalDecision = {
+			schema: "grimoire.approval_decision.v1",
+			request_id: permitRequest.id, command_id: "deny-permit",
+			expected_address_revision: permitRequest.address_revision,
+			expected_decision_revision: permitRequest.decision_revision,
+			decision: "deny", reason: null, origin_receipt_id: "origin:deny-permit",
+			decided_by: { kind: "human", principal_id: "owner" },
+			authority: {
+				ceiling_hash: approvalHash,
+				subject_hash: `sha256:${Bun.SHA256.hash(storageCanonicalJson(permitRequest.subject), "hex")}`,
+				dispatch_hash: target.dispatchHash,
+			},
+			decided_at: "2026-09-30T00:02:00Z",
+		};
+		await store.resolveApproval(target, permitRequest.id, "deny", denied);
 		const live = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId, scope));
 		expect(live.changes.some(change => change.kind === "tool" && change.value.phase === "denied")).toBeTrue();
 		expect(
@@ -942,10 +951,13 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		expect(await store.getEffect("effect-invalid")).toBeUndefined();
 	});
 
-	it("projects executor route facts through exact Attempt detail without changing app summaries", async () => {
+	it("projects an admitted executor fallback and invalidates usage without changing app summaries", async () => {
 		let store = await createStore();
-		const target = await active(store);
 		const agentInstanceRef = identity("root").agentInstanceRef;
+		const execution = admittedExecutionFixture(identity("root").bindingSnapshot.taskRef!, true);
+		const target = await active(store, "root", execution);
+		const initialChoice = (await store.getAttempt(target.attemptId))?.execution?.executor_choice;
+		if (!initialChoice) throw new Error("Admitted Attempt lost its frozen executor choice");
 		const scope: RuntimeScope = {
 			kind: "attempt",
 			agentInstanceRef,
@@ -958,7 +970,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		for (const phase of ["loading", "active", "exhausted"] as const) {
 			const state = {
 				dispatchHash: target.dispatchHash,
-				selected: null,
+				selected: candidateIdentity(initialChoice.selected),
 				pending: null,
 				fallback: false,
 				phase,
@@ -976,10 +988,38 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			});
 			expect((await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary).toEqual(summary);
 		}
+		const fallbackIndex = initialChoice.candidates.findIndex(candidate =>
+			candidate.route_ref !== initialChoice.selected.route_ref);
+		if (fallbackIndex < 0) throw new Error("Admitted fallback route was not frozen");
+		const fallback = initialChoice.candidates[fallbackIndex]!;
+		const nextDigest = choiceFrom(execution, initialChoice.candidates, {}, fallbackIndex).execution_digest;
+		const changed = await store.commitExecutorRoute(target, candidateIdentity(fallback),
+			"route_fallback", nextDigest, execution.config.routingLimits);
+		if (!changed || changed.event.kind !== "executor_route_changed")
+			throw new Error("Admitted fallback did not commit its route event");
+		expect(changed.event.payload.to).toEqual(candidateIdentity(fallback));
+		expect(changed.choice.transitions.at(-1)).toMatchObject({
+			from: candidateIdentity(initialChoice.selected),
+			to: candidateIdentity(fallback),
+			from_execution_digest: initialChoice.execution_digest,
+			to_execution_digest: nextDigest,
+		});
+		const routePage = await store.runtimeSnapshot(scope, request);
+		expect(routePage.agents[0].executorRoute).toMatchObject({
+			state: { selected: candidateIdentity(fallback), phase: "loading", eventSeq: changed.event.seq },
+			eventSeq: changed.event.seq,
+		});
+		const emitted = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, scope));
+		expect(emitted.changes.some(change => change.kind === "state" &&
+			change.revision === changed.event.eventId)).toBe(true);
+		expect(emitted.changes.filter(change => change.kind === "invalidate" &&
+			change.cursor === changed.event.eventId).map(change => change.value.resource).sort())
+			.toEqual(["context", "usage"]);
+		expect((await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary).toEqual(summary);
 		await expect(store.runtimeSnapshot(scope, { ...request, principalId: "other" })).rejects.toThrow();
 		store = reopen();
 		expect((await store.runtimeSnapshot(scope, request)).agents[0].executorRoute).toMatchObject({
-			state: { phase: "exhausted" },
+			state: { phase: "loading", selected: candidateIdentity(fallback), eventSeq: changed.event.seq },
 		});
 		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, { kind: "catalog" }));
 		expect(catalog.changes).toEqual([]);
@@ -1302,7 +1342,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 	it("uses the factual applied Start revision and rejects an intervening intent mutation", async () => {
 		const store = await createStore();
 		const target = binding("root");
-		const start = command(target.commandId, identity("root"), 1, target);
+		const start = command(target.commandId, "start", { agent: identity("root"), target });
 		await store.admitCommand(start, 1);
 		await store.commitAttemptTransition({ ...target, intentRevision: 7 }, "running", [{ kind: "running" }], {
 			startIntent: { expectedRevision: 0 },

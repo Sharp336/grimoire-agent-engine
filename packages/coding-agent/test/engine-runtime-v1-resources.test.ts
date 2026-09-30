@@ -23,6 +23,7 @@ import {
 	eventsRequest,
 	identity,
 	nativeCheckpoint,
+	type FixtureAgentIdentity,
 	runtimeV1Fixture,
 } from "./helpers/runtime-v1-rocks-fixture";
 import { storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
@@ -108,11 +109,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			attemptId: "source-attempt",
 			executionId: "source-execution",
 		};
-		const start = {
-			...command("branch-command"),
-			...destination,
-			serializedCommand: JSON.stringify({ browserTarget, payload: { expectedIntentRevision: 0 } }),
-		};
+		const start = command("branch-command", "start", { agent: destination, browserTarget });
 		await store.admitCommand(start, 1);
 		await store.settleCommand(start.commandId, start.canonicalHash, {
 			outcome: "applied",
@@ -209,12 +206,12 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 
 	it("reserves all control records when the device ordinary record budget is full", async () => {
 		const store = await createStore();
-		const first = { ...command("device-0", "enqueue"), ...identity("device-agent-0") };
+		const first = command("device-0", "enqueue", { agent: identity("device-agent-0") });
 		for (let n = 0; n < runtimeLimits.devicePendingRecords; n++) {
 			const agent = identity(`device-agent-${Math.floor(n / runtimeLimits.agentPendingRecords)}`);
-			await store.admitCommand({ ...command(`device-${n}`, "enqueue"), ...agent }, 1);
+			await store.admitCommand(command(`device-${n}`, "enqueue", { agent }), 1);
 		}
-		const overflow = { ...command("device-overflow", "enqueue"), ...identity("new-device-agent") };
+		const overflow = command("device-overflow", "enqueue", { agent: identity("new-device-agent") });
 		const rejected = await store.admitCommand(overflow, 1).then(
 			() => undefined,
 			error => error,
@@ -222,11 +219,11 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		expect(rejected).toMatchObject({ code: "queue_full" });
 		for (let n = 0; n < runtimeLimits.controlPendingRecords; n++)
 			expect(
-				(await store.admitCommand({ ...command(`reserved-${n}`, "cancel"), ...identity("device-agent-0") }, 1))
-					.status,
+				(await store.admitCommand(command(`reserved-${n}`, "cancel",
+					{ agent: identity("device-agent-0") }), 1)).status,
 			).toBe("claimed");
 		const controlOverflow = await store
-			.admitCommand({ ...command("reserved-overflow", "cancel"), ...identity("device-agent-0") }, 1)
+			.admitCommand(command("reserved-overflow", "cancel", { agent: identity("device-agent-0") }), 1)
 			.then(
 				() => undefined,
 				error => error,
@@ -246,25 +243,23 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 	it("enforces independent device and reserved-control byte budgets using real serialized commands", async () => {
 		const store = await createStore();
 		const bytes = runtimeLimits.deliveryBatchBytes;
-		const payload = JSON.stringify({ text: "x".repeat(bytes - 11) });
-		expect(Buffer.byteLength(payload)).toBe(bytes);
+		const largeCommand = (name: string, op: "enqueue" | "cancel",
+			agent: FixtureAgentIdentity) => {
+			const empty = command(name, op, { agent, payload: { text: "" } });
+			const remaining = bytes - Buffer.byteLength(empty.serializedCommand!);
+			if (remaining < 0) throw new Error("Native command envelope exceeds the fixture byte budget");
+			const filled = command(name, op, { agent, payload: { text: "x".repeat(remaining) } });
+			expect(Buffer.byteLength(filled.serializedCommand!)).toBe(bytes);
+			return filled;
+		};
 		const perAgent = Math.floor(runtimeLimits.agentPendingBytes / bytes);
 		const records = Math.floor(runtimeLimits.devicePendingBytes / bytes);
 		expect(records).toBeLessThan(runtimeLimits.devicePendingRecords);
 		for (let n = 0; n < records; n++)
 			await store.admitCommand(
-				{
-					...command(`bytes-${n}`, "enqueue"),
-					...identity(`bytes-agent-${Math.floor(n / perAgent)}`),
-					serializedCommand: payload,
-				},
-				1,
-			);
-		const overflow = {
-			...command("bytes-overflow", "enqueue"),
-			...identity("new-byte-agent"),
-			serializedCommand: payload,
-		};
+				largeCommand(`bytes-${n}`, "enqueue",
+					identity(`bytes-agent-${Math.floor(n / perAgent)}`)), 1);
+		const overflow = largeCommand("bytes-overflow", "enqueue", identity("new-byte-agent"));
 		expect(
 			await store.admitCommand(overflow, 1).then(
 				() => undefined,
@@ -274,33 +269,12 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		const controls = Math.floor(runtimeLimits.controlPendingBytes / bytes);
 		expect(controls).toBeLessThan(runtimeLimits.controlPendingRecords);
 		for (let n = 0; n < controls; n++)
-			expect(
-				(
-					await store.admitCommand(
-						{
-							...command(`reserved-bytes-${n}`, "cancel"),
-							...identity("bytes-agent-0"),
-							serializedCommand: payload,
-						},
-						1,
-					)
-				).status,
-			).toBe("claimed");
-		expect(
-			await store
-				.admitCommand(
-					{
-						...command("reserved-bytes-overflow", "cancel"),
-						...identity("bytes-agent-0"),
-						serializedCommand: payload,
-					},
-					1,
-				)
-				.then(
-					() => undefined,
-					error => error,
-				),
-		).toMatchObject({ code: "queue_full" });
+			expect((await store.admitCommand(
+				largeCommand(`reserved-bytes-${n}`, "cancel", identity("bytes-agent-0")), 1)).status)
+				.toBe("claimed");
+		expect(await store.admitCommand(
+			largeCommand("reserved-bytes-overflow", "cancel", identity("bytes-agent-0")), 1,
+		).then(() => undefined, error => error)).toMatchObject({ code: "queue_full" });
 	}, 600_000);
 
 	it("reads large queue fields through bounded previews and exact UTF-8 ranges", async () => {
@@ -477,10 +451,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			attemptId: "browser-attempt",
 			executionId: "browser-execution",
 		};
-		const applied = {
-			...command("huge-applied", "enqueue"),
-			serializedCommand: JSON.stringify({ browserTarget: frozenTarget }),
-		};
+		const applied = command("huge-applied", "enqueue", {
+			agent: identity("source-browser"), browserTarget: frozenTarget,
+		});
 		await store.admitCommand(applied, 1);
 		// Beyond one live change, inside one owner record.
 		const receipt = { outcome: "applied" as const, detail: { result: "native-result".repeat(9_000) } };
@@ -508,10 +481,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			"different canonical",
 		);
 		await expect(store.runtimeCommand(applied.commandId, { principalId: "foreign" })).rejects.toThrow("authorized");
-		const rejected = {
-			...command("huge-rejected", "steer"),
-			serializedCommand: JSON.stringify({ browserTarget: frozenTarget }),
-		};
+		const rejected = command("huge-rejected", "steer", {
+			agent: identity("source-browser"), browserTarget: frozenTarget,
+		});
 		await store.admitCommand(rejected, 1);
 		await store.settleCommand(rejected.commandId, rejected.canonicalHash, {
 			outcome: "rejected",
@@ -644,10 +616,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			cwd: "/test",
 		});
 		const target = { ...binding("retry-chronology"), sessionFile: transcript.sessionPath };
-		await store.admitCommand(
-			{ ...command(target.commandId), ...agent, attemptId: target.attemptId, executionId: target.executionId },
-			1,
-		);
+		await store.admitCommand(command(target.commandId, "start", { agent, target }), 1);
 		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		const emit = (
 			kind: "assistant_snapshot" | "retry_scheduled" | "retry_settled" | "rejected" | "completed",
@@ -756,10 +725,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		};
 		// Each Attempt starts from its admitted command; events append while it holds the binding.
 		const start = async (target: EngineBindingSnapshot) => {
-			await store.admitCommand(
-				{ ...command(target.commandId), ...agent, attemptId: target.attemptId, executionId: target.executionId },
-				1,
-			);
+			await store.admitCommand(command(target.commandId, "start", { agent, target }), 1);
 			await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		};
 		await start(old);
@@ -1567,11 +1533,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		}
 		await stream(old);
 		// An AGI-level receipt of the old Attempt: its command settles with that Attempt's frozen identity.
-		const oldCommand = {
-			...command("old-attempt-receipt", "steer"),
-			attemptId: old.attemptId,
-			executionId: old.executionId,
-		};
+		const oldCommand = command("old-attempt-receipt", "steer", {
+			agent, target: old,
+		});
 		await store.admitCommand(oldCommand, 1);
 		await store.commitAttemptTransition(old, "completed", [{ kind: "completed" }], {
 			transcriptCheckpoint: await nativeCheckpoint(store),

@@ -4,7 +4,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type EngineBindingSnapshot, EngineTargetError, type EngineSemanticBindingSnapshot,
 	type ExecutorChoice, type Candidate, type EngineExecutionConfiguration } from "../../src/engine/contracts";
 import { ModelRegistry } from "../../src/config/model-registry";
-import { engineCommandIdentity } from "../../src/engine/nats-adapter";
+import { engineCommandIdentity, type EngineCommandEnvelope, type EngineCommandOp } from "../../src/engine/nats-adapter";
 import { candidateIdentity, frozenCandidate, l1For, type AdmissionRequest } from "../../src/engine/routing-admission";
 import { RocksEngineStore } from "../../src/engine/rocks-runtime-store";
 import { engineAgentId, engineAgentInstanceId } from "../../src/engine/route";
@@ -46,7 +46,15 @@ export function runtimeV1Fixture() {
 	};
 }
 
-export function identity(name: string, parent?: string, principalId = "owner") {
+export interface FixtureAgentIdentity {
+	agentInstanceRef: string;
+	bindingSnapshot: EngineSemanticBindingSnapshot;
+	agentInstanceId: string;
+	parentAgentInstanceId?: string;
+	principalId: string;
+	authorityGeneration: number;
+}
+export function identity(name: string, parent?: string, principalId = "owner"): FixtureAgentIdentity {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-test/agents/${name}`;
 	return {
 		agentInstanceRef,
@@ -80,19 +88,45 @@ export function binding(name: string): EngineBindingSnapshot {
 	};
 }
 
-export function command(name: string,
-	agent = identity("root"), generation = 1,
-	target?: Pick<EngineBindingSnapshot, "executionId" | "attemptId">): EngineCommandIdentity {
-	const execution = admittedExecutionFixture(agent.bindingSnapshot.taskRef!);
-	const request = startRequest(execution, {
-		commandId: name, agentInstanceId: agent.agentInstanceId,
-		agentInstanceRef: agent.agentInstanceRef,
-		executionId: target?.executionId ?? name, attemptId: target?.attemptId ?? name,
-	}, { cwd: process.cwd(), principalId: agent.principalId, input: name,
-		bindingSnapshot: agent.bindingSnapshot, expectedIntentRevision: 0 });
-	const envelope = startEnvelope({ engineGeneration: generation }, execution, request,
-		{ deviceId: "device", engineId: "engine" });
-	return engineCommandIdentity(envelope);
+export function command(name: string, op: EngineCommandOp = "start", options: {
+	agent?: FixtureAgentIdentity;
+	generation?: number;
+	target?: Pick<EngineBindingSnapshot, "executionId" | "attemptId">;
+	payload?: Record<string, unknown>;
+	browserTarget?: EngineCommandEnvelope["browserTarget"];
+} = {}): EngineCommandIdentity {
+	const agent = options.agent ?? identity("root");
+	const executionId = options.target?.executionId ?? name;
+	const attemptId = options.target?.attemptId ?? name;
+	let envelope: EngineCommandEnvelope;
+	if (op === "start") {
+		const execution = admittedExecutionFixture(agent.bindingSnapshot.taskRef!);
+		if (options.payload) throw new Error("Start payload must come from its admitted execution");
+		const request = startRequest(execution, {
+			commandId: name, agentInstanceId: agent.agentInstanceId,
+			agentInstanceRef: agent.agentInstanceRef, executionId, attemptId,
+		}, { cwd: process.cwd(), principalId: agent.principalId, input: name,
+			bindingSnapshot: agent.bindingSnapshot, expectedIntentRevision: 0 });
+		const browserPayloadHash = options.browserTarget
+			? `sha256:${Bun.SHA256.hash(storageCanonicalJson(options.browserTarget), "hex")}` : undefined;
+		envelope = startEnvelope({ engineGeneration: options.generation ?? 1 }, execution, request,
+			{ deviceId: "device", engineId: "engine",
+				...(options.browserTarget ? { browserTarget: options.browserTarget, browserPayloadHash } : {}) });
+	} else {
+		envelope = {
+			schema: "grimoire.engine.command.v1", op, commandId: name,
+			deviceId: "device", engineId: "engine", engineGeneration: options.generation ?? 1,
+			agentInstanceId: agent.agentInstanceId, agentInstanceRef: agent.agentInstanceRef,
+			bindingSnapshot: agent.bindingSnapshot, executionId, attemptId,
+			principalId: agent.principalId, authorityGeneration: agent.authorityGeneration,
+			issuedAt: Date.now(),
+			payload: options.payload ?? { expectedIntentRevision: 0 },
+		};
+	}
+	if (options.browserTarget && op !== "start") envelope = { ...envelope, browserTarget: options.browserTarget };
+	if (op === "start") return engineCommandIdentity(envelope);
+	const payloadHash = engineCommandIdentity(envelope).payloadHash;
+	return engineCommandIdentity({ ...envelope, browserPayloadHash: payloadHash });
 }
 
 export function eventsRequest(
@@ -114,7 +148,8 @@ export function eventsRequest(
 }
 
 /** One full typed admitted execution from the shared READONLY fixture: config, digests, receipts. */
-export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/runtime-test"): AdmittedExecutionFixture {
+export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/runtime-test",
+	withFallback = false): AdmittedExecutionFixture {
 	const model = buildModel({
 		id: "runtime-v1-fixture-model",
 		name: "Runtime v1 fixture model",
@@ -127,7 +162,12 @@ export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/ru
 		contextWindow: 32_000,
 		maxTokens: 16_000,
 	});
-	return admittedExecution(model, new ModelRegistry(createInMemoryAuthStorage()), { taskRef });
+	const fallbackModel = withFallback
+		? buildModel({ ...model, id: "runtime-v1-fixture-fallback-model", name: "Fallback fixture model" })
+		: undefined;
+	return admittedExecution(model, new ModelRegistry(createInMemoryAuthStorage()), {
+		taskRef, ...(fallbackModel ? { fallbackModel } : {}),
+	});
 }
 
 /** Admit the exact frozen typed Start, routing lease, and Attempt as one native transition. */
@@ -193,10 +233,10 @@ export async function admittedFixtureStart(
 	return target;
 }
 
-export async function active(store: RocksEngineStore, name = "root"): Promise<EngineBindingSnapshot> {
+export async function active(store: RocksEngineStore, name = "root",
+	execution = admittedExecutionFixture(identity(name).bindingSnapshot.taskRef!)): Promise<EngineBindingSnapshot> {
 	const agent = identity(name);
-	return admittedFixtureStart(store, binding(name), agent.agentInstanceRef, agent.principalId,
-		admittedExecutionFixture(agent.bindingSnapshot.taskRef!));
+	return admittedFixtureStart(store, binding(name), agent.agentInstanceRef, agent.principalId, execution);
 }
 
 /** The executor choice the admitted frozen roster settles on, with the Engine's exact execution digest. */
@@ -204,8 +244,9 @@ export function choiceFrom(
 	execution: AdmittedExecutionFixture,
 	frozen: readonly Candidate[],
 	filtered: Record<string, number>,
+	selectedIndex = 0,
 ): ExecutorChoice {
-	const route = frozen[0];
+	const route = frozen[selectedIndex];
 	if (!route) throw new EngineTargetError("invalid_request", "Admitted roster selected no route");
 	const config = execution.config;
 	const requirement = config.dispatch.requirement;
