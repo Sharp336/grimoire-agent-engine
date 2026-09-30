@@ -1886,6 +1886,15 @@ export class RocksEngineMutations {
 			// Releasing an idle binding after a newer authority registered: that authority's own bind replaces the row.
 			const identity = await tx.get<RocksIdentity>("identity", binding.agentInstanceId);
 			if (identity && binding.authorityGeneration < identity.authority_generation) return;
+			const current = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
+			if (binding.state === "released" && current &&
+				current.engine_generation === binding.engineGeneration &&
+				current.authority_generation === binding.authorityGeneration &&
+				current.binding_generation > binding.bindingGeneration) {
+				const prior = await tx.get<RocksAttempt>("attempt", binding.attemptId);
+				if (prior && this.sameFence(prior, binding) && terminal.has(prior.state))
+					return; // Resources were disposed; the newly admitted Attempt owns the binding projection.
+			}
 			await this.bind(tx, binding);
 		});
 	}

@@ -6,6 +6,7 @@ import {
 	type EngineExecutionConfiguration,
 	type EngineSemanticBindingSnapshot,
 	EngineTargetError,
+	type ExecutorChoice,
 	type InstructionRule,
 	type RoutingLimits,
 } from "./contracts";
@@ -621,8 +622,7 @@ export async function staleLeaseAttempts(
 
 /** L1 instructions for one route: null-route rules plus rules whose route_refs include it, in array order. */
 export function l1For(sources: { rules: readonly InstructionRule[] }, route: CandidateIdentity): InstructionRule[] {
-	const ref = candidateRef(route);
-	return sources.rules.filter(rule => rule.route_refs === null || rule.route_refs.includes(ref));
+	return sources.rules.filter(rule => rule.route_refs === null || rule.route_refs.includes(route.route_ref));
 }
 
 /** Rules not yet applied under (ref, content_hash); a same-route pool change yields an empty delta. */
@@ -635,8 +635,34 @@ export function ruleDelta(
 	return l1For(sources, route).filter(rule => !seen.has(`${rule.ref}\0${rule.content_hash}`));
 }
 
+/** Replay the immutable admitted baseline and every durable transition before repairing messages. */
+export function executorRuleReplay(
+	sources: { rules: readonly InstructionRule[] },
+	choice: Pick<ExecutorChoice, "selected" | "rules" | "transitions">,
+): Array<{ eventId: string; route: CandidateIdentity; rules: InstructionRule[] }> {
+	const applied = l1For(sources, choice.selected).map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash }));
+	const deltas: Array<{ eventId: string; route: CandidateIdentity; rules: InstructionRule[] }> = [];
+	const eventIds = new Set<string>();
+	let previous = candidateIdentity(choice.selected);
+	for (const [index, transition] of choice.transitions.entries()) {
+		if (transition.seq !== index + 1 || !transition.event_id || eventIds.has(transition.event_id) ||
+			storageCanonicalJson(transition.from) !== storageCanonicalJson(previous))
+			throw new EngineTargetError("stale_target", "Executor rule transition chain is not its admitted history");
+		eventIds.add(transition.event_id);
+		const rules = ruleDelta(sources, applied, transition.to);
+		applied.push(...rules.map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash })));
+		if (rules.length) deltas.push({ eventId: transition.event_id, route: transition.to, rules });
+		previous = transition.to;
+	}
+	if (storageCanonicalJson(applied) !== storageCanonicalJson(choice.rules))
+		throw new EngineTargetError("stale_target", "Durable executor rule union differs from its admitted transition history");
+	return deltas;
+}
+
 /** Renders L1 rule text before L2/L3: one block, array order preserved, no dedup of distinct rules. */
 export function renderRules(rules: readonly InstructionRule[]): string {
 	if (rules.length === 0) return "";
-	return `<executor-rules>\n${rules.map(rule => rule.content).join("\n\n")}\n</executor-rules>`;
+	return `<executor-rules>\n${rules.map(rule => rule.route_refs === null ? rule.content :
+		`<executor-route-rule applies-only-to-route-refs="${rule.route_refs.join(" ")}">\n${rule.content}\n</executor-route-rule>`
+	).join("\n\n")}\n</executor-rules>`;
 }

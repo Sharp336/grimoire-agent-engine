@@ -96,6 +96,25 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		);
 	}
 
+	it("releases only the terminal predecessor projection after a new Attempt commits", async () => {
+		const store = await createStore();
+		const prior = await active(store);
+		const checkpoint = await nativeCheckpoint(store);
+		await store.commitAttemptTransition({ ...prior, state: "idle" }, "completed", [{ kind: "completed" }],
+			{ transcriptCheckpoint: checkpoint });
+		const next = { ...prior, commandId: "next-start", executionId: "next-execution", attemptId: "next-attempt",
+			bindingId: "next-binding", bindingGeneration: prior.bindingGeneration + 1 };
+		await store.commitAttemptTransition(next, "running", [{ kind: "running" }], { requireNew: true });
+		await store.putBinding({ ...prior, state: "released" });
+		expect(await store.getBinding(prior.agentInstanceId)).toMatchObject({
+			attemptId: next.attemptId, bindingId: next.bindingId, bindingGeneration: next.bindingGeneration, state: "running",
+		});
+		expect((await store.getAttempt(prior.attemptId))?.state).toBe("completed");
+		await expect(store.putBinding({ ...prior, state: "running" })).rejects.toThrow();
+		await expect(store.putBinding({ ...prior, state: "released", attemptId: "foreign-old-attempt" })).rejects.toThrow();
+		await expect(store.putBinding({ ...next, state: "released", bindingId: "wrong-same-generation" })).rejects.toThrow();
+	});
+
 	for (const appliedBeforeRestart of [false, true]) it(
 		appliedBeforeRestart
 			? "replays an applied old-generation approval and its lost hosted acknowledgement without another decision"

@@ -130,7 +130,7 @@ import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
 import {
 	type AdmissionRequest, candidateIdentity, candidateRef, currentIdentity, frozenCandidate,
-	l1For, LEASE_HEARTBEAT_MS, renderRules, ruleDelta,
+	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules, ruleDelta,
 } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
@@ -315,8 +315,6 @@ interface LiveBinding extends EngineBindingSnapshot {
 		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
 		activateCandidate: ResolvedEngineExecution["activateCandidate"];
 		choice: ExecutorChoice;
-		/** Route rule delta persisted in the fallback tx, injected by afterApply exactly once. */
-		ruleDeltaPending?: readonly InstructionRule[];
 	};
 	leaseHeartbeat?: NodeJS.Timeout;
 	executorRouteState?: ExecutorRouteState;
@@ -2965,7 +2963,7 @@ export class EngineRuntime {
 				// block is rebuilt from durable state, no LLM call.
 				engineContextProjection: (messages: AgentMessage[]) => projectExecutorRulesContext(messages, {
 					attemptId: request.attemptId,
-					rules: l1Rules,
+					rules: l1For(config.instruction_sources, currentIdentity(liveBinding?.execution.choice ?? choice)),
 					compactionEntryId: () => {
 						const branch = sessionManager.getContextBranch();
 						const entry = branch.findLast(
@@ -3041,31 +3039,14 @@ export class EngineRuntime {
 								transitions: [...parent.execution.choice.transitions, changed.payload as ExecutorChoice["transitions"][number]],
 							};
 							this.#notifyEvents([changed]);
-							parent.execution.ruleDeltaPending = delta;
 							return true;
 						},
-						afterApply: async _selector => {
-							// Injected only after the model change is durably recorded (appendModelChange ran).
+						afterApply: async () => {
 							const parent = liveBinding;
-							if (!parent) return;
-							const delta = parent.execution.ruleDeltaPending;
-							parent.execution.ruleDeltaPending = undefined;
-							if (!delta || delta.length === 0) return;
-							const transitions = parent.execution.choice.transitions;
-							const transition = transitions.at(-1) as ExecutorChoice["transitions"][number] | undefined;
-							if (!transition || transition.event_id !== `${parent.attemptId}:route:${transitions.length}`) {
-								throw new EngineTargetError("stale_target", "Route change and rule message lost their shared identity");
-							}
-							await parent.session.sendCustomMessage(
-								{
-									customType: "executor-rules",
-									content: renderRules(delta),
-									display: false,
-									details: { attemptId: parent.attemptId, eventId: transition.event_id, rules: delta.map(rule => rule.ref) },
-									attribution: "agent",
-								},
-								{ triggerTurn: false, deliverAs: "nextTurn" },
-							);
+							if (!parent) throw new EngineTargetError("stale_target", "Executor binding disappeared after route admission");
+							// Persist and append before retry sends its first provider request. A nextTurn queue
+							// may not drain during fallback and is not evidence that the rule was delivered.
+							await this.#repairExecutorRuleMessages(parent, parent.execution.choice, parent.execution.config);
 						},
 					},
 				},
@@ -3209,8 +3190,7 @@ export class EngineRuntime {
 				unsubscribe: () => {},
 				disposeExecution: resolved.dispose,
 				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice,
-					verifyCandidate: resolved.verifyCandidate, activateCandidate: resolved.activateCandidate,
-					ruleDeltaPending: undefined },
+					verifyCandidate: resolved.verifyCandidate, activateCandidate: resolved.activateCandidate },
 				requireYieldTool: config.continuationConfiguration.requireYieldTool,
 				outputSchema: sessionOptions.outputSchema,
 				pauseGate,
@@ -5714,34 +5694,28 @@ export class EngineRuntime {
 		choice: ExecutorChoice,
 		config: EngineExecutionConfiguration,
 	): Promise<void> {
-		const route = currentIdentity(choice);
-		const expected = ruleDelta(config.instruction_sources, choice.rules, route);
-		// The durable union must equal the recomputed selection; a mismatch is stale, never silently rewritten.
-		const recomputed = l1For(config.instruction_sources, route).map(rule => `${rule.ref}\0${rule.content_hash}`);
-		const persisted = choice.rules.map(rule => `${rule.ref}\0${rule.content_hash}`);
-		if (recomputed.length !== persisted.length || recomputed.some((key, index) => key !== persisted[index]))
-			throw new EngineTargetError("stale_target", "Durable executor rules do not match their frozen selection");
+		const deltas = executorRuleReplay(config.instruction_sources, choice);
 		const delivered = new Set(
 			binding.session.sessionManager.getContextBranch()
 				.filter(entry => entry.type === "custom_message" && entry.customType === "executor-rules")
-				.map(entry => {
-					const details = entry.details as { eventId?: unknown } | undefined;
-					return typeof details?.eventId === "string" ? details.eventId : "";
+				.flatMap(entry => {
+					const details = entry.details as { attemptId?: unknown; eventId?: unknown } | undefined;
+					return details?.attemptId === binding.attemptId && typeof details.eventId === "string" ? [details.eventId] : [];
 				}),
 		);
-		for (const [index, rule] of expected.entries()) {
-			const eventId = `${binding.attemptId}:rules:${choice.transitions.length - expected.length + index + 1}`;
-			if (delivered.has(eventId)) continue;
-			await binding.session.sendCustomMessage(
-				{
-					customType: "executor-rules",
-					content: renderRules([rule]),
-					display: false,
-					details: { attemptId: binding.attemptId, eventId, rules: [rule.ref] },
-					attribution: "agent",
-				},
-				{ triggerTurn: false, deliverAs: "nextTurn" },
+		for (const delta of deltas) {
+			if (delivered.has(delta.eventId)) continue;
+			const message = createCustomMessage(
+				"executor-rules", renderRules(delta.rules), false,
+				{ attemptId: binding.attemptId, eventId: delta.eventId, routeRef: delta.route.route_ref,
+					rules: delta.rules.map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash })) },
+				new Date().toISOString(), "agent",
 			);
+			binding.session.sessionManager.appendCustomMessageEntry(
+				message.customType, message.content, message.display, message.details, message.attribution,
+			);
+			await binding.session.sessionManager.flushAndCheckpoint();
+			binding.session.agent.appendMessage(message);
 		}
 	}
 
@@ -6145,41 +6119,33 @@ export class EngineRuntime {
  * message right after the last summary, marked as superseding historical summary
  * text. Built from durable state only — no model call, no persistence.
  */
-function projectExecutorRulesContext(
+export function projectExecutorRulesContext(
 	messages: AgentMessage[],
 	current: { attemptId: string; rules: readonly InstructionRule[]; compactionEntryId: () => string | null },
 ): AgentMessage[] {
 	const lastSummary = messages.findLastIndex(message => message.role === "compactionSummary");
 	const projected: AgentMessage[] = [];
-	const keep = (message: AgentMessage) => {
-		if (message.role !== "custom" || message.customType !== "executor-rules") return message;
-		const details = message.details as { attemptId?: unknown } | undefined;
-		return details?.attemptId === current.attemptId ? message : undefined;
-	};
 	for (const [index, message] of messages.entries()) {
-		if (lastSummary === -1 || index < lastSummary) {
-			const kept = keep(message);
-			if (kept) projected.push(kept);
-			continue;
+		if (message.role === "custom" && message.customType === "executor-rules") {
+			const details = message.details as { attemptId?: unknown } | undefined;
+			if (lastSummary !== -1 || details?.attemptId !== current.attemptId) continue;
 		}
 		if (index === lastSummary) {
 			projected.push(message);
 			// One authoritative block after the summary; summary rule text is historical.
-			if (current.rules.length > 0) {
-				const summary = message as { timestamp: number };
-				projected.push(createCustomMessage(
-					"executor-rules",
-					`${renderRules(current.rules)}\n\nThese are the current executor rules; any rule text inside the preceding summary is historical and lower priority.`,
-					false,
-					{ attemptId: current.attemptId, eventId: `compaction:${current.compactionEntryId() ?? "unknown"}` },
-					new Date(summary.timestamp).toISOString(),
-					"agent",
-				));
-			}
+			const entryId = current.compactionEntryId();
+			if (!entryId) throw new EngineTargetError("stale_target", "Compacted executor context lacks its durable summary identity");
+			projected.push(createCustomMessage(
+				"executor-rules",
+				`${renderRules(current.rules)}\n\nThese are the current executor rules; any rule text inside the preceding summary is historical and lower priority.`,
+				false,
+				{ attemptId: current.attemptId, eventId: `compaction:${entryId}` },
+				new Date(message.timestamp).toISOString(),
+				"agent",
+			));
 			continue;
 		}
-		// After the summary: raw rule messages of any Attempt are replaced by the block above.
-		if (message.role === "custom" && message.customType === "executor-rules") continue;
+		// Non-rule audit and conversation history remain in their original order.
 		projected.push(message);
 	}
 	return projected;
