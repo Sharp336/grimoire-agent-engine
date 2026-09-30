@@ -521,6 +521,15 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
+		const tampered = await rawRequest(server.endpoint, `${JSON.stringify({
+			schema: "grimoire.engine.control_query.request.v1", version: "1.0", requestId: "tampered-origin",
+			token: fs.readFileSync(path.join(tempDir, "control-query.token"), "utf8").trim(), method: "command",
+			params: { command: { ...command, payload: { ...command.payload, changed: true } } },
+		})}\n`);
+		expect(tampered).toMatchObject({ ok: false, error: { code: "stale_target" } });
+		expect(await runtime.store.runtimeCommand(command.commandId, { principalId: "owner" })).toMatchObject({
+			lookup: "known", stage: "applied", rawCanonicalHash: engineCommandIdentity(command).canonicalHash,
+		});
 
 		await server.close();
 		await runtime.dispose();
