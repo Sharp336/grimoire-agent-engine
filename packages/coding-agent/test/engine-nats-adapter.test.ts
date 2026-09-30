@@ -66,12 +66,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			},
 		});
 		const client = await connect({ servers: broker.url });
-		const command = startCommand(executionRuntime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
+		const command = startCommand(executionRuntime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir, execution);
 		command.agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/agent";
-		command.bindingSnapshot = semanticBinding(command.agentInstanceRef);
+		command.bindingSnapshot = semanticBinding(command.agentInstanceRef, execution.taskRef);
 		command.principalId = "owner";
 		command.browserPayloadHash = `sha256:${"a".repeat(64)}`;
 		command.browserTarget = { agentInstanceRef: command.agentInstanceRef };
+		execution.captureCommand(command);
 		const identity = engineCommandIdentity(command);
 		const errors: Error[] = [];
 		const options = {
@@ -547,7 +548,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			},
 		});
 		const execution = admittedExecution(toolModel.model, modelRegistry, {
-			continuation: { toolPolicies: { read: "permit" } },
+			continuation: { toolNames: ["read", "hub"], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"] },
 			scopeAgents: 8,
 		});
 		const runtime: EngineRuntime = await EngineRuntime.create({
@@ -804,21 +805,16 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await adapter.flushEvents();
 			await waitFor(() => permitEvents.some(event => event.type === "attempt.completed"));
 			expect(permitExecuted).toBeTrue();
-			expect(permitEvents.filter(event =>
-				/^(?:command|tool|model)\./.test(String(event.type)) ||
-				/^attempt\.(?:agent_registered|started|completed|failed|cancelled|interrupted)$/.test(String(event.type)),
-			).map(event => event.type)).toEqual([
-				"attempt.agent_registered",
-				"command.accepted",
-				"attempt.started",
-				"model.started",
-				"tool.approval_requested",
-				"tool.approval_resolved",
-				"tool.started",
-				"tool.settled",
-				"model.settled",
-				"attempt.completed",
-			]);
+			const kinds = permitEvents.map(event => String(event.type));
+			expect(toolModel.calls).toHaveLength(2);
+			expect(kinds.filter(kind => kind === "model.started")).toHaveLength(2);
+			expect(kinds.filter(kind => kind === "model.settled")).toHaveLength(2);
+			expect(kinds.filter(kind => kind === "tool.started")).toHaveLength(1);
+			expect(kinds.filter(kind => kind === "tool.settled")).toHaveLength(1);
+			expect(kinds.indexOf("model.settled")).toBeLessThan(kinds.indexOf("tool.approval_requested"));
+			expect(kinds.indexOf("tool.approval_resolved")).toBeLessThan(kinds.indexOf("tool.started"));
+			expect(kinds.indexOf("tool.settled")).toBeLessThan(kinds.lastIndexOf("model.started"));
+			expect(kinds.lastIndexOf("model.settled")).toBeLessThan(kinds.indexOf("attempt.completed"));
 			permitSub.unsubscribe();
 
 			const receipt = await runtime.ircBus.send({

@@ -52,7 +52,6 @@ import { decodeNativeEntry, parseNativeSessionLocator, RocksNativeSessionStorage
 import type {
 	SessionEntry,
 	SessionHeader,
-	LegacySessionLaunchSnapshot,
 	SessionLaunchSnapshot,
 	SessionMessageIdentity,
 } from "../session/session-entries";
