@@ -102,7 +102,11 @@ function nativeEngineHarness(
 			billing_pool_basis: "expected", tier: 0, provider_id: model.provider,
 			quota_window_ids: [], shadow_cost: null, price_source: "unknown", estimated: false,
 			record_revisions: {}, provider: model.provider, modelId: model.id,
-			billing_pools: [], quota_windows: [],
+			billing_pools: [{
+				pool_id: "native-fixture-pool", kind: "payg", valuation: 1, reserve: 0, price_multiplier: 1,
+				service_tier_multipliers: { standard: 1, priority: 1, flex: 1 },
+				quota_windows: [], window_seconds: null, cap: null,
+			}], quota_windows: [],
 			// The first case materializes the mock API locally; its frozen route only supplies admission capacity.
 			execution: {
 				api: "openai-completions", base_url: model.api === "mock" ? "http://127.0.0.1:1/v1" : model.baseUrl,
