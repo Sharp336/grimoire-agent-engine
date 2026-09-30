@@ -186,6 +186,40 @@ describe("Rocks runtime atomic public projections", () => {
 		const retry = await tx.get<{ value: Record<string, unknown> }>("projection", detailId);
 		expect(retry?.value.retry).toEqual({ attempt: 1, maxAttempts: 3, outcome: "waiting" });
 	});
+	test("a settled assistant anchors its original message owner to the exact native entry", async () => {
+		const tx = new RuntimeTransaction(fixture());
+		const id = projectionId("ownership", "a", "assistant-1");
+		await append(tx, "assistant_snapshot", {
+			assistantMessageId: "assistant-1", status: "streaming", historyEntryId: "not-settled",
+		}, 1);
+		const first = await tx.get<{ position: number; attempt_id: string; value: Record<string, unknown> }>(
+			"projection", id,
+		);
+		expect(first?.value).toEqual({ messageId: "assistant-1" });
+		await append(tx, "assistant_snapshot", {
+			assistantMessageId: "assistant-1", status: "settled", historyEntryId: "native-entry-1",
+		}, 2);
+		const settled = (await tx.get<{ position: number; attempt_id: string; value: Record<string, unknown> }>(
+			"projection", id,
+		))!;
+		expect(settled).toMatchObject({
+			position: first?.position, attempt_id: "attempt",
+			value: { messageId: "assistant-1", historyEntryId: "native-entry-1" },
+		});
+		await append(tx, "assistant_snapshot", {
+			assistantMessageId: "empty-assistant", status: "settled", historyEntryId: "native-entry-2",
+		}, 3);
+		expect((await tx.get<{ value: Record<string, unknown> }>(
+			"projection", projectionId("ownership", "a", "empty-assistant"),
+		))?.value.historyEntryId).toBe("native-entry-2");
+		await expect(append(tx, "assistant_snapshot", {
+			assistantMessageId: "assistant-1", status: "settled", historyEntryId: "other-entry",
+		}, 4)).rejects.toThrow("changed its native history entry");
+		await tx.put("projection", id, { ...settled, attempt_id: "other-attempt" });
+		await expect(append(tx, "assistant_snapshot", {
+			assistantMessageId: "assistant-1", status: "settled", historyEntryId: "native-entry-1",
+		}, 5)).rejects.toThrow("changed its message owner or Attempt");
+	});
 	test("settlement publishes a canonical receipt with the command's frozen identity", async () => {
 		const rows = fixture();
 		const identity: EngineCommandIdentity = {

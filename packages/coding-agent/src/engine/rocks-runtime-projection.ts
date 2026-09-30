@@ -769,9 +769,26 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 	}
 	if (event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string") {
 		// Empty failures and tool-only responses stream no text: their snapshot alone anchors the native entry.
-		const ownerId = projectionId("ownership", event.agentInstanceId, event.payload.assistantMessageId);
-		if (!(await tx.get("projection", ownerId)))
-			await putProjection(tx, event, "ownership", ownerId, { messageId: event.payload.assistantMessageId });
+		const messageId = event.payload.assistantMessageId;
+		const ownerId = projectionId("ownership", event.agentInstanceId, messageId);
+		const owner = await tx.get<RocksProjection>("projection", ownerId);
+		if (owner && (owner.subtype !== "ownership" || owner.agent_instance_id !== event.agentInstanceId ||
+			owner.attempt_id !== event.attemptId || owner.value.messageId !== messageId))
+			throw new EngineTargetError("stale_target", "Assistant snapshot changed its message owner or Attempt");
+		const historyEntryId = event.payload.status === "settled" &&
+			typeof event.payload.historyEntryId === "string" ? event.payload.historyEntryId : undefined;
+		if (historyEntryId === "")
+			throw new EngineTargetError("stale_target", "Assistant snapshot has no native history entry ID");
+		if (historyEntryId && owner?.value.historyEntryId && owner.value.historyEntryId !== historyEntryId)
+			throw new EngineTargetError("stale_target", "Assistant snapshot changed its native history entry");
+		if (!owner)
+			await putProjection(tx, event, "ownership", ownerId, {
+				messageId, ...(historyEntryId ? { historyEntryId } : {}),
+			});
+		else if (historyEntryId && !owner.value.historyEntryId)
+			await tx.put("projection", ownerId, {
+				...owner, value: { ...owner.value, historyEntryId },
+			});
 	}
 	if (event.kind === "message_updated") {
 		const value = event.payload ?? {};
