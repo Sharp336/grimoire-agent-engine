@@ -778,11 +778,18 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				items: [{ toolCallId: "ipc-tool", phase: "started" }],
 				nextCursor: null,
 			});
-			const denied = await client.request("runtime.tools", { ...request, principalId: "foreign" }).then(
-				() => null,
-				(error: unknown) => error,
+			const denied = await rawRequest(
+				server.endpoint,
+				`${JSON.stringify({
+					schema: "grimoire.engine.control_query.request.v1",
+					version: "1.0",
+					requestId: "foreign-tools",
+					token: fs.readFileSync(path.join(tempDir, "control-query.token"), "utf8").trim(),
+					method: "runtime.tools",
+					params: { ...request, principalId: "foreign" },
+				})}\n`,
 			);
-			expect((denied as { code?: unknown } | null)?.code).toBe("agent_not_found");
+			expect(denied).toMatchObject({ ok: false, error: { code: "agent_not_found" } });
 		} finally {
 			await server.close();
 			await runtime.dispose();
