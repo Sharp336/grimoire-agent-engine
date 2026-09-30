@@ -2691,6 +2691,177 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(await runtimeRef.store.getEffect(effectId)).toMatchObject({ state: "settled", outcome: "completed" });
 		await runtimeRef.dispose();
 	}, 60_000);
+
+	it("cancels an Attempt that is waiting for Ask input", async () => {
+		const questions = [{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }];
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "ask-cancel", name: "ask", arguments: { questions } }] }],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["ask"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		const requested = nextEngineEvent(runtime, "input_requested");
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-cancel-input", agentInstanceId: "agent-cancel-input",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-cancel-input",
+			executionId: "execution-cancel-input", attemptId: "attempt-cancel-input",
+		}, { cwd, principalId: "owner", input: "ask" }));
+		const input = await requested;
+		const resolved = nextEngineEvent(runtime, "input_resolved");
+		await runtime.cancel({ ...started, commandId: "command-stop-input", reason: "No answer needed" });
+		await runtime.drain();
+		expect(await resolved).toMatchObject({
+			causationCommandId: "command-stop-input",
+			payload: {
+				inputId: (input.payload as { inputId?: string }).inputId,
+				status: "cancelled",
+				reason: "No answer needed",
+				attemptState: "cancel_requested",
+				controlReadiness: { pause: false, resume: false, steer: false, cancel: false, resolveInput: false },
+			},
+		});
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const eventKinds = (await runtime.store.pendingEvents()).map(event => event.kind);
+		expect(eventKinds.indexOf("input_resolved")).toBeLessThan(eventKinds.indexOf("cancelled"));
+		await runtime.dispose();
+	}, 60_000);
+
+	it("releases pending Ask input when its dialog signal aborts", async () => {
+		const questions = [{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }];
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "ask-abort", name: "ask", arguments: { questions } }] }],
+		});
+		let abortDialog: (() => Promise<void>) | undefined;
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["ask"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => {
+			abortDialog = () => session.abort({ reason: "dialog aborted" });
+			return session.prompt(input);
+		});
+		const requested = nextEngineEvent(runtime, "input_requested");
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-abort-input", agentInstanceId: "agent-abort-input",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-abort-input",
+			executionId: "execution-abort-input", attemptId: "attempt-abort-input",
+		}, { cwd, principalId: "owner", input: "ask" }));
+		const input = await requested;
+		const resolved = nextEngineEvent(runtime, "input_resolved");
+		if (!abortDialog) throw new Error("dialog abort handle is unavailable");
+		await abortDialog();
+		await runtime.drain();
+		expect(await resolved).toMatchObject({
+			payload: {
+				inputId: (input.payload as { inputId?: string }).inputId,
+				status: "cancelled",
+				reason: "Input request aborted",
+			},
+		});
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).not.toBe("waiting_input");
+		await expect(
+			runtime.resolveInput({
+				...started,
+				commandId: "late-input",
+				inputId: String((input.payload as { inputId?: string }).inputId),
+				result: { kind: "chat" },
+			}),
+		).rejects.toMatchObject({ code: "too_late" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("does not publish a cancelled user append into the next Attempt", async () => {
+		const dispatchEntered = Promise.withResolvers<void>();
+		const allowAppend = Promise.withResolvers<void>();
+		const releaseProvider = Promise.withResolvers<void>();
+		const stopAdmitted = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					await releaseProvider.promise;
+					return { content: ["answer"] };
+				},
+				{ content: ["next answer"] },
+			],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async (session, text, identity) => {
+			if (text === "cancel this user append") {
+				dispatchEntered.resolve();
+				await allowAppend.promise;
+			}
+			return session.prompt(text, identity);
+		});
+		let stopOnAppend: (() => void) | undefined;
+		const createManager = SessionManager.createNative.bind(SessionManager);
+		const creation = spyOn(SessionManager, "createNative").mockImplementation((...args) => {
+			const manager = createManager(...args);
+			if (args[0] === cwd) {
+				manager.onEntryAppended = entry => {
+					if (entry.type !== "message" || entry.message.role !== "user") return;
+					// The existing collab tap admits Stop before the Engine queues its history publication.
+					stopOnAppend?.();
+					stopOnAppend = undefined;
+				};
+			}
+			return manager;
+		});
+		try {
+			const input = "cancel this user append";
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "history-cancel-start", agentInstanceId: "history-cancel-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/history-cancel-agent",
+				executionId: "history-cancel-execution", attemptId: "history-cancel-attempt",
+			}, { cwd, principalId: "owner", input }));
+			await withTimeout(dispatchEntered.promise, 2_000, "Start did not reach the append boundary");
+			stopOnAppend = () => {
+				runtime
+					.cancel({ ...started, commandId: "history-cancel-stop" })
+					.then(() => stopAdmitted.resolve(), stopAdmitted.reject);
+			};
+			allowAppend.resolve();
+			await withTimeout(stopAdmitted.promise, 2_000, "Stop deadlocked with the history write tail");
+			releaseProvider.resolve();
+			await withTimeout(runtime.drain(), 3_000, "Cancelled append did not quiesce");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+			const stoppedEvents = await runtime.store.pendingEvents();
+			expect(
+				stoppedEvents.filter(event => event.kind === "reconciled" && event.attemptId === started.attemptId),
+			).toHaveLength(0);
+			const stopped = await runtime.store.intent(started.agentInstanceId);
+			const next = await runtime.start(startRequest(execution, {
+				commandId: "history-next-start", agentInstanceId: started.agentInstanceId,
+				agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/history-cancel-agent",
+				executionId: "history-next-execution", attemptId: "history-next-attempt",
+			}, {
+				cwd, principalId: "owner", input: "only the next Attempt owns this user append",
+				expectedIntentRevision: stopped.intentRevision,
+				explicitContinue: true,
+			}));
+			await withTimeout(runtime.drain(), 3_000, "Next Attempt did not finish");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+			expect((await runtime.store.getAttempt(next.attemptId))?.state).toBe("completed");
+			const events = await runtime.store.pendingEvents();
+			expect(events.filter(event => event.kind === "reconciled").map(event => event.attemptId)).toEqual([
+				next.attemptId,
+			]);
+			const history = await nativeHistory(runtime, next.agentInstanceId);
+			expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
+				input,
+				"only the next Attempt owns this user append",
+			]);
+		} finally {
+			stopOnAppend = undefined;
+			allowAppend.resolve();
+			releaseProvider.resolve();
+			try {
+				await runtime.drain();
+				await runtime.dispose();
+			} finally {
+				creation.mockRestore();
+			}
+		}
+	}, 20_000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
