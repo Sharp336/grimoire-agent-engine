@@ -13,6 +13,8 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Approval decisions through authenticated ClientHost Control + Query now require the addressed ancestor's current binding, held lease and effective tool authority; direct unauthenticated CLI approval aliases remain removed. Missing local authority addresses the human without changing whether the request intrinsically requires a human.
+- Explicit hosted origin refusals become nonretryable Engine command rejections, while lost or transient transport remains blocked for retry. A paused branch Resume reacquires its frozen routes with its intent in one atomic storage mutation; approval input projections retain distinct request IDs and revisions through resolution and readdressing.
 
 - Shared OpenAI Responses accounts now accept hosted broker execution material, retaining the existing identity, execution-pin, broker-token and transport checks.
 - Sending a message with Resume persists it before releasing the pause and continues the same Attempt. Retried commands do not append the message twice; uncertain delivery remains explicit instead of silently resending or starting another Attempt.
