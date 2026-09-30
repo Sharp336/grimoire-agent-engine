@@ -12,6 +12,7 @@ import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 	ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS,
 	EngineControlQueryClient,
+	runEngineCommand,
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import { HostedBridgeUnavailableError, HostedGrimoireRpc } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
@@ -811,16 +812,24 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			}),
 		});
 		const attemptId = "tools-attempt";
-		const started = await runtime.start({
-			commandId: "tools-start", agentInstanceId: "control-tools", agentInstanceRef, bindingSnapshot,
-			executionId: "tools-execution", attemptId, authorityGeneration: 1, principalId: "owner", cwd,
-			input: "start", executionConfiguration: config, dispatchRef, dispatchHash,
-			executionKind: "ordinary", specialRef: null, originReceiptId: "origin:tools-start",
-		});
+		const startCommand: EngineCommandEnvelope = {
+			schema: "grimoire.engine.command.v1", op: "start", commandId: "tools-start",
+			deviceId: "device", engineId: "engine", engineGeneration: runtime.engineGeneration,
+			agentInstanceId: "control-tools", agentInstanceRef, bindingSnapshot,
+			executionId: "tools-execution", attemptId, authorityGeneration: 1, principalId: "owner",
+			issuedAt: Date.now(),
+			payload: {
+				cwd, input: "start", executionConfiguration: config, dispatchRef, dispatchHash,
+				executionKind: "ordinary", specialRef: null, originReceiptId: "origin:tools-start",
+			},
+		};
+		const startReceipt = await runEngineCommand({ runtime, deviceId: "device", engineId: "engine" }, startCommand);
+		expect(startReceipt.outcome).toBe("applied");
+		const liveBinding = runtime.getBinding("control-tools")!;
 		const target = {
 			agentInstanceId: "control-tools", attemptId, executionId: "tools-execution",
-			bindingId: started.bindingId, commandId: "tools-pause", authorityGeneration: 1,
-			engineGeneration: runtime.engineGeneration, bindingGeneration: started.bindingGeneration,
+			bindingId: liveBinding.bindingId, commandId: "tools-pause", authorityGeneration: 1,
+			engineGeneration: runtime.engineGeneration, bindingGeneration: liveBinding.bindingGeneration,
 		};
 		await runtime.pause({ ...target, initiator: { kind: "human" } });
 		gate.resolve();
