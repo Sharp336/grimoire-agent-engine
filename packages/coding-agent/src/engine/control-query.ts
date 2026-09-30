@@ -907,7 +907,7 @@ export async function runEngineCommand(
 	} catch (error) {
 		if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
-			if (error instanceof EngineRoutingQueuedError) replayQueuedCommand(options, command);
+			if (error instanceof EngineRoutingQueuedError || command.op === "resume") replayQueuedCommand(options, command);
 			throw error;
 		}
 		// A Start can fail while materializing credentials after its atomic applied Attempt admission.

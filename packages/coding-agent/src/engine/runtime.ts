@@ -120,6 +120,7 @@ import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { readNativeHeader } from "./rocks-runtime-history";
 import { RocksEngineStore } from "./rocks-runtime-store";
+import type { ResumeMember } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -1128,9 +1129,10 @@ export class EngineRuntime {
 			const durable = await this.store.getBinding(request.agentInstanceId);
 			const attempt = await this.store.getAttemptTarget(request.attemptId);
 			if (!durable || !attempt) throw new EngineTargetError("agent_not_found", "Unknown branch target");
-			const resumedIntent = action === "resume" && durable.intentCommandId === request.commandId &&
-				(request.expectedIntentRevision === undefined || durable.intentRevision === request.expectedIntentRevision + 1);
-			if (durable.attemptId !== request.attemptId || !this.#attemptMatchesTarget(attempt, request))
+			const ownership = action === "resume" ? await this.store.resumeOwnership(request.commandId, request.agentInstanceId) : undefined;
+			const resumedIntent = ownership !== undefined &&
+				(request.expectedIntentRevision === undefined || ownership.intentRevision === request.expectedIntentRevision + 1);
+			if ((!resumedIntent && durable.attemptId !== request.attemptId) || !this.#attemptMatchesTarget(attempt, request))
 				throw new EngineTargetError("stale_target", "Branch target is stale");
 			const root = this.#bindings.get(request.agentInstanceId);
 			if (
@@ -1166,7 +1168,7 @@ export class EngineRuntime {
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
 			if (resumeMessage) {
-				if (!root || (!resumedIntent && root.attemptState !== "paused") || root.pendingInput ||
+				if (!root || root.attemptId !== request.attemptId || (!resumedIntent && root.attemptState !== "paused") || root.pendingInput ||
 					[...this.#pendingToolApprovals.values()].some(pending => pending.record.target.bindingId === root.bindingId))
 					throw new EngineTargetError("too_late", "A paused Attempt without pending input or approval is required");
 				const intent = await this.store.intent(request.agentInstanceId);
@@ -1207,7 +1209,7 @@ export class EngineRuntime {
 				}
 			}
 			let changed: { agentIds: string[]; events: EngineEvent[]; intentRevision: number;
-				superseded: boolean; parents: Map<string, string | null> } | undefined;
+				superseded: boolean; parents: Map<string, string | null>; targets: Map<string, ResumeMember> } | undefined;
 			const changeIntent = async () => {
 				try {
 					changed = await this.store.branchIntent(
@@ -1235,7 +1237,7 @@ export class EngineRuntime {
 						pending.controller.abort(new EngineTargetError("cancelled", "Engine branch stopped"));
 				}
 			}
-			let queued: EngineRoutingQueuedError | undefined;
+			let queued: EngineRoutingQueuedError | EngineBindingPendingError | undefined;
 			let superseded = changed.superseded;
 			const blockedAncestors = new Set<string>();
 			const apply = async (agentId: string) => {
@@ -1248,14 +1250,28 @@ export class EngineRuntime {
 					return;
 				}
 				const retained = await this.store.getBinding(agentId);
-				if (action === "resume" && retained?.intentCommandId !== request.commandId) {
+				const saved = changed!.targets.get(agentId);
+				if (action === "resume" && (!saved || !retained ||
+					retained.attemptId !== saved.attemptId || retained.bindingId !== saved.bindingId ||
+					retained.executionId !== saved.executionId || retained.engineGeneration !== saved.engineGeneration ||
+					retained.bindingGeneration !== saved.bindingGeneration || retained.authorityGeneration !== saved.authorityGeneration ||
+					!sameSemanticBinding(retained.bindingSnapshot, saved.bindingSnapshot) ||
+					retained.intentCommandId !== request.commandId || retained.intentRevision !== saved.intentRevision)) {
 					superseded = true;
 					return;
 				}
 				const intent = await this.store.intent(agentId);
+				if (action === "resume" && intent.intentRevision !== saved!.intentRevision) {
+					superseded = true;
+					return;
+				}
 				binding.intentRevision = intent.intentRevision;
 				binding.manualHold = intent.manualHold;
 				binding.intentCommandId = request.commandId;
+				if (action === "resume" && blockedAncestors.has(agentId)) {
+					await this.store.cancelPausedRouting(binding.attemptId, request.commandId, this.engineGeneration);
+					return;
+				}
 				if (action !== "resume") await this.store.cancelPausedRouting(binding.attemptId);
 				if (["completed", "cancelled", "failed", "interrupted"].includes(binding.attemptState)) return;
 				const initiator = "initiator" in request ? request.initiator : { kind: "human" as const };
@@ -1306,6 +1322,12 @@ export class EngineRuntime {
 						this.#trackRun(this.#finishPause(binding, binding.attemptId));
 					}
 				} else if (action === "resume") {
+					if (binding.attemptState === "paused" && binding.approvalPauseCause) {
+						const approvals = await this.store.durableApprovalPause(binding.attemptId);
+						if (!approvals || approvals.some(approval =>
+							approval.status !== "approved" && approval.status !== "denied"))
+							throw new EngineBindingPendingError("Branch Resume awaits its retained approval decision");
+					}
 					const previous = resumedIntent || (recoveringAcceptedMessage && agentId === request.agentInstanceId)
 						? (await this.store.getAttemptTarget(binding.attemptId))?.state ?? binding.attemptState
 						: binding.attemptState;
@@ -1352,12 +1374,11 @@ export class EngineRuntime {
 			try {
 				const members = action === "resume" ? [...changed.agentIds].reverse() : changed.agentIds;
 				for (const id of members) {
-					if (action === "resume" && blockedAncestors.has(id)) continue;
 					try {
 						if (id === request.agentInstanceId) await apply(id);
 						else await this.#inLane(id, () => apply(id));
 					} catch (error) {
-						if (!(error instanceof EngineRoutingQueuedError)) throw error;
+						if (!(error instanceof EngineRoutingQueuedError) && !(error instanceof EngineBindingPendingError)) throw error;
 						queued ??= error;
 						let ancestor = changed.parents.get(id);
 						while (ancestor && !blockedAncestors.has(ancestor)) {
@@ -1371,7 +1392,7 @@ export class EngineRuntime {
 						{ partial: true, superseded: true });
 				if (queued) throw queued;
 			} catch (error) {
-				if (resumeMessage && !(error instanceof EngineRoutingQueuedError))
+				if (resumeMessage && !(error instanceof EngineRoutingQueuedError) && !(error instanceof EngineBindingPendingError))
 					throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
 				throw error;
 			}

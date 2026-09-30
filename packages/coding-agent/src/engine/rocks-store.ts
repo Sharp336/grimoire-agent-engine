@@ -115,6 +115,18 @@ type EventTarget = Pick<
 	| "bindingGeneration"
 	| "authorityGeneration"
 >;
+export interface ResumeMember extends EventTarget {
+	bindingSnapshot?: EngineSemanticBindingSnapshot;
+	intentRevision: number;
+	parentAgentInstanceId: string | null;
+}
+interface ResumeOwnership {
+	subtype: "ownership";
+	agent_instance_id: string;
+	attempt_id: string;
+	position: number;
+	value: { intentRevision: number; members: ResumeMember[] };
+}
 type AgentIdentity = Pick<
 	EngineCommandIdentity,
 	| "agentInstanceId"
@@ -2000,6 +2012,7 @@ export class RocksEngineMutations {
 					const current = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
 					await this.checkIntent(tx, binding.agentInstanceId, options.intentGuard?.expectedRevision, true);
 					if (!current || current.manual_hold !== 0 || !this.sameFence(current, binding) ||
+						(options.intentGuard?.expectedRevision !== undefined && current.intent_revision !== options.intentGuard.expectedRevision) ||
 						(options.intentGuard?.commandId !== undefined && current.intent_command_id !== options.intentGuard.commandId) ||
 						!sameSemanticBinding(current.binding_snapshot, options.routingResume.bindingSnapshot) ||
 						options.routingResume.commandId !== old?.command_id || options.routingResume.attemptId !== binding.attemptId)
@@ -2233,6 +2246,7 @@ export class RocksEngineMutations {
 		const agentIds = await this.branchAgents(tx, id);
 		const events: EngineEvent[] = [];
 		const parents = new Map<string, string | null>();
+		const targets = new Map<string, ResumeMember>();
 		for (const agent of agentIds) {
 			const row = (await tx.get<RocksIdentity>("identity", agent))!;
 			parents.set(agent, row.parent_agent_instance_id ?? null);
@@ -2246,6 +2260,17 @@ export class RocksEngineMutations {
 					intent_revision: row.intent_revision + 1,
 					intent_command_id: commandId,
 				});
+			if (action === "resume" && binding && holds.length === 0) {
+				const attempt = await tx.get<RocksAttempt>("attempt", binding.attempt_id);
+				if (attempt && !terminal.has(attempt.state))
+					targets.set(agent, {
+						commandId: binding.command_id, agentInstanceId: agent, executionId: binding.execution_id,
+						attemptId: binding.attempt_id, bindingId: binding.binding_id,
+						engineGeneration: binding.engine_generation, bindingGeneration: binding.binding_generation,
+						authorityGeneration: binding.authority_generation, bindingSnapshot: binding.binding_snapshot,
+						intentRevision: row.intent_revision + 1, parentAgentInstanceId: row.parent_agent_instance_id ?? null,
+					});
+			}
 			events.push(
 				await this.identityEvent(tx, agent, commandId, "holds_changed", {
 					action,
@@ -2255,7 +2280,7 @@ export class RocksEngineMutations {
 				}),
 			);
 		}
-		return { agentIds, events, intentRevision: root.intent_revision + 1, parents };
+		return { agentIds, events, intentRevision: root.intent_revision + 1, parents, targets };
 	}
 	async branchIntent(
 		id: string,
@@ -2270,25 +2295,52 @@ export class RocksEngineMutations {
 				if (!start) throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
 				expected = await this.cancelRevision(tx, startFence, start);
 			}
+			const ownershipId = projectionId("ownership", "resume", commandId);
 			if (action === "resume") {
-				const root = await tx.get<RocksIdentity>("identity", id);
-				const binding = await tx.get<RocksBinding>("binding", id);
-				if (root && binding?.intent_command_id === commandId &&
-					(expected === undefined || root.intent_revision === expected + 1)) {
+				const ownership = await tx.get<ResumeOwnership>("projection", ownershipId);
+				if (ownership) {
+					if (ownership.agent_instance_id !== id ||
+						(expected !== undefined && ownership.value.intentRevision !== expected + 1))
+						throw new EngineTargetError("stale_target", "Resume ownership changed its original intent");
 					const agentIds: string[] = [];
 					let superseded = false;
 					const parents = new Map<string, string | null>();
-					for (const agent of await this.branchAgents(tx, id)) {
-						parents.set(agent, (await tx.get<RocksIdentity>("identity", agent))?.parent_agent_instance_id ?? null);
-						const member = await tx.get<RocksBinding>("binding", agent);
-						if (member?.intent_command_id === commandId) agentIds.push(agent);
-						else if (member) superseded = true;
+					const targets = new Map<string, ResumeMember>();
+					for (const saved of ownership.value.members) {
+						parents.set(saved.agentInstanceId, saved.parentAgentInstanceId);
+						targets.set(saved.agentInstanceId, saved);
+						const current = await tx.get<RocksBinding>("binding", saved.agentInstanceId);
+						if (current && this.sameFence(current, saved) &&
+							sameSemanticBinding(current.binding_snapshot, saved.bindingSnapshot) &&
+							current.intent_command_id === commandId && current.intent_revision === saved.intentRevision)
+							agentIds.push(saved.agentInstanceId);
+						else superseded = true;
 					}
-					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision, superseded, parents };
+					return { agentIds, events: [] as EngineEvent[], intentRevision: ownership.value.intentRevision,
+						superseded, parents, targets };
 				}
 			}
-			return { ...await this.changeIntent(tx, id, commandId, action, expected), superseded: false };
+			const changed = await this.changeIntent(tx, id, commandId, action, expected);
+			if (action === "resume") {
+				const root = await tx.get<RocksBinding>("binding", id);
+				await tx.create("projection", ownershipId, {
+					subtype: "ownership", agent_instance_id: id, attempt_id: root?.attempt_id ?? "",
+					position: changed.events[0].eventId,
+					value: { intentRevision: changed.intentRevision, members: [...changed.targets.values()] },
+				} satisfies ResumeOwnership);
+				return { ...changed, agentIds: [...changed.targets.keys()], superseded: false };
+			}
+			return { ...changed, superseded: false };
 		});
+	}
+
+	async resumeOwnership(commandId: string, agentId: string): Promise<ResumeOwnership["value"] | undefined> {
+		const row = (await this.records.get("projection", projectionId("ownership", "resume", commandId))).value as
+			unknown as ResumeOwnership | undefined;
+		if (!row) return undefined;
+		if (row.agent_instance_id !== agentId)
+			throw new EngineTargetError("stale_target", "Resume ownership belongs to another branch");
+		return row.value;
 	}
 
 	checkpointDependencies(checkpoint?: SessionDurabilityCheckpoint): StorageDependency[] {
@@ -2891,13 +2943,10 @@ export class RocksEngineMutations {
 		if (!command || command.operation !== "resume" || command.state !== "received") return;
 		if (canonicalHash !== undefined && command.canonical_hash !== canonicalHash)
 			throw new EngineCommandConflictError(commandId);
-		const tx = new RuntimeTransaction(this.records, true);
-		for (const agent of await this.branchAgents(tx, command.agent_instance_id)) {
-			const binding = await tx.get<RocksBinding>("binding", agent);
-			if (binding?.intent_command_id === commandId)
-				await this.cancelPausedRouting(binding.attempt_id, commandId,
-					processorGeneration ?? command.processor_generation ?? command.engine_generation);
-		}
+		const ownership = await this.resumeOwnership(commandId, command.agent_instance_id);
+		for (const member of ownership?.members ?? [])
+			await this.cancelPausedRouting(member.attemptId, commandId,
+				processorGeneration ?? command.processor_generation ?? command.engine_generation);
 	}
 
 	async cancelRoutingQueue(

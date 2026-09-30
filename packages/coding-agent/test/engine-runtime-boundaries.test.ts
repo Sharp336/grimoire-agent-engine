@@ -621,7 +621,8 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		expect((await runtime.sessionHistoryPage(target.agentInstanceId, ref, undefined, 100, target.attemptId)).entries).toEqual(page.entries);
 	}, 60_000);
 
-	for (const action of ["pause", "stop", "fifo"] as const) it(`keeps nested task waits quiescent under parent ${action} while an independent root completes`, async () => {
+	for (const action of ["pause", "stop", "fifo", "approval-fifo"] as const) it(`keeps nested task waits quiescent under parent ${action} while an independent root completes`, async () => {
+		const fifo = action === "fifo" || action === "approval-fifo";
 		const leafEntered = Promise.withResolvers<void>();
 		const releaseLeaf = Promise.withResolvers<void>();
 		const siblingEntered = Promise.withResolvers<void>();
@@ -642,7 +643,13 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					arguments: { target: { task_ref: taskRef, work_step_id: null }, assignment: name === "root" ? "middle" : "leaf" } }] };
 			}
 			if (input.includes("nested-leaf-work")) {
-				if (action === "fifo" && context.messages.some(message => message.role === "toolResult")) {
+				if (fifo && context.messages.some(message => message.role === "toolResult")) {
+					if (action === "approval-fifo" && !context.messages.some(message =>
+						message.role === "toolResult" && message.toolCallId === "leaf-read")) {
+						leafResumed.resolve();
+						await releaseResumedLeaf.promise;
+						return { content: [{ type: "toolCall", id: "leaf-read", name: "read", arguments: { path: "leaf-proof.txt" } }] };
+					}
 					leafResumed.resolve();
 					await releaseResumedLeaf.promise;
 					return { content: ["leaf-exact-result"] };
@@ -653,8 +660,10 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				try {
 					await releaseLeaf.promise;
 					options?.signal?.throwIfAborted();
-					return action === "fifo"
-						? { content: [{ type: "toolCall" as const, id: "leaf-read", name: "read", arguments: { path: "leaf-proof.txt" } }] }
+					return fifo
+						? { content: [{ type: "toolCall" as const, id: "leaf-first-tool",
+							name: action === "approval-fifo" ? "glob" : "read",
+							arguments: action === "approval-fifo" ? { pattern: "*.txt" } : { path: "leaf-proof.txt" } }] }
 						: { content: ["leaf-exact-result"] };
 				}
 				finally { options?.signal?.removeEventListener("abort", abort); }
@@ -671,9 +680,15 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		const middleExecution = admittedExecution(mock.model, env.registry, { spawn: { allowed: "auto", max_depth: 1, max_children: 1, on_exceed: "deny" },
 			continuation: { toolNames: ["task"], restrictToolNames: true } });
 		const leafExecution = admittedExecution(mock.model, env.registry, {
-			continuation: { toolNames: action === "fifo" ? ["read"] : [], restrictToolNames: true },
+			continuation: { toolNames: action === "approval-fifo" ? ["glob", "read"] : fifo ? ["read"] : [], restrictToolNames: true,
+				...(action === "approval-fifo" ? { toolPolicies: { read: "permit" as const }, tools_permit: ["read"] } : {}) },
 		});
 		env.executions.push(rootExecution, middleExecution, leafExecution);
+		if (action === "approval-fifo") {
+			const verify = env.options.verifyOriginReceipt!;
+			env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
+				approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("nested-deadline") } });
+		}
 		let runtime: EngineRuntime;
 		const requestFor = (name: string, selected: AdmittedExecutionFixture, parent?: { agentInstanceId: string; agentInstanceRef: string; attemptId: string }) =>
 			startRequest(selected, { commandId: `${action}-${name}-start`, agentInstanceId: engineAgentInstanceId(ref(name)),
@@ -728,7 +743,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect(waiting.size).toBe(2);
 				expect(results).toEqual([]);
 			} else await runtime.cancel({ ...root, commandId: "nested-parent-stop" });
-			if (action === "fifo") {
+			if (fifo) {
 				await runtime.resume({ ...leaf, commandId: "leaf-remove-own-hold", initiator: { kind: "human" },
 					expectedIntentRevision: (await runtime.store.intent(leaf.agentInstanceId)).intentRevision });
 				for (const name of ["blocker-one", "blocker-two"])
@@ -756,7 +771,32 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect((await runtime.store.records.get("command", middle.commandId)).value).toMatchObject({
 					routing: { action: "enqueue", lease_revision: 1 },
 				});
+				const waitingMiddle = (await runtime.store.records.get("command", middle.commandId)).value as unknown as RocksCommand;
+				const deadlinePause = action === "approval-fifo" ? nextEvent("paused", leaf.attemptId) : undefined;
 				releaseResumedLeaf.resolve();
+				if (deadlinePause) {
+					await withTimeout(deadlinePause, 15_000, "Resumed leaf did not reach its new approval pause");
+					await expect(runEngineCommand({ runtime, deviceId: command.deviceId, engineId: command.engineId }, command))
+						.rejects.toMatchObject({ code: "binding_pending" });
+					expect((await runtime.store.records.get("metadata", waitingMiddle.routing!.queue_id!)).value)
+						.toMatchObject({ status: "cancelled" });
+					expect((await runtime.store.records.get("command", command.commandId)).value).toMatchObject({ state: "received", receipt: null });
+					const approval = (await runtime.store.durableApprovalPause(leaf.attemptId))![0]!;
+					const binding = (await runtime.store.getBinding(leaf.agentInstanceId))!;
+					const decision = approvalDecisionFor(leafExecution, { ...binding, principalId: "owner" },
+						"nested-late-approval", approval.request, "approve");
+					const approve: EngineCommandEnvelope = {
+						schema: "grimoire.engine.command.v1", op: "resolve_approval", commandId: decision.command_id,
+						deviceId: command.deviceId, engineId: command.engineId, engineGeneration: runtime.engineGeneration,
+						agentInstanceId: binding.agentInstanceId, agentInstanceRef: binding.bindingSnapshot!.agentInstanceRef,
+						bindingSnapshot: binding.bindingSnapshot, runtimeBindingId: binding.bindingId, bindingGeneration: binding.bindingGeneration,
+						authorityGeneration: binding.authorityGeneration, executionId: binding.executionId, attemptId: binding.attemptId,
+						principalId: "owner", issuedAt: Date.now(),
+						payload: { originReceiptId: decision.origin_receipt_id, approvalDecision: decision },
+					};
+					leafExecution.captureCommand(approve);
+					expect((await runEngineCommand({ runtime, deviceId: approve.deviceId, engineId: approve.engineId }, approve)).outcome).toBe("applied");
+				}
 				await withTimeout(runtime.store.waitAttemptResult(root.agentInstanceId, root.commandId, root.attemptId),
 					10_000, "Leaves-first Resume did not finish while unrelated slots remained occupied");
 				expect((await runEngineCommand({ runtime, deviceId: command.deviceId, engineId: command.engineId }, command)).outcome)
@@ -982,7 +1022,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		}, 60_000,
 	);
 
-	it.each(["admit", "stop", "pause", "restart"] as const)(
+	it.each(["admit", "late-child", "stop", "pause", "restart"] as const)(
 		"keeps capacity-queued Resume pending with its exact receipt and lease high-watermark: %s", async outcome => {
 			const entered = Promise.withResolvers<void>();
 			const releaseInitial = Promise.withResolvers<void>();
@@ -1002,6 +1042,17 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			} });
 			const env = await setup(mock, (session, input, identity) => session.prompt(input, identity));
 			const execution = admittedExecution(mock, env.registry, { scopeAgents: 1 });
+			const lateChildExecution = admittedExecution(mock, env.registry, {
+				taskRef: "gctx:project/engine-runtime-test/tasks/late-child", scopeAgents: 1,
+			});
+			if (outcome === "late-child") {
+				lateChildExecution.config.routes.routes[0]!.account_ref = "gctx:bbbbbbbbbbbbbbbb";
+				for (const selected of [execution, lateChildExecution]) {
+					selected.config.routingLimits.accounts = { "gctx:aaaaaaaaaaaaaaaa": 1, "gctx:bbbbbbbbbbbbbbbb": 1 };
+					selected.config.routingLimits.providers[mock.model.provider] = 2;
+				}
+				env.executions.push(lateChildExecution);
+			}
 			env.executions.push(execution);
 			let runtime = env.runtime;
 			const events: EngineEvent[] = [];
@@ -1020,6 +1071,19 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			try {
 				const target = await env.start("fifo-initial", {}, runtime, execution);
 				await withTimeout(entered.promise, 5_000, "Initial provider did not enter");
+				const lateChildRef = `${lateChildExecution.taskRef}/agents/late-child`;
+				const lateChild = outcome === "late-child" ? startEnvelope(runtime, lateChildExecution,
+					startRequest(lateChildExecution, {
+						commandId: "late-child-start", agentInstanceId: "late-child", agentInstanceRef: lateChildRef,
+						executionId: "late-child-execution", attemptId: "late-child-attempt",
+					}, {
+						cwd: env.cwd, principalId: "owner", input: "late child",
+						parentAgentInstanceId: target.agentInstanceId,
+						parentAgentInstanceRef: target.bindingSnapshot!.agentInstanceRef,
+						bindingSnapshot: { ...semanticBinding(lateChildRef, lateChildExecution.taskRef),
+							parentAgentInstanceRef: target.bindingSnapshot!.agentInstanceRef,
+							parentAttemptId: target.attemptId, parentBindingRevision: 0 },
+					})) : undefined;
 				const paused = Promise.withResolvers<void>();
 				runtime.subscribe(event => { if (event.kind === "paused" && event.attemptId === target.attemptId) paused.resolve(); });
 				const hold = await runtime.pause({ ...target, commandId: "fifo-pause", initiator: { kind: "human" } });
@@ -1037,7 +1101,17 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect((await runtime.store.records.get("metadata", `slot-lease:${target.attemptId}`)).value).toBeNull();
 				expect(mock.calls).toHaveLength(2);
 				const queueId = start.routing!.queue_id!;
-				if (outcome === "admit") {
+				if (lateChild) {
+					expect((await runEngineCommand(transport, lateChild)).outcome).toBe("applied");
+					await withTimeout(runtime.store.waitAttemptResult(lateChild.agentInstanceId, lateChild.commandId, lateChild.attemptId),
+						5_000, "Late child did not complete");
+					await expect(runEngineCommand(transport, resume)).rejects.toMatchObject({ code: "routing_queued" });
+					expect((await runtime.store.records.get("command", resume.commandId)).value).toMatchObject({ state: "received", receipt: null });
+					expect((await runtime.store.records.get("command", target.commandId)).value).toMatchObject({
+						routing: { action: "enqueue", queue_id: queueId, lease_revision: 1 },
+					});
+				}
+				if (outcome === "admit" || outcome === "late-child") {
 					const laterRequest = startRequest(execution, {
 						commandId: "fifo-later", agentInstanceId: "fifo-later", agentInstanceRef: `${execution.taskRef}/agents/fifo-later`,
 						executionId: "fifo-later-execution", attemptId: "fifo-later-attempt",
@@ -1056,7 +1130,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					expect(events.filter(event => event.kind === "resumed" && event.attemptId === target.attemptId)).toHaveLength(1);
 					expect(events.findIndex(event => event.kind === "resumed" && event.attemptId === target.attemptId))
 						.toBeLessThan(events.findIndex(event => event.kind === "model_started" && event.attemptId === later.attemptId));
-					expect(mock.calls).toHaveLength(3);
+					expect(mock.calls).toHaveLength(outcome === "late-child" ? 4 : 3);
 				} else if (outcome === "stop" || outcome === "pause") {
 					const newer = control(target, outcome === "stop" ? "cancel" : "pause", `fifo-${outcome}`,
 						(await runtime.store.intent(target.agentInstanceId)).intentRevision);
@@ -1080,7 +1154,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					expect((await runtime.store.getAttempt(target.attemptId))?.state).not.toBe("running");
 				}
 				expect((await runtime.store.records.get("metadata", queueId)).value).toMatchObject({
-					status: outcome === "admit" ? "accepted" : "cancelled",
+					status: outcome === "admit" || outcome === "late-child" ? "accepted" : "cancelled",
 				});
 				releaseOccupant.resolve();
 				if (outcome !== "restart")
