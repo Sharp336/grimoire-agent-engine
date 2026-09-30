@@ -68,6 +68,9 @@ import { normalizeToolNames } from "../tools/builtin-names";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import {
 	type EngineAttemptState,
+	type EngineBindingGate,
+	type EngineBindingResult,
+	EngineBindingPendingError,
 	type EngineBindingSnapshot,
 	type EngineCancelRequest,
 	type EngineCompletionPayload,
@@ -118,7 +121,7 @@ import {
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
-import { validateStartFence } from "./start-fence";
+import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
 	EngineAttemptConflictError,
 	type EngineAttemptTargetRecord,
@@ -553,6 +556,37 @@ export class EngineRuntime {
 	subscribe(listener: EngineEventListener): () => void {
 		this.#listeners.add(listener);
 		return () => this.#listeners.delete(listener);
+	}
+
+	verifyInstallation(installationId: string, principalId: string): void {
+		this.store.verifyInstallation(installationId, principalId);
+		this.#signalInboxWake();
+	}
+
+	async finishSemanticBinding(action: "activate" | "abort", result: EngineBindingResult): Promise<EngineBindingGate> {
+		const gate = await this.#inLane(engineAgentInstanceId(result.agent_ref),
+			() => this.store.bindingTransition(action, result));
+		this.#signalInboxWake();
+		return gate;
+	}
+
+	prepareSemanticBinding(gate: EngineBindingGate): Promise<EngineBindingGate> {
+		return this.#inLane(engineAgentInstanceId(gate.bindingSnapshot.agentInstanceRef),
+			() => this.store.bindingPrepare(gate));
+	}
+
+	async adoptSemanticBinding(gate: EngineBindingGate, result: EngineBindingResult): Promise<EngineBindingGate> {
+		const id = engineAgentInstanceId(result.agent_ref);
+		return this.#inLane(id, async () => {
+			const live = this.#bindings.get(id);
+			const current = await this.store.semanticGate(id);
+			const ownsGate = current?.operationId === result.operation_id && current.proposalHash === result.proposal_hash;
+			if (ownsGate && live && (live.state === "running" || live.session.isStreaming))
+				throw new EngineBindingPendingError("Binding adoption requires an idle session");
+			const adopted = await this.store.bindingTransition("adopt", result, gate);
+			if (ownsGate && live) await this.#terminateBinding(live, "requested");
+			return adopted;
+		});
 	}
 
 	getBinding(agentInstanceId: string): EngineBindingSnapshot | undefined {
@@ -1855,6 +1889,7 @@ export class EngineRuntime {
 		audit?: LatencyAudit,
 	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
+		await this.store.checkSemanticStart(request.agentInstanceId, request.bindingSnapshot, request.principalId);
 		let binding = this.#bindings.get(request.agentInstanceId);
 		const admitted = binding ?? await this.store.getBinding(request.agentInstanceId);
 		if (admitted?.bindingSnapshot?.bindingRevision === 0 &&
@@ -2441,6 +2476,7 @@ export class EngineRuntime {
 												agentInstanceId,
 												agentInstanceRef,
 												parentAgentInstanceId: parent.agentInstanceId,
+												parentAgentInstanceRef: request.agentInstanceRef!,
 												principalId: request.principalId,
 												authorityGeneration: request.authorityGeneration,
 											});
@@ -2534,6 +2570,11 @@ export class EngineRuntime {
 				engineMode: true,
 				expectedAgentRef: null,
 			};
+			if (!resolved?.options.settings && prior?.sessionFile && sessionOptions.settings &&
+				path.relative(path.resolve(request.cwd), path.resolve(sessionOptions.settings.getCwd())) !== "") {
+				// Retained Agents may explicitly move workspaces; static defaults must not keep the old project scope.
+				sessionOptions.settings = await sessionOptions.settings.cloneForCwd(request.cwd);
+			}
 			if (this.#mcpServer) {
 				// A hosted session never inherits an ambient manager, including from a profile.
 				sessionOptions.mcpManager = undefined;
@@ -2858,7 +2899,7 @@ export class EngineRuntime {
 			profile.continuationPolicy === "fresh" ||
 			prior.authorityGeneration !== request.authorityGeneration ||
 			!(await this.#sameAdmittedBinding(prior, request)) ||
-			!parentTaskRef
+			!request.bindingSnapshot
 		) {
 			return access;
 		}
@@ -3373,17 +3414,23 @@ export class EngineRuntime {
 	}
 
 	/** Cancel an Engine child when its parent task call is aborted. */
-	async cancelAgentInstance(agentInstanceId: string, reason: string): Promise<void> {
+	async cancelAgentInstance(target: EnginePendingStartTarget & { commandId: string }, reason: string): Promise<void> {
 		for (const pending of this.#pendingStarts) {
-			if (pending.target.agentInstanceId === agentInstanceId) pending.controller.abort(new Error(reason));
+			if (pending.target.agentInstanceId === target.agentInstanceId &&
+				pending.target.executionId === target.executionId && pending.target.attemptId === target.attemptId)
+				pending.controller.abort(new Error(reason));
 		}
-		const binding = this.#bindings.get(agentInstanceId);
+		const binding = this.#bindings.get(target.agentInstanceId);
 		if (
-			binding?.attemptState !== "running" &&
-			binding?.attemptState !== "pause_requested" &&
-			binding?.attemptState !== "paused" &&
-			binding?.attemptState !== "waiting_input"
+			!binding || binding.executionId !== target.executionId || binding.attemptId !== target.attemptId ||
+			binding.authorityGeneration !== target.authorityGeneration || binding.engineGeneration !== target.engineGeneration ||
+			(binding.attemptState !== "running" &&
+				binding.attemptState !== "pause_requested" &&
+				binding.attemptState !== "paused" &&
+				binding.attemptState !== "waiting_input")
 		) {
+			const cancelled = await this.store.cancelPendingStart(target, target.commandId);
+			if (cancelled.event) this.#notifyEvents([cancelled.event]);
 			return;
 		}
 		// The start command owns the Attempt terminal event, including parent-driven cancellation.

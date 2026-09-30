@@ -13,6 +13,8 @@ import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { settings as ambientSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
+	EngineBindingGate,
+	EngineBindingResult,
 	EngineControlInitiator,
 	EngineEvent,
 	EngineLaunchProfile,
@@ -5322,6 +5324,60 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("retains exact owned unbound child history after pre-enrollment and parent restart", async () => {
+		const principalId = "grimoire:user:unbound-history";
+		const installationId = `install_${"e".repeat(32)}`;
+		const owner = crypto.createHash("sha256").update(principalId).digest("hex");
+		const parentRef = `grimoire://agents/~u/${owner}/parent`;
+		const childRef = `grimoire://agents/~u/${owner}/child`;
+		const parentId = engineAgentInstanceId(parentRef);
+		const childId = engineAgentInstanceId(childRef);
+		const engineChildId = `Engine-${new Bun.SHA256().update(childId).digest("hex").slice(0, 32)}`;
+		const mock = createMockModel({ responses: [
+			{ content: [{ type: "toolCall", id: "read-unbound-child", name: "read",
+				arguments: { path: `history://${engineChildId}` } }] },
+			{ content: ["done"] },
+		] });
+		const created = await createRuntime(async (session, input, identity) => {
+			if (input === "read retained unbound child") return session.prompt(input);
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+			return true;
+		}, {}, { model: mock.model });
+		const runtime = created.runtime;
+		runtime.verifyInstallation(installationId, principalId);
+		const snapshot = { ...semanticBinding(parentRef), taskRef: null, workStepId: null, installationId, bindingRevision: 1 };
+		const parentRequest = { agentInstanceRef: parentRef, agentInstanceId: parentId, principalId,
+			bindingSnapshot: snapshot, authorityGeneration: 1, cwd: created.cwd,
+			commandId: "unbound-parent", executionId: "unbound-parent", attemptId: "unbound-parent", input: "parent" };
+		await runtime.start(parentRequest, profile);
+		await runtime.drain();
+		// Both local and hosted launchers enroll before admitting Start.
+		await runtime.store.registerAgent({ agentInstanceId: childId, agentInstanceRef: childRef,
+			parentAgentInstanceId: parentId, parentAgentInstanceRef: parentRef, principalId, authorityGeneration: 1 });
+		const childRequest = { ...parentRequest, agentInstanceId: childId, agentInstanceRef: childRef,
+			parentAgentInstanceId: parentId, parentAgentInstanceRef: parentRef,
+			commandId: "unbound-child", executionId: "unbound-child", attemptId: "unbound-child",
+			input: "exact retained unbound transcript",
+			bindingSnapshot: { ...snapshot, agentInstanceRef: childRef, parentAgentInstanceRef: parentRef,
+				parentAttemptId: parentRequest.attemptId, parentBindingRevision: 1 } };
+		expect(await runtime.store.admitCommand({ ...childRequest, operation: "start",
+			deviceId: "device", engineId: "engine", engineGeneration: runtime.engineGeneration,
+			payloadHash: "sha256:unbound-child", canonicalHash: "sha256:unbound-child" }, runtime.engineGeneration))
+			.toMatchObject({ status: "claimed" });
+		await runtime.start(childRequest, profile);
+		await runtime.drain();
+		await runtime.dispose();
+		const restarted = await openRuntime(created.options);
+		restarted.verifyInstallation(installationId, principalId);
+		await restarted.start({ ...parentRequest, commandId: "unbound-parent-two", executionId: "unbound-parent-two",
+			attemptId: "unbound-parent-two", input: "read retained unbound child" },
+			{ ...profile, toolNames: ["read"], restrictToolNames: true });
+		await restarted.drain();
+		expect(toolResultOf(mock, "read-unbound-child")?.content.find(part => part.type === "text")?.text)
+			.toContain("exact retained unbound transcript");
+		await restarted.dispose();
+	}, 60_000);
+
 	it("does not expose task when the pinned profile has no child catalog", async () => {
 		let enabledTools: string[] = [];
 		const { runtime, cwd } = await createRuntime(
@@ -5521,6 +5577,88 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(second.bindingGeneration).toBeGreaterThan(first.bindingGeneration);
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).not.toBe(firstSession);
 		await runtime.drain();
+		await runtime.dispose();
+	}, 60_000);
+
+	it("starts a fresh native context after owned rebind and after explicit cwd change without replacing the Agent", async () => {
+		const mock = createMockModel({ responses: [
+			{ content: ["old-task-sentinel"] }, { content: ["new-task"] }, { content: ["new-folder"] },
+		] });
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {}, { model: mock.model });
+		const principalId = "grimoire:user:rebind-owner";
+		const installationId = `install_${"c".repeat(32)}`;
+		const hash = crypto.createHash("sha256").update(principalId).digest("hex");
+		const agentInstanceRef = `grimoire://agents/~u/${hash}/same-agent`;
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		const snapshot = { ...semanticBinding(agentInstanceRef), installationId, bindingRevision: 1 };
+		runtime.store.verifyInstallation(installationId, principalId);
+		const request = { agentInstanceRef, agentInstanceId, principalId, bindingSnapshot: snapshot,
+			commandId: "owned-before", executionId: "owned-before", attemptId: "owned-before",
+			authorityGeneration: 1, cwd, input: "old-task-input" };
+		const first = await runtime.start(request, profile);
+		await runtime.drain();
+		const gate: EngineBindingGate = { bindingSnapshot: snapshot, phase: "preparing",
+			operationId: "semantic-move", proposalHash: `sha256:${"d".repeat(64)}`,
+			gateRevision: 0, censusMutationRevision: 0 };
+		const prepared = await runtime.store.bindingPrepare(gate);
+		// Acknowledge the hosted projection boundary, not merely the NATS publication.
+		let after = 0;
+		for (;;) {
+			const page = await runtime.store.pendingEventsForSink("hosted-binding", 25, after);
+			for (const event of page.events) await runtime.store.markEventDelivered(event.eventId, "hosted-binding");
+			if (!page.scannedRecords) break;
+			after = page.throughCursor;
+		}
+		const census = { agentInstanceRef, installationId, operationId: gate.operationId!,
+			proposalHash: gate.proposalHash!, bindingRevision: 1 };
+		let checkpoint = await runtime.store.bindingCensus(census, runtime.engineGeneration);
+		for (let page = 0; checkpoint.next_cursor && page < 100; page++)
+			checkpoint = await runtime.store.bindingCensus(census, runtime.engineGeneration);
+		expect(checkpoint.status).toBe("complete");
+		const target = { ...snapshot, bindingRevision: 2, taskRef: "grimoire://tasks/test/destination", workStepId: null };
+		const operation = { agent_ref: agentInstanceRef, installation_id: installationId, operation_id: gate.operationId!,
+			proposal_hash: gate.proposalHash!, revision: 3, binding_revision: 2, task_ref: target.taskRef,
+			work_step_id: null, phase: "committed_await_adopt" as const, status: "committed" as const };
+		const committed: EngineBindingResult = { schema: "grimoire.agent_binding.result.v1", action: "commit",
+			...operation, operation_result: operation };
+		await runtime.adoptSemanticBinding({ ...prepared, phase: "committed_closed", committedTarget: target }, committed);
+		const active = { ...operation, phase: "active" as const, status: "adopted" as const };
+		const targetCensus = { ...census, bindingRevision: target.bindingRevision };
+		checkpoint = await runtime.store.bindingCensus(targetCensus, runtime.engineGeneration);
+		for (let page = 0; checkpoint.next_cursor && page < 100; page++)
+			checkpoint = await runtime.store.bindingCensus(targetCensus, runtime.engineGeneration);
+		expect(checkpoint.status).toBe("complete");
+		await runtime.store.bindingTransition("activate", { ...committed, ...active, action: "adopt", operation_result: active });
+		const summary = await runtime.store.runtimeSummary({ agentInstanceRef, principalId });
+		expect(summary.summary).toMatchObject({ bindingSnapshot: target, state: "registered",
+			target: { agentInstanceRef, intentRevision: expect.any(Number), authorityGeneration: 1 } });
+		expect(summary.summary).not.toHaveProperty("target.attemptId");
+		expect(await runtime.store.runtimeTarget({ agentInstanceRef, principalId })).toMatchObject({ kind: "registered" });
+		expect(await runtime.store.runtimeTarget({ agentInstanceRef, principalId, attemptId: first.attemptId }))
+			.toMatchObject({ kind: "bound", attemptId: first.attemptId, bindingSnapshot: snapshot });
+		const second = await runtime.start({ ...request, bindingSnapshot: target,
+			commandId: "owned-after", executionId: "owned-after", attemptId: "owned-after", input: "new-task-input" }, profile);
+		await runtime.drain();
+		expect(second.agentInstanceId).toBe(first.agentInstanceId);
+		expect(second.sessionFile).not.toBe(first.sessionFile);
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).not.toContain("old-task-input");
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).not.toContain("old-task-sentinel");
+		const otherCwd = path.join(path.dirname(cwd), "other-workspace");
+		fs.mkdirSync(otherCwd);
+		const third = await runtime.start({ ...request, bindingSnapshot: target, cwd: otherCwd,
+			commandId: "owned-folder", executionId: "owned-folder", attemptId: "owned-folder", input: "new-folder-input" }, profile);
+		await runtime.drain();
+		expect(third.agentInstanceId).toBe(first.agentInstanceId);
+		expect(third.bindingSnapshot).toEqual(target);
+		expect(third.sessionFile).not.toBe(second.sessionFile);
+		const thirdSession = runtime.agentRegistry.get(third.engineAgentId)?.session;
+		if (!thirdSession) throw new Error("Fresh workspace Start did not retain its AgentSession");
+		expect(thirdSession.settings.getCwd()).toBe(otherCwd);
+		expect(thirdSession.settings.isReadOnly()).toBe(true);
+		expect((await nativeSession(runtime, third.sessionFile!)).getCwd()).toBe(otherCwd);
+		expect(JSON.stringify(mock.calls[2]?.context.messages)).not.toContain("new-task-input");
+		expect(JSON.stringify((await nativeSession(runtime, first.sessionFile!)).buildSessionContext().messages))
+			.toContain("old-task-input");
 		await runtime.dispose();
 	}, 60_000);
 
@@ -6790,7 +6928,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		runtime.subscribe(event => {
 			events.push(event);
 		});
-		await runtime.start(
+		const started = await runtime.start(
 			{
 				commandId: "command-parent-owned",
 				agentInstanceId: "agent-parent-owned",
@@ -6802,10 +6940,35 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			},
 			profile,
 		);
-		await runtime.cancelAgentInstance("agent-parent-owned", "parent aborted");
+		await runtime.cancelAgentInstance(started, "parent aborted");
 		prompt.resolve(true);
 		await runtime.drain();
 		expect(events.find(event => event.kind === "cancelled")?.causationCommandId).toBe("command-parent-owned");
+		const principalId = "grimoire:user:pending-child";
+		const installationId = `install_${"e".repeat(32)}`;
+		const owner = crypto.createHash("sha256").update(principalId).digest("hex");
+		const agentInstanceRef = `grimoire://agents/~u/${owner}/pending-child`;
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		const snapshot = { ...semanticBinding(agentInstanceRef), installationId, bindingRevision: 1 };
+		runtime.verifyInstallation(installationId, principalId);
+		await runtime.prepareSemanticBinding({ bindingSnapshot: snapshot, phase: "preparing",
+			operationId: "child-move", proposalHash: `sha256:${"f".repeat(64)}`,
+			gateRevision: 0, censusMutationRevision: 0 });
+		const pending = { schema: "grimoire.engine.command.v1" as const, op: "start" as const,
+			commandId: "pending-child-start", deviceId: "device", engineId: "engine",
+			agentInstanceId, agentInstanceRef, executionId: "pending-child-execution", attemptId: "pending-child-attempt",
+			authorityGeneration: 1, engineGeneration: runtime.engineGeneration, principalId,
+			bindingSnapshot: snapshot, issuedAt: Date.now(), payload: { cwd, input: "never start" } };
+		const pendingIdentity = engineCommandIdentity(pending);
+		expect(await runtime.store.admitCommand(pendingIdentity, runtime.engineGeneration)).toEqual({ status: "binding_pending" });
+		const waiting = runtime.store.waitAttemptResult(agentInstanceId, pending.commandId, pending.attemptId);
+		await runtime.cancelAgentInstance(pending, "parent aborted");
+		expect(await waiting).toMatchObject({ state: "failed", payload: { error: "Attempt cancelled before Engine session initialization" } });
+		expect((await runtime.store.records.get("command", pending.commandId)).value)
+			.toMatchObject({ state: "settled", processor_generation: null, receipt: { outcome: "rejected", detail: { code: "cancelled" } } });
+		expect(await runtime.store.getAttempt(pending.attemptId)).toBeUndefined();
+		expect(await runtime.store.admitCommand(pendingIdentity, runtime.engineGeneration))
+			.toMatchObject({ status: "replay", receipt: { outcome: "rejected", detail: { code: "cancelled" } } });
 		await runtime.dispose();
 	}, 60000);
 

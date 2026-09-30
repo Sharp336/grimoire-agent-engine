@@ -8,7 +8,7 @@ import { isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
-import { type EngineLaunchProfile, EngineTargetError, legacyLocalChildBirth, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, validateS0Binding } from "./contracts";
+import { type EngineLaunchProfile, EngineBindingPendingError, EngineTargetError, legacyLocalChildBirth, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, validateSemanticBinding } from "./contracts";
 import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
@@ -18,6 +18,7 @@ import { ProviderExecutionClient } from "./provider-execution";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineRuntime, type EngineRuntimeOptions } from "./runtime";
 import { EngineCommandConflictError } from "./store";
+import { waitForEngineWake } from "./wake";
 
 export interface EngineServiceConfig {
 	deviceId: string;
@@ -207,9 +208,13 @@ export async function launchLocalEngineChild(
 	}
 	const seed = [request.parentAgentInstanceRef, request.parentAttemptId, request.toolCallId].join("\0");
 	const parent = request.parentBindingSnapshot;
-	validateS0Binding(parent, request.parentAgentInstanceRef);
+	validateSemanticBinding(parent, request.parentAgentInstanceRef);
+	if (parent.installationId && !request.principalId)
+		throw new EngineTargetError("invalid_request", "Owned child birth requires its admitted principal");
 	const birthId = `agent_${engineRouteToken(seed)}`;
-	const agentInstanceRef = `${parent.taskRef}/agents/${birthId}`;
+	const agentInstanceRef = parent.installationId
+		? `grimoire://agents/~u/${new Bun.CryptoHasher("sha256").update(request.principalId!).digest("hex")}/${birthId}`
+		: `${parent.taskRef}/agents/${birthId}`;
 	const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
 	const commandId = `cmd_local_${engineRouteToken(`${seed}\0command`)}`;
 	const executionId = `exec_local_${engineRouteToken(`${seed}\0execution`)}`;
@@ -253,8 +258,8 @@ export async function launchLocalEngineChild(
 			agentInstanceRef,
 			taskRef: parent.taskRef,
 			workStepId: parent.workStepId,
-			bindingRevision: 0,
-			installationId: null,
+			bindingRevision: parent.installationId ? 1 : 0,
+			installationId: parent.installationId,
 			parentAgentInstanceRef: request.parentAgentInstanceRef,
 			parentAttemptId: request.parentAttemptId,
 			parentBindingRevision: parent.bindingRevision,
@@ -281,31 +286,41 @@ export async function launchLocalEngineChild(
 			},
 		},
 	};
+	const cancellationTarget = { agentInstanceId, executionId, attemptId, commandId,
+		authorityGeneration: request.authorityGeneration, engineGeneration: runtime.engineGeneration,
+		principalId: request.principalId };
 	const cancel = () => {
-		void runtime.cancelAgentInstance(agentInstanceId, "Parent task aborted").catch(reportServiceError);
+		void runtime.cancelAgentInstance(cancellationTarget, "Parent task aborted").catch(reportServiceError);
 	};
 	request.signal?.addEventListener("abort", cancel, { once: true });
 	try {
 		request.signal?.throwIfAborted();
 		await request.enrollChild(agentInstanceRef, attemptId);
 		request.signal?.throwIfAborted();
-		await runEngineCommand(
-			{
-				runtime,
-				deviceId: request.deviceId,
-				engineId: request.engineId,
-				legacyBindingSnapshot,
-				resolveLaunchProfile: () => {
-					request.signal?.throwIfAborted();
-					return launchProfile;
-				},
-				provisionMailbox: async id => {
-					await request.provisionMailbox?.(id);
-					request.signal?.throwIfAborted();
-				},
+		const runner = {
+			runtime,
+			deviceId: request.deviceId,
+			engineId: request.engineId,
+			legacyBindingSnapshot,
+			resolveLaunchProfile: () => {
+				request.signal?.throwIfAborted();
+				return launchProfile;
 			},
-			command,
-		);
+			provisionMailbox: async (id: string) => {
+				await request.provisionMailbox?.(id);
+				request.signal?.throwIfAborted();
+			},
+		};
+		for (;;) {
+			request.signal?.throwIfAborted();
+			try {
+				await runEngineCommand(runner, command);
+				break;
+			} catch (error) {
+				if (!(error instanceof EngineBindingPendingError)) throw error;
+				await waitForEngineWake(runtime.store.changeSignal(), 1_000, request.signal);
+			}
+		}
 		const result = await runtime.store.waitAttemptResult(agentInstanceId, commandId, attemptId, request.signal);
 		if (result.attemptId) await request.enrollChild(agentInstanceRef, result.attemptId);
 		return {
@@ -322,7 +337,7 @@ export async function launchLocalEngineChild(
 		};
 	} catch (error) {
 		if (!request.signal?.aborted) throw error;
-		await runtime.cancelAgentInstance(agentInstanceId, "Parent task aborted").catch(() => {});
+		await runtime.cancelAgentInstance(cancellationTarget, "Parent task aborted");
 		return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
 	} finally {
 		request.signal?.removeEventListener("abort", cancel);
@@ -456,7 +471,7 @@ export function hostedCoreMcpConfig(hosted: NonNullable<EngineServiceConfig["hos
 			"X-Grimoire-Client-Version": hosted.clientVersion ?? "0.4.0",
 			"X-Grimoire-Client-Surface": "agent_engine_bridge",
 			"X-Grimoire-Client-Protocol-Version": hosted.protocolVersion ?? "2026-08-01",
-			"X-Grimoire-Client-Features": '["grimoire.task.v4"]',
+			"X-Grimoire-Client-Features": '["grimoire.task.v4","agent_binding.v1"]',
 			...(hosted.installedSequence !== undefined
 				? { "X-Grimoire-Client-Installed-Sequence": String(hosted.installedSequence) } : {}),
 			...(hosted.sourceSignature ? { "X-Grimoire-Client-Source-Signature": hosted.sourceSignature } : {}),

@@ -4,9 +4,13 @@ import * as path from "node:path";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
-import type { StorageDependency, StorageRuntimeMutation } from "../session/storage-protocol";
+import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation } from "../session/storage-protocol";
 import type {
 	EngineAttemptState,
+	EngineBindingGate,
+	EngineBindingCheckpoint,
+	EngineBindingResult,
+	EngineSemanticBindingSnapshot,
 	EngineBindingSnapshot,
 	EngineEvent,
 	EngineInboxItem,
@@ -17,7 +21,7 @@ import type {
 	EngineProfileRouteState,
 	EngineRetryState,
 } from "./contracts";
-import { EngineTargetError, sameSemanticBinding, validateS0Binding } from "./contracts";
+import { EngineBindingPendingError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import {
 	completeRestoreRebind,
 	type RestoreWorkspaceDescriptor,
@@ -53,6 +57,7 @@ import {
 	messageAttachmentReferences,
 } from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { engineAgentInstanceId } from "./route";
 import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
@@ -97,6 +102,38 @@ interface StartCancellation {
 	cancellationCommandId: string;
 }
 const terminal = new Set<EngineAttemptState>(["completed", "failed", "cancelled", "interrupted"]);
+
+const bindingResultFields = [
+	"agent_ref", "revision", "binding_revision", "task_ref", "work_step_id",
+	"installation_id", "phase", "operation_id", "proposal_hash", "status",
+] as const;
+
+/** Hosted status/prepare may replay a commit; transport action is not operation identity. */
+function sameBindingResult(left: EngineBindingResult, right: EngineBindingResult): boolean {
+	return bindingResultFields.every(field =>
+		left[field] === right[field] && left.operation_result[field] === right.operation_result[field]);
+}
+
+/** Only changes to census observations invalidate its cut, not publication/projection bookkeeping. */
+function censusState(kind: StorageRuntimeKind, value: StoragePayload | null): string | number | null {
+	if (!value) return null;
+	switch (kind) {
+		case "identity":
+			return JSON.stringify([value.agent_instance_ref, value.parent_agent_instance_id,
+				value.parent_agent_instance_ref, value.principal_id, value.root_agent_instance_ref]);
+		case "command": return value.state === "received" ? 1 : null;
+		case "attempt": return terminal.has(value.state as EngineAttemptState) ? null : 1;
+		case "effect": return value.state === "settled" ? null : 1;
+		case "inbox": return value.subtype === "item" && value.disposition === "pending" ? 1 : null;
+		case "event": {
+			const event = value as unknown as RocksEvent;
+			return event.kind === "reconciled" && event.payload?.semanticBinding === true ? null : event.eventId;
+		}
+		case "delivery":
+			return value.sink_id === "hosted-binding" && value.state === "delivered" ? String(value.event_id) : null;
+		default: return null;
+	}
+}
 
 function modelEffectPayload(effect: RocksEffect): Record<string, unknown> {
 	return { effectId: effect.effect_id, modelCallId: effect.tool_call_id };
@@ -145,6 +182,44 @@ export class RocksEngineMutations {
 	readonly records: RuntimeRecords;
 	#change = Promise.withResolvers<void>();
 	readonly #commitWatchers = new Set<(puts: StorageRuntimeMutation["puts"]) => void>();
+	#installation: { installationId: string; principalId: string } | undefined;
+	readonly #agentRoots = new Map<string, string>();
+	readonly #ownedRoots = new Set<string>();
+	#bindingTracking?: Promise<void>;
+
+	async #loadBindingTracking(): Promise<void> {
+		for (const kind of ["identity", "metadata"] as const) {
+			let cursor: string | undefined;
+			do {
+				const page = await this.records.query("kind_primary", [kind], cursor, 100, undefined, true);
+				this.#rememberBindingRows(page.records.filter(row => row.value !== null) as StorageRuntimeMutation["puts"]);
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor);
+		}
+	}
+
+	#rememberBindingRows(rows: StorageRuntimeMutation["puts"]): void {
+		for (const row of rows) {
+			if (row.kind !== "identity") continue;
+			const identity = row.value as unknown as RocksIdentity;
+			this.#agentRoots.set(row.id, identity.root_agent_instance_ref
+				? engineAgentInstanceId(identity.root_agent_instance_ref) : row.id);
+		}
+		for (const row of rows) {
+			if (row.kind !== "metadata" || !row.id.startsWith("semantic-binding:")) continue;
+			const gate = row.value.gate as EngineBindingGate;
+			const id = engineAgentInstanceId(gate.bindingSnapshot.agentInstanceRef);
+			const parent = gate.bindingSnapshot.parentAgentInstanceRef;
+			const root = this.#agentRoots.get(id) ??
+				(parent ? this.#agentRoots.get(engineAgentInstanceId(parent)) : undefined) ?? id;
+			this.#agentRoots.set(id, root);
+			this.#ownedRoots.add(root);
+		}
+	}
+
+	#bindingMutationKey(id: string): string {
+		return `binding-mutation:${this.#agentRoots.get(id) ?? id}`;
+	}
 	constructor(
 		readonly storageClient: StorageClient,
 		readonly projectEvent: (tx: RuntimeTransaction, event: EngineEvent) => Promise<void>,
@@ -171,25 +246,369 @@ export class RocksEngineMutations {
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
+		await (this.#bindingTracking ??= this.#loadBindingTracking());
 		// Conflicts replay `work` on a fresh transaction; only the last one is committed.
 		let committed: RuntimeTransaction | undefined;
 		const result = await this.records.mutate(
 			scope,
-			tx => {
+			async tx => {
 				committed = tx;
-				return work(tx);
+				const result = await work(tx);
+				// Record CAS is the owner's only atomic fence; index revisions cannot be checked by a write.
+				const puts = tx.mutation().puts;
+				const roots = new Set<string>();
+				for (const agent of tx.changedAgentIds(censusState)) {
+					const identity = puts.find(row => row.kind === "identity" && row.id === agent)?.value as unknown as RocksIdentity | undefined;
+					const previousRoot = this.#agentRoots.get(agent) ?? agent;
+					const root = identity?.root_agent_instance_ref
+						? engineAgentInstanceId(identity.root_agent_instance_ref) : previousRoot;
+					if (this.#ownedRoots.has(previousRoot)) roots.add(previousRoot);
+					if (this.#ownedRoots.has(root)) roots.add(root);
+				}
+				for (const row of puts) {
+					if (row.kind !== "metadata" || !row.id.startsWith("semantic-binding:")) continue;
+					const gate = row.value.gate as EngineBindingGate;
+					const snapshot = gate.bindingSnapshot;
+					const agent = engineAgentInstanceId(snapshot.agentInstanceRef);
+					const parent = snapshot.parentAgentInstanceRef;
+					roots.add(this.#agentRoots.get(agent) ??
+						(parent ? this.#agentRoots.get(engineAgentInstanceId(parent)) : undefined) ?? agent);
+				}
+				// ponytail: one checked row per changed owned tree; owner partition CAS if four-attempt contention grows.
+				for (const root of roots)
+					await tx.put("metadata", `binding-mutation:${root}`, { subtype: "binding_mutation" });
+				return result;
 			},
 			dependencies,
 			durability,
 		);
-		if (this.#commitWatchers.size && committed) {
-			const { puts } = committed.mutation();
-			for (const watch of this.#commitWatchers) watch(puts);
+		const mutation = committed?.mutation();
+		if (mutation && (mutation.puts.length || mutation.deletes.length)) {
+			this.#rememberBindingRows(mutation.puts);
+			for (const watch of this.#commitWatchers) watch(mutation.puts);
+			const change = this.#change;
+			this.#change = Promise.withResolvers<void>();
+			change.resolve();
 		}
-		const change = this.#change;
-		this.#change = Promise.withResolvers<void>();
-		change.resolve();
 		return result;
+	}
+
+	verifyInstallation(installationId: string, principalId: string): void {
+		validateRuntimeValue("installationId", installationId);
+		if (!/^grimoire:user:[A-Za-z0-9._~-]+$/.test(principalId))
+			throw new EngineTargetError("invalid_request", "Invalid installation owner");
+		if (this.#installation && (this.#installation.installationId !== installationId ||
+			this.#installation.principalId !== principalId))
+			throw new EngineTargetError("stale_target", "Engine installation cannot change in place");
+		this.#installation = { installationId, principalId };
+	}
+
+	get verifiedInstallationId(): string | undefined {
+		return this.#installation?.installationId;
+	}
+
+	#requireInstallation(snapshot: EngineSemanticBindingSnapshot, principalId?: string): void {
+		validateSemanticBinding(snapshot, snapshot.agentInstanceRef);
+		if (!snapshot.installationId) return;
+		if (!this.#installation) throw new EngineBindingPendingError();
+		const ownerHash = createHash("sha256").update(this.#installation.principalId).digest("hex");
+		if (snapshot.installationId !== this.#installation.installationId)
+			throw new EngineBindingPendingError("Start belongs to another installation");
+		if ((principalId !== undefined && principalId !== this.#installation.principalId) ||
+			!snapshot.agentInstanceRef.startsWith(`grimoire://agents/~u/${ownerHash}/`) ||
+			(snapshot.taskRef?.startsWith("grimoire://tasks/~u/") &&
+				!snapshot.taskRef.startsWith(`grimoire://tasks/~u/${ownerHash}/`)))
+			throw new EngineTargetError("stale_target", "Binding does not belong to this owner");
+	}
+
+	async semanticGate(id: string): Promise<EngineBindingGate | undefined> {
+		return (await this.records.get("metadata", `semantic-binding:${id}`, true)).value?.gate as EngineBindingGate | undefined;
+	}
+
+	async assertSemanticStart(
+		tx: RuntimeTransaction, id: string, snapshot: EngineSemanticBindingSnapshot, principalId?: string,
+	): Promise<void> {
+		this.#requireInstallation(snapshot, principalId);
+		if (!snapshot.installationId) return;
+		if (id !== engineAgentInstanceId(snapshot.agentInstanceRef))
+			throw new EngineTargetError("invalid_request", "Owned Start requires its exact Engine Agent identity");
+		const key = `semantic-binding:${id}`;
+		let gate = (await tx.get<{ gate: EngineBindingGate }>("metadata", key))?.gate;
+		if (!gate) {
+			const identity = await tx.get<RocksIdentity>("identity", id);
+			const enrolledChild = identity && snapshot.parentAgentInstanceRef && snapshot.parentAttemptId &&
+				identity.agent_instance_ref === snapshot.agentInstanceRef &&
+				(identity.parent_agent_instance_ref === null || identity.parent_agent_instance_ref === snapshot.parentAgentInstanceRef) &&
+				identity.parent_agent_instance_id === engineAgentInstanceId(snapshot.parentAgentInstanceRef) &&
+				identity.principal_id === this.#installation!.principalId;
+			if (snapshot.bindingRevision !== 1 || (identity && !enrolledChild) ||
+				await tx.get("metadata", `semantic-birth:${id}`) ||
+				await tx.get<RocksBinding>("binding", id) ||
+				(await tx.query<RocksAttempt>("attempt_agent", [id])).length)
+				throw new EngineBindingPendingError("Owned binding needs exact local adoption");
+			if (snapshot.parentAgentInstanceRef && snapshot.parentAttemptId) {
+				const parentId = engineAgentInstanceId(snapshot.parentAgentInstanceRef);
+				const parentGate = (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${parentId}`))?.gate;
+				const parentAttempt = await tx.get<RocksAttempt>("attempt", snapshot.parentAttemptId);
+				const parent = parentAttempt?.binding_snapshot;
+				if (!parent || parentAttempt?.agent_instance_id !== parentId || parent.agentInstanceRef !== snapshot.parentAgentInstanceRef ||
+					parent.bindingRevision !== snapshot.parentBindingRevision ||
+					parent.installationId !== snapshot.installationId ||
+					parent.taskRef !== snapshot.taskRef || parent.workStepId !== snapshot.workStepId)
+					throw new EngineTargetError("stale_target", "Child birth differs from its exact admitted parent");
+				if (parentGate?.phase !== "open") throw new EngineBindingPendingError("Parent binding is closed");
+				if (!sameSemanticBinding(parentGate.bindingSnapshot, parent))
+					throw new EngineTargetError("stale_target", "Child birth belongs to a retired parent binding");
+				if (identity && identity.parent_agent_instance_ref === null)
+					await tx.put("identity", id, { ...identity, parent_agent_instance_ref: snapshot.parentAgentInstanceRef });
+			}
+			gate = { bindingSnapshot: snapshot, phase: "open", operationId: null, proposalHash: null,
+				gateRevision: 0, censusMutationRevision: 0 };
+			await tx.put("metadata", key, { subtype: "semantic_binding", gate });
+			await tx.put("metadata", `semantic-birth:${id}`, { subtype: "semantic_binding", established: true });
+		}
+		validateRuntimeValue("bindingGate", gate);
+		if (gate.phase !== "open") throw new EngineBindingPendingError();
+		if (!sameSemanticBinding(gate.bindingSnapshot, snapshot))
+			throw new EngineTargetError("stale_target", "Start binding differs from the adopted binding");
+	}
+
+	async checkSemanticStart(id: string, snapshot?: EngineSemanticBindingSnapshot, principalId?: string): Promise<void> {
+		if (snapshot) await this.mutation(id, tx => this.assertSemanticStart(tx, id, snapshot, principalId));
+	}
+
+	async bindingPrepare(gate: EngineBindingGate): Promise<EngineBindingGate> {
+		validateRuntimeValue("bindingGate", gate);
+		this.#requireInstallation(gate.bindingSnapshot);
+		if (!gate.bindingSnapshot.installationId || gate.phase !== "preparing" || gate.committedTarget)
+			throw new EngineTargetError("invalid_request", "Prepare requires a closed owned old binding");
+		const id = engineAgentInstanceId(gate.bindingSnapshot.agentInstanceRef);
+		return this.mutation(id, async tx => {
+			const key = `semantic-binding:${id}`;
+			const old = (await tx.get<{ gate: EngineBindingGate }>("metadata", key))?.gate;
+			const retained = await tx.get<RocksBinding>("binding", id);
+			if (!old && (retained || await tx.get<RocksIdentity>("identity", id) ||
+				await tx.get("metadata", `semantic-birth:${id}`)))
+				throw new EngineBindingPendingError("Retained owned Agent lost its semantic gate");
+			const terminal = await tx.get<{ result: EngineBindingResult; gate: EngineBindingGate; old: EngineSemanticBindingSnapshot }>(
+				"metadata", `binding-terminal:${id}:${gate.operationId}`);
+			if (terminal) {
+				if (terminal.result.proposal_hash !== gate.proposalHash ||
+					!sameSemanticBinding(terminal.old, gate.bindingSnapshot))
+					throw new EngineTargetError("stale_target", "Terminal binding operation changed");
+				return terminal.gate;
+			}
+			if (old && old.phase !== "open") {
+				if (old.phase === "preparing" && old.operationId === gate.operationId &&
+					old.proposalHash === gate.proposalHash && sameSemanticBinding(old.bindingSnapshot, gate.bindingSnapshot))
+					return old;
+				throw new EngineTargetError("stale_target", "Another binding operation owns the gate");
+			}
+			if ((old && !sameSemanticBinding(old.bindingSnapshot, gate.bindingSnapshot)) ||
+				(!old && retained?.binding_snapshot && !sameSemanticBinding(retained.binding_snapshot, gate.bindingSnapshot)))
+				throw new EngineTargetError("stale_target", "Prepare binding differs from the local binding");
+			const next: EngineBindingGate = { ...gate, gateRevision: (old?.gateRevision ?? 0) + 1,
+				censusMutationRevision: old?.censusMutationRevision ?? 0 };
+			validateRuntimeValue("bindingGate", next);
+			await tx.put("metadata", key, { subtype: "semantic_binding", gate: next });
+			await tx.put("metadata", `semantic-birth:${id}`, { subtype: "semantic_binding", established: true });
+			if (await tx.get<RocksIdentity>("identity", id))
+				await this.identityEvent(tx, id, gate.operationId!, "reconciled", { semanticBinding: true });
+			return next;
+		});
+	}
+
+	async bindingTransition(action: "adopt" | "activate" | "abort", result: EngineBindingResult,
+		requested?: EngineBindingGate): Promise<EngineBindingGate> {
+		validateRuntimeValue("bindingResult", result);
+		if (requested) validateRuntimeValue("bindingGate", requested);
+		const id = engineAgentInstanceId(result.agent_ref);
+		const transitioned = await this.mutation(id, async tx => {
+			const key = `semantic-binding:${id}`;
+			const gate = (await tx.get<{ gate: EngineBindingGate }>("metadata", key))?.gate;
+			if (!gate) throw new EngineBindingPendingError("Binding gate is unavailable");
+			this.#requireInstallation(gate.bindingSnapshot);
+			const target: EngineSemanticBindingSnapshot = { ...gate.bindingSnapshot,
+				taskRef: result.task_ref, workStepId: result.work_step_id, bindingRevision: result.binding_revision };
+			if (result.installation_id !== gate.bindingSnapshot.installationId)
+				throw new EngineTargetError("stale_target", "Binding installation changed");
+			const resultKey = `binding-result:${id}:${result.operation_id}:${action}`;
+			const last = await tx.get<{ result: EngineBindingResult; gate: EngineBindingGate }>("metadata", resultKey);
+			if (last) {
+				if (!sameBindingResult(last.result, result) ||
+					(requested && (requested.operationId !== result.operation_id ||
+						requested.proposalHash !== result.proposal_hash ||
+						!sameSemanticBinding(requested.bindingSnapshot, last.gate.bindingSnapshot) ||
+						!sameSemanticBinding(requested.committedTarget, last.gate.committedTarget))))
+					throw new EngineTargetError("stale_target", "Replayed binding operation changed");
+				return last.gate;
+			}
+			if (gate.operationId !== result.operation_id || gate.proposalHash !== result.proposal_hash)
+				throw new EngineTargetError("stale_target", "Binding operation changed");
+			const committedKey = `binding-result:${id}:${result.operation_id}:commit-pending`;
+			const committed = await tx.get<{ result: EngineBindingResult }>("metadata", committedKey);
+			if (committed && (action === "abort" || (action === "adopt" && !sameBindingResult(committed.result, result))))
+				throw new EngineTargetError("stale_target", "Committed binding result changed");
+			let next: EngineBindingGate;
+			if (action === "adopt") {
+				if (result.status !== "committed" || result.phase !== "committed_await_adopt" ||
+					gate.phase !== "preparing" || target.bindingRevision !== gate.bindingSnapshot.bindingRevision + 1 ||
+					(target.taskRef === gate.bindingSnapshot.taskRef && target.workStepId === gate.bindingSnapshot.workStepId) ||
+					!requested || requested.phase !== "committed_closed" ||
+					!sameSemanticBinding(requested.bindingSnapshot, gate.bindingSnapshot) ||
+					!sameSemanticBinding(requested.committedTarget, target) ||
+					requested.operationId !== gate.operationId || requested.proposalHash !== gate.proposalHash)
+					throw new EngineTargetError("stale_target", "Adoption requires the exact committed successor");
+				const scan = await tx.get<{ checkpoint: EngineBindingCheckpoint }>("metadata", `binding-census:${id}`);
+				if (!await this.#freshBindingCheckpoint(tx, id, gate, scan?.checkpoint, gate.bindingSnapshot.bindingRevision)) {
+					// Persist the canonical commitment even when the old-binding cut needs recertification.
+					// The caller keeps committed_closed; the Engine's preparing gate still denies all new work.
+					if (!committed)
+						await tx.put("metadata", committedKey, { subtype: "binding_result", result, gate });
+					return null;
+				}
+				next = { ...gate, phase: "committed_closed", committedTarget: target };
+			} else if (action === "activate") {
+				if (result.status !== "adopted" || result.phase !== "active" ||
+					gate.phase !== "committed_closed" || !sameSemanticBinding(gate.committedTarget, target))
+					throw new EngineTargetError("stale_target", "Activation requires canonical adoption");
+				const activationKey = `binding-result:${id}:${result.operation_id}:activate-pending`;
+				const activation = await tx.get<{ result: EngineBindingResult }>("metadata", activationKey);
+				if (activation && !sameBindingResult(activation.result, result))
+					throw new EngineTargetError("stale_target", "Canonical adoption result changed");
+				const scan = await tx.get<{ checkpoint: EngineBindingCheckpoint }>("metadata", `binding-census:${id}`);
+				if (!await this.#freshBindingCheckpoint(tx, id, gate, scan?.checkpoint, target.bindingRevision)) {
+					if (!activation)
+						await tx.put("metadata", activationKey, { subtype: "binding_result", result, gate });
+					return null;
+				}
+				next = { ...gate, bindingSnapshot: target, phase: "open", operationId: null, proposalHash: null };
+				delete next.committedTarget;
+			} else {
+				if (result.status !== "aborted" || result.phase !== "active" ||
+					gate.phase !== "preparing" || !sameSemanticBinding(gate.bindingSnapshot, target))
+					throw new EngineTargetError("stale_target", "Only canonical old-binding abort may open the gate");
+				next = { ...gate, phase: "open", operationId: null, proposalHash: null };
+			}
+			next.gateRevision++;
+			validateRuntimeValue("bindingGate", next);
+			await tx.put("metadata", key, { subtype: "semantic_binding", gate: next });
+			await tx.put("metadata", resultKey, { subtype: "binding_result", result, gate: next });
+			if (action !== "adopt")
+				await tx.put("metadata", `binding-terminal:${id}:${result.operation_id}`,
+					{ subtype: "binding_result", result, gate: next, old: gate.bindingSnapshot });
+			if (await tx.get<RocksIdentity>("identity", id))
+				await this.identityEvent(tx, id, result.operation_id, "reconciled", { semanticBinding: true });
+			return next;
+		});
+		if (!transitioned)
+			throw new EngineBindingPendingError("Binding transition requires a fresh complete zero census");
+		return transitioned;
+	}
+
+	async #freshBindingCheckpoint(tx: RuntimeTransaction, id: string, gate: EngineBindingGate,
+		checkpoint: EngineBindingCheckpoint | undefined, bindingRevision: number): Promise<boolean> {
+		return checkpoint?.status === "complete" && checkpoint.next_cursor === null &&
+			checkpoint.agent_ref === gate.bindingSnapshot.agentInstanceRef &&
+			checkpoint.installation_id === gate.bindingSnapshot.installationId &&
+			checkpoint.operation_id === gate.operationId && checkpoint.proposal_hash === gate.proposalHash &&
+			checkpoint.binding_revision === bindingRevision && checkpoint.gate_revision === gate.gateRevision &&
+			checkpoint.nonterminal_starts === 0 && checkpoint.nonterminal_attempts === 0 &&
+			checkpoint.open_effects === 0 && checkpoint.unsettled_children === 0 && checkpoint.mutable_pending_writes === 0 &&
+			checkpoint.census_mutation_revision === await tx.revision("metadata", this.#bindingMutationKey(id)) &&
+			checkpoint.engine_generation === (await tx.get<{ generation: number }>("metadata", "engine"))?.generation;
+	}
+
+	async bindingCensus(params: {
+		agentInstanceRef: string; installationId: string; operationId: string; proposalHash: string; bindingRevision: number;
+	}, generation: number): Promise<EngineBindingCheckpoint> {
+		const id = engineAgentInstanceId(params.agentInstanceRef);
+		return this.mutation(id, async tx => {
+			const gate = (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${id}`))?.gate;
+			if (!gate || gate.phase === "open") throw new EngineBindingPendingError("No closed binding gate");
+			this.#requireInstallation(gate.bindingSnapshot);
+			if (gate.bindingSnapshot.agentInstanceRef !== params.agentInstanceRef ||
+				gate.bindingSnapshot.installationId !== params.installationId ||
+				(gate.committedTarget ?? gate.bindingSnapshot).bindingRevision !== params.bindingRevision ||
+				gate.operationId !== params.operationId || gate.proposalHash !== params.proposalHash)
+				throw new EngineTargetError("stale_target", "Census operation changed");
+			const key = `binding-census:${id}`;
+			type Frame = { id: string; ref: string; stage: number; after?: Array<string | number | null> };
+			type Scan = { checkpoint: EngineBindingCheckpoint; stack: Frame[] };
+			const marker = this.#bindingMutationKey(id);
+			const revision = await tx.revision("metadata", marker);
+			let scan = await tx.get<Scan>("metadata", key);
+			if (!scan?.stack || scan.checkpoint.gate_revision !== gate.gateRevision ||
+				scan.checkpoint.census_mutation_revision !== revision ||
+				scan.checkpoint.engine_generation !== generation) {
+				scan = { stack: [{ id, ref: params.agentInstanceRef, stage: 0 }], checkpoint: {
+					agent_ref: params.agentInstanceRef, installation_id: params.installationId,
+					operation_id: params.operationId, proposal_hash: params.proposalHash, binding_revision: params.bindingRevision,
+					gate_revision: gate.gateRevision, census_mutation_revision: revision,
+					runtime_contract_revision: 16, engine_generation: generation, status: "unknown",
+					nonterminal_starts: 0, nonterminal_attempts: 0, open_effects: 0, unsettled_children: 0,
+					mutable_pending_writes: 0, next_cursor: null } };
+			}
+			// Depth-first, bounded partition pages. Unknown/unrelated identities and events are never visited.
+			const frame = scan.stack.at(-1);
+			if (frame) {
+				const identity = (await this.records.get("identity", frame.id, true)).value as unknown as RocksIdentity | undefined;
+				const parent = scan.stack.at(-2);
+				if ((identity && identity.agent_instance_ref !== frame.ref) ||
+					(parent && (!identity || identity.parent_agent_instance_id !== parent.id ||
+						identity.parent_agent_instance_ref !== parent.ref ||
+						identity.principal_id !== this.#installation!.principalId)))
+					throw new EngineBindingPendingError("Census descendant ancestry is unavailable");
+				const page = await this.records.query(frame.stage === 0 ? "agent_records" : "identity_parent",
+					[frame.id], undefined, frame.stage === 0 ? 25 : 1, frame.after, true);
+				if (frame.stage === 0) {
+					for (const row of page.records) {
+						const value = row.value;
+						if (!value || value.agent_instance_id !== frame.id)
+							throw new EngineBindingPendingError("Census encountered a broken descendant record");
+						let counter: "nonterminal_starts" | "nonterminal_attempts" | "open_effects" | "mutable_pending_writes";
+						if (row.kind === "command" && value.state === "received") counter = "nonterminal_starts";
+						else if (row.kind === "attempt" && !terminal.has(value.state as EngineAttemptState)) counter = "nonterminal_attempts";
+						else if (row.kind === "effect" && value.state !== "settled") counter = "open_effects";
+						else if (row.kind === "inbox" && value.subtype === "item" && value.disposition === "pending") counter = "mutable_pending_writes";
+						else if (row.kind === "event") {
+							const event = value as unknown as RocksEvent;
+							if (event.kind === "reconciled" && event.payload?.semanticBinding === true) continue;
+							if ((await this.records.get("delivery", `hosted-binding:${event.eventId}`, true)).value?.state === "delivered") continue;
+							counter = "mutable_pending_writes";
+						} else continue;
+						scan.checkpoint[frame.id === id ? counter : "unsettled_children"]++;
+					}
+					if (page.nextCursor) frame.after = [page.records.at(-1)!.id];
+					else {
+						delete frame.after;
+						frame.stage = 1;
+					}
+				} else {
+					const child = page.records[0];
+					if (!child) scan.stack.pop();
+					else {
+						if (!identity) throw new EngineBindingPendingError("Census descendant parent is unavailable");
+						const childIdentity = child.value as unknown as RocksIdentity;
+						if (!childIdentity || !childIdentity.agent_instance_ref || scan.stack.some(ancestor => ancestor.id === child.id))
+							throw new EngineBindingPendingError("Census descendant ancestry is invalid");
+						frame.after = [child.id];
+						scan.stack.push({ id: child.id, ref: childIdentity.agent_instance_ref, stage: 0 });
+					}
+				}
+			}
+			if (((await this.records.get("metadata", marker, true)).revision ?? 0) !== revision)
+				throw new EngineBindingPendingError("Census changed during its scoped page");
+			const complete = scan.stack.length === 0;
+			const busy = scan.checkpoint.nonterminal_starts + scan.checkpoint.nonterminal_attempts +
+				scan.checkpoint.open_effects + scan.checkpoint.unsettled_children + scan.checkpoint.mutable_pending_writes > 0;
+			scan.checkpoint.status = busy ? "busy" : complete ? "complete" : "unknown";
+			scan.checkpoint.next_cursor = complete ? null :
+				`scan_${gate.gateRevision}_${revision}_${generation}_${createHash("sha256").update(storageCanonicalJson(scan.stack)).digest("hex")}`;
+			validateRuntimeValue("bindingCheckpoint", scan.checkpoint);
+			await tx.put("metadata", key, { ...scan, subtype: "semantic_binding" });
+			return scan.checkpoint;
+		});
 	}
 	async nextEngineGeneration(): Promise<number> {
 		const floorPath = process.env.GRIMOIRE_ENGINE_GENERATION_FLOOR_FILE;
@@ -721,11 +1140,29 @@ export class RocksEngineMutations {
 			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
 				throw new EngineTargetError("stale_target", "Command processor generation changed");
 			const old = await tx.get<RocksCommand>("command", command.commandId);
+			const ownedStart = command.operation === "start" && Boolean(command.bindingSnapshot?.installationId);
+			if (!old && ownedStart && command.bindingSnapshot?.installationId !== this.#installation?.installationId)
+				return { status: "binding_pending" };
 			if (old) {
 				if (old.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
 				if (old.state === "settled") {
 					if (!old.receipt) throw new Error("Settled command has no receipt");
 					return { status: "replay", receipt: boundedReceipt(old.receipt) };
+				}
+				if (command.operation === "start" && command.bindingSnapshot) {
+					try {
+						await this.assertSemanticStart(tx, command.agentInstanceId, command.bindingSnapshot, command.principalId);
+					} catch (error) {
+						if (!(error instanceof EngineBindingPendingError)) throw error;
+						if (!old.binding_pending || old.processor_generation !== null)
+							await tx.put("command", command.commandId, { ...old, binding_pending: true, processor_generation: null });
+						return { status: "binding_pending" };
+					}
+					if (old.binding_pending) {
+						if (old.processor_generation === processorGeneration) return { status: "in_progress" };
+						await tx.put("command", command.commandId, { ...old, processor_generation: processorGeneration });
+						return { status: "claimed" };
+					}
 				}
 				if (old.processor_generation === processorGeneration) return { status: "in_progress" };
 				if (old.processor_generation !== null && old.operation === "resume") {
@@ -754,9 +1191,16 @@ export class RocksEngineMutations {
 				throw new EngineTargetError("invalid_request", "Hosted Agent Start requires its admitted bindingSnapshot");
 			if (lifecycle?.deleted_at || lifecycle?.archived_at)
 				throw new EngineTargetError("stale_target", "Chat is archived or deleted");
+			let bindingPending = false;
 			if (command.bindingSnapshot) {
 				if (command.operation === "start") {
-					validateS0Binding(command.bindingSnapshot, command.agentInstanceRef ?? "");
+					validateSemanticBinding(command.bindingSnapshot, command.agentInstanceRef ?? "");
+					try {
+						await this.assertSemanticStart(tx, command.agentInstanceId, command.bindingSnapshot, command.principalId);
+					} catch (error) {
+						if (!(error instanceof EngineBindingPendingError)) throw error;
+						bindingPending = true;
+					}
 					const prior = await tx.get<RocksBinding>("binding", command.agentInstanceId);
 					if (prior?.binding_snapshot?.bindingRevision === 0 &&
 						!sameSemanticBinding(prior.binding_snapshot, command.bindingSnapshot))
@@ -774,7 +1218,7 @@ export class RocksEngineMutations {
 			await tx.put("command", command.commandId, {
 				command_id: command.commandId,
 				agent_instance_id: command.agentInstanceId,
-				processor_generation: processorGeneration,
+				processor_generation: bindingPending ? null : processorGeneration,
 				state: "received",
 				canonical_hash: command.canonicalHash,
 				payload_bytes: bytes,
@@ -786,6 +1230,7 @@ export class RocksEngineMutations {
 				received_at: Date.now(),
 				updated_at: Date.now(),
 				pending_accounted: true,
+				binding_pending: bindingPending || (ownedStart && command.engineGeneration < processorGeneration),
 			} satisfies RocksCommand);
 			if (command.operation === "start") {
 				const cancelled = await tx.get<StartCancellation>("metadata", `start-cancellation:${command.commandId}`);
@@ -804,8 +1249,9 @@ export class RocksEngineMutations {
 					return { status: "replay", receipt };
 				}
 			}
+			if (bindingPending) return { status: "binding_pending" };
 			if (command.browserPayloadHash) await this.receiptEvent(tx, command.commandId);
-			if (command.engineGeneration < processorGeneration) {
+			if (command.engineGeneration < processorGeneration && !ownedStart) {
 				return {
 					status: "replay",
 					receipt: await this.settleInterrupted(tx, command.commandId, processorGeneration),
@@ -995,6 +1441,12 @@ export class RocksEngineMutations {
 			if (row?.state === "received" && row.canonical_hash === hash && row.processor_generation === processor)
 				await tx.put("command", id, { ...row, processor_generation: null });
 		});
+	}
+	async canRearmBindingStart(id: string, processor: number): Promise<boolean> {
+		const row = (await this.records.get("command", id, true)).value as unknown as RocksCommand | undefined;
+		return Boolean(row?.binding_pending && row.operation === "start" && row.state === "received" &&
+			row.processor_generation === processor && row.identity.attemptId &&
+			!(await this.records.get("attempt", row.identity.attemptId, true)).value);
 	}
 	async settleCommand(id: string, hash: string, receipt: EngineCommandReceipt): Promise<void> {
 		await this.mutation(`command:${id}`, tx => this.settle(tx, id, receipt, hash, true));
@@ -1188,7 +1640,11 @@ export class RocksEngineMutations {
 		payload: Record<string, unknown>,
 	): Promise<EngineEvent> {
 		const identity = await tx.get<RocksIdentity>("identity", id);
-		const binding = await tx.get<RocksBinding>("binding", id);
+		const retained = await tx.get<RocksBinding>("binding", id);
+		const gate = payload.semanticBinding === true
+			? (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${id}`))?.gate : undefined;
+		const binding = gate && !sameSemanticBinding(retained?.binding_snapshot, gate.committedTarget ?? gate.bindingSnapshot)
+			? undefined : retained;
 		const engine = await tx.get<{ generation: number }>("metadata", "engine");
 		return this.append(
 			tx,
@@ -1356,6 +1812,8 @@ export class RocksEngineMutations {
 				const engine = await tx.get<{ generation: number }>("metadata", "engine");
 				if (engine?.generation !== binding.engineGeneration)
 					throw new EngineAttemptConflictError(binding.attemptId);
+				if (options.startIntent && binding.bindingSnapshot)
+					await this.assertSemanticStart(tx, binding.agentInstanceId, binding.bindingSnapshot);
 				if (options.intentGuard)
 					await this.checkIntent(
 						tx,
@@ -1934,6 +2392,11 @@ export class RocksEngineMutations {
 					throw new EngineInboxConflictError("Inbox session changed");
 				return { item: old, created: false };
 			}
+			const semantic = (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${target.agentInstanceId}`))?.gate;
+			if (semantic) {
+				this.#requireInstallation(semantic.bindingSnapshot);
+				if (semantic.phase !== "open") throw new EngineBindingPendingError("Binding blocks new queued work");
+			}
 			const attachmentDescriptors: EngineAttachment[] = original?.attachment_descriptors ?? [];
 			if (!original && attachments) {
 				for (const uploadId of attachments.uploadIds) {
@@ -2221,6 +2684,8 @@ export class RocksEngineMutations {
 			for (const record of page.records) {
 				const item = record.value as unknown as RocksInbox;
 				const binding = await this.getBinding(item.agent_instance_id);
+				const gate = await this.semanticGate(item.agent_instance_id);
+				if (gate && (!this.#installation || gate.phase !== "open")) continue;
 				if (!binding || binding.manualHold || binding.state === "running") continue;
 				const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
 					.records[0];
@@ -2241,6 +2706,8 @@ export class RocksEngineMutations {
 				if ((observed.deliver_at ?? observed.createdAt) > now) continue;
 				const event = await this.mutation(observed.agent_instance_id, async tx => {
 					const item = await tx.get<RocksInbox>("inbox", record.id);
+					const gate = (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${observed.agent_instance_id}`))?.gate;
+					if (gate && (!this.#installation || gate.phase !== "open")) return;
 					if (
 						item?.disposition !== "pending" ||
 						item.wake_delivered_at !== null ||
@@ -2360,11 +2827,23 @@ export class RocksEngineMutations {
 			};
 			const pendingInbox = await this.records.query("inbox_agent_pending", [id], undefined, 1);
 			if (pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation)) await ensureHold();
-			// Requery the shrinking pending index; never carry its mutable cursor across a write.
+			// Stable ordering skips protected Starts without looping on the unchanged pending row.
+			let commandAfter: Array<string | number | null> | undefined;
 			for (;;) {
-				const pending = await this.records.query("command_agent_pending", [id], undefined, 1);
+				const pending = await this.records.query("command_agent_pending", [id], undefined, 1, commandAfter);
 				const command = pending.records[0]?.value as unknown as RocksCommand | undefined;
-				if (!command || command.engine_generation >= generation) break;
+				if (!command) break;
+				commandAfter = [command.received_at, command.command_id];
+				if (command.engine_generation >= generation) continue;
+				if (command.operation === "start" && command.identity.bindingSnapshot?.installationId &&
+					(!command.identity.attemptId || !(await this.getAttempt(command.identity.attemptId)))) {
+					await this.mutation(id, async tx => {
+						const current = await tx.get<RocksCommand>("command", command.command_id);
+						if (current?.state === "received" && (!current.binding_pending || current.processor_generation !== null))
+							await tx.put("command", command.command_id, { ...current, binding_pending: true, processor_generation: null });
+					});
+					continue;
+				}
 				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
 				await ensureHold();
 				await this.mutation(id, async tx => {
@@ -2505,8 +2984,15 @@ export class RocksEngineMutations {
 	}
 	async markEventsDelivered(ids: readonly number[], sink: string): Promise<void> {
 		await this.mutation(`delivery:${sink}`, async tx => {
-			for (const id of ids)
-				await tx.put("delivery", `${sink}:${id}`, { event_id: id, sink_id: sink, state: "delivered" });
+			for (const id of ids) {
+				const agent = sink === "hosted-binding"
+					? (await tx.get<RocksEvent>("event", String(id)))?.agent_instance_id : undefined;
+				const identity = agent ? await tx.get<RocksIdentity>("identity", agent) : undefined;
+				await tx.put("delivery", `${sink}:${id}`, {
+					event_id: id, sink_id: sink, state: "delivered",
+					...(agent && typeof identity?.deleted_at !== "number" ? { agent_instance_id: agent } : {}),
+				});
+			}
 		});
 	}
 	async markEventPublished(id: number): Promise<void> {

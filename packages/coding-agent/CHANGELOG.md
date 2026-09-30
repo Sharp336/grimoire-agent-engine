@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled `agent_binding.v1` on the unchanged runtime16 contract: installation-verified owned Starts, durable prepare/census/adopt/activate/abort gates, installation-scoped hosted localization, and fresh native context after same-installation semantic rebind. Legacy project bindings remain immutable.
+
 ### Removed
 
 - Optional voice runtime and associated native audio bindings; automatic Codex credit redemption, excess uploaders, Ruby/Julia eval, built-in opinionated rules, and terminal animation extras.

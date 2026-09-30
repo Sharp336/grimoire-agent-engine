@@ -4,6 +4,9 @@ import * as net from "node:net";
 import * as path from "node:path";
 import {
 	type EngineAttemptState,
+	type EngineBindingGate,
+	type EngineBindingResult,
+	EngineBindingPendingError,
 	type EngineEvent,
 	type EngineInboxMutation,
 	type EngineInboxSource,
@@ -40,6 +43,12 @@ export const ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS = 48_000;
 
 export type EngineControlQueryMethod =
 	| "capabilities"
+	| "installation.verify"
+	| "binding.prepare"
+	| "binding.census"
+	| "binding.adopt"
+	| "binding.activate"
+	| "binding.abort"
 	| "runtime.capabilities"
 	| "runtime.snapshot"
 	| "runtime.target"
@@ -294,6 +303,7 @@ async function handleFrame(
 		const result = await options.runtime.runControlQuery(() => dispatchRequest(request, options, signal));
 		return success(requestId, result);
 	} catch (error) {
+		if (error instanceof EngineBindingPendingError) return failure(requestId, error.code, error.message, true);
 		if (error instanceof RuntimeQueryError) return failure(requestId, error.code, error.message, false, error.work);
 		if (error instanceof EngineTargetError) return failure(requestId, error.code, error.message, false);
 		if (error instanceof EngineCommandConflictError)
@@ -309,6 +319,30 @@ async function dispatchRequest(
 ): Promise<unknown> {
 	const params = request.params ?? {};
 	switch (request.method) {
+		case "installation.verify": {
+			if (params.deviceId !== options.deviceId || params.engineId !== options.engineId ||
+				params.runtimeContractRevision !== 16 || params.runtimeContractHash !== RUNTIME_PROTOCOL_HASH)
+				throw new EngineTargetError("stale_target", "Installation verification contour mismatch");
+			const installationId = requiredString(params, "installationId");
+			options.runtime.verifyInstallation(installationId, requiredString(params, "principalId"));
+			return { installationId, verified: true };
+		}
+		case "binding.prepare":
+			return { gate: await options.runtime.prepareSemanticBinding(params.gate as EngineBindingGate) };
+		case "binding.census":
+			return options.runtime.store.bindingCensus({
+				agentInstanceRef: requiredString(params, "agentInstanceRef"),
+				installationId: requiredString(params, "installationId"),
+				operationId: requiredString(params, "operationId"),
+				proposalHash: requiredString(params, "proposalHash"),
+				bindingRevision: requiredInteger(params, "bindingRevision"),
+			}, options.runtime.engineGeneration);
+		case "binding.adopt":
+			return { gate: await options.runtime.adoptSemanticBinding(params.gate as EngineBindingGate, params.result as EngineBindingResult) };
+		case "binding.activate":
+		case "binding.abort":
+			return { gate: await options.runtime.finishSemanticBinding(
+				request.method === "binding.activate" ? "activate" : "abort", params.result as EngineBindingResult) };
 		case "runtime.capabilities":
 			return {
 				...runtimeCapabilities(),
@@ -640,6 +674,7 @@ export async function runEngineCommand(
 		await Bun.sleep(25);
 		admission = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
 	}
+	if (admission.status === "binding_pending") throw new EngineBindingPendingError();
 	if (admission.status === "replay") {
 		if (admission.receipt.outcome === "rejected") {
 			throw new EngineTargetError(
@@ -670,6 +705,10 @@ export async function runEngineCommand(
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, receipt);
 		return receipt;
 	} catch (error) {
+		if (error instanceof EngineBindingPendingError) {
+			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
+			throw error;
+		}
 		const message = error instanceof Error ? error.message.slice(0, 2_048) : String(error).slice(0, 2_048);
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
 			outcome: "rejected",
@@ -1109,6 +1148,12 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 	if (
 		![
 			"capabilities",
+			"installation.verify",
+			"binding.prepare",
+			"binding.census",
+			"binding.adopt",
+			"binding.activate",
+			"binding.abort",
 			"runtime.capabilities",
 			"runtime.snapshot",
 			"runtime.target",

@@ -26,7 +26,7 @@ import type {
 	EngineResolveInputRequest,
 	EngineSemanticBindingSnapshot,
 } from "./contracts";
-import { EngineTargetError, validateCommandContext, validateS0Binding } from "./contracts";
+import { EngineBindingPendingError, EngineTargetError, validateCommandContext, validateSemanticBinding } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
@@ -164,6 +164,8 @@ export class NatsEngineAdapter {
 	#disposed = false;
 	/** Failed deliveries per command in this Engine generation; a restart settles leftovers as interrupted. */
 	readonly #commandFailures = new Map<string, number>();
+	/** Only actual peer failures spend the budget; binding waits and broker redeliveries do not. */
+	readonly #messageFailures = new Map<number, number>();
 	/** Claims this adapter gave up whose durable release failed: the row still names this generation, but no handler owns it. */
 	readonly #orphanedClaims = new Set<string>();
 
@@ -496,6 +498,7 @@ export class NatsEngineAdapter {
 			await this.#options.authorizeCommand(command);
 			identity = commandIdentity(command);
 			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
+			if (admission.status === "binding_pending") throw new EngineBindingPendingError();
 			// Admission is durable before dispatch. A busy event sink must not hold
 			// command application behind the entire device's unrelated event backlog.
 			this.wakeEvents();
@@ -523,6 +526,11 @@ export class NatsEngineAdapter {
 			this.#commandFailures.delete(command.commandId);
 			message.ack();
 		} catch (error) {
+			if (error instanceof EngineBindingPendingError) {
+				if (claimed && identity) await this.#releaseClaim(identity);
+				message.nak(1_000);
+				return;
+			}
 			if (error instanceof StaleEngineLeaseError) {
 				message.nak(250);
 				for (const consumer of this.#commandMessages) void consumer.close();
@@ -705,9 +713,15 @@ export class NatsEngineAdapter {
 					replyToMessageId: envelope.replyToMessageId,
 				});
 				if (receipt.outcome === "failed") this.#retryMessage(message, receipt.error ?? "delivery failed");
-				else message.ack();
+				else {
+					this.#messageFailures.delete(message.seq);
+					message.ack();
+				}
 			} catch (error) {
-				if (error instanceof PoisonMessageError || error instanceof EngineTargetError) {
+				if (error instanceof EngineBindingPendingError) {
+					message.nak(1_000);
+				} else if (error instanceof PoisonMessageError || error instanceof EngineTargetError) {
+					this.#messageFailures.delete(message.seq);
 					message.term(error.message.slice(0, 128));
 				} else {
 					this.#retryMessage(message, error instanceof Error ? error.message : String(error));
@@ -719,9 +733,14 @@ export class NatsEngineAdapter {
 
 	/** A peer message that keeps failing ends after the same bounded delivery budget as a command. */
 	#retryMessage(message: JsMsg, reason: string): void {
-		const deliveries = message.info.deliveryCount;
-		if (deliveries < (this.#options.commandAttempts ?? 5)) message.nak(1_000);
-		else message.term(`Delivery failed after ${deliveries} attempts: ${reason}`.slice(0, 128));
+		const failures = (this.#messageFailures.get(message.seq) ?? 0) + 1;
+		if (failures < (this.#options.commandAttempts ?? 5)) {
+			this.#messageFailures.set(message.seq, failures);
+			message.nak(1_000);
+		} else {
+			this.#messageFailures.delete(message.seq);
+			message.term(`Delivery failed after ${failures} attempts: ${reason}`.slice(0, 128));
+		}
 	}
 
 	#parseMessage(message: JsMsg, recipientId: string): AgentMessageEnvelope {
@@ -842,7 +861,8 @@ export async function dispatchEngineCommand(options: {
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
 	legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
 }): Promise<unknown> {
-	const { runtime, command } = options;
+	const { runtime } = options;
+	let { command } = options;
 	if (command.browserPayloadHash) {
 		validateRuntimeValue("agi", command.agentInstanceRef);
 		validateRuntimeValue("id", command.commandId);
@@ -872,7 +892,9 @@ export async function dispatchEngineCommand(options: {
 		throw new EngineTargetError("invalid_request", "context is supported only for start, steer and resume");
 	}
 	if (command.engineGeneration !== runtime.engineGeneration) {
-		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
+		if (await runtime.store.canRearmBindingStart(command.commandId, runtime.engineGeneration))
+			command = { ...command, engineGeneration: runtime.engineGeneration };
+		else throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
 	}
 	const attachments =
 		command.payload.attachmentUploadIds === undefined
@@ -1013,7 +1035,7 @@ export async function dispatchEngineCommand(options: {
 					...(started.queueId ? { queueId: started.queueId, queueRevision: started.queueRevision } : {}),
 				};
 			} catch (error) {
-				if (error instanceof EngineTargetError) throw error;
+				if (error instanceof EngineTargetError || error instanceof EngineBindingPendingError) throw error;
 				throw new EngineTargetError(
 					"launch_failed",
 					publicFailureMessage("Agent session initialization failed", error),
@@ -1223,7 +1245,7 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 	if (command.browserTarget) validateRuntimeValue("target", command.browserTarget);
 	if (command.bindingSnapshot) validateRuntimeValue("bindingSnapshot", command.bindingSnapshot);
 	if (command.op === "start" && command.agentInstanceRef && command.bindingSnapshot)
-		validateS0Binding(command.bindingSnapshot, command.agentInstanceRef);
+		validateSemanticBinding(command.bindingSnapshot, command.agentInstanceRef);
 	const payloadHash = sha256(stableStringifyJson(command.payload));
 	const canonical = {
 		op: command.op,

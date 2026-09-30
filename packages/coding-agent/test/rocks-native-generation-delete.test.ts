@@ -47,6 +47,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			};
 			expect(await store.admitCommand(command, generation)).toEqual({ status: "claimed" });
 			const generations = Array.from({ length: 25 }, (_, index) => `generation-${index}`);
+			let deliveryEventId = 0;
 			for (const [index, nativeGeneration] of generations.entries()) {
 				await client.write({
 					operationId: `write-${suffix}-${nativeGeneration}`,
@@ -89,9 +90,10 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 					byteBoundary: 0,
 					native: { familyId, generationId: nativeGeneration, throughSeq: 1, incarnation: client.incarnation },
 				};
-				await store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [], {
+				const events = await store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [], {
 					transcriptCheckpoint: checkpoint,
 				});
+				deliveryEventId = events[0].eventId;
 			}
 			const operationId = `delete-op-${suffix}`;
 			const originalQuery = store.records.query.bind(store.records);
@@ -114,6 +116,17 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				client = worker.client;
 			}
 			const restarted = new RocksEngineStore(client);
+			// Hosted delivery may finish after local deletion, before runtime rows are reclaimed.
+			expect((await restarted.records.get("identity", agentInstanceId)).value?.deleted_at).toBeNumber();
+			expect((await restarted.pendingEventsForSink("hosted-binding", 1, deliveryEventId - 1)).events.map(event => event.eventId))
+				.toContain(deliveryEventId);
+			await restarted.markEventDelivered(deliveryEventId, "hosted-binding");
+			const delivery = (await restarted.records.get("delivery", `hosted-binding:${deliveryEventId}`)).value;
+			expect(delivery).toEqual({ event_id: deliveryEventId, sink_id: "hosted-binding", state: "delivered" });
+			await restarted.markEventDelivered(deliveryEventId, "hosted-binding");
+			expect((await restarted.records.get("delivery", `hosted-binding:${deliveryEventId}`)).value).toEqual(delivery);
+			expect((await restarted.pendingEventsForSink("hosted-binding", 1, deliveryEventId - 1)).events.map(event => event.eventId))
+				.not.toContain(deliveryEventId);
 			await restarted.reconcilePendingNativeDeletes();
 			expect(
 				(await restarted.records.get("metadata", `native-delete-progress:${agentInstanceId}`)).value?.complete,

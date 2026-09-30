@@ -26,13 +26,73 @@ export function sameSemanticBinding(
 		left.bindingRevision === right.bindingRevision && left.installationId === right.installationId);
 }
 
-export function validateS0Binding(snapshot: EngineSemanticBindingSnapshot, agentInstanceRef: string): void {
+export function validateSemanticBinding(snapshot: EngineSemanticBindingSnapshot, agentInstanceRef: string): void {
 	validateRuntimeValue("bindingSnapshot", snapshot);
 	if (snapshot.agentInstanceRef !== agentInstanceRef)
 		throw new EngineTargetError("invalid_request", "Binding snapshot belongs to another Agent");
-	if (agentInstanceRef.startsWith("grimoire://agents/") || !snapshot.taskRef || snapshot.taskRef.startsWith("grimoire://tasks/~u/") ||
-		snapshot.bindingRevision !== 0 || snapshot.installationId !== null)
-		throw new EngineTargetError("invalid_request", "Owned, standalone and unbound execution requires agent_binding.v1");
+	if (snapshot.installationId === null) {
+		if (agentInstanceRef.startsWith("grimoire://agents/") || !snapshot.taskRef ||
+			snapshot.taskRef.startsWith("grimoire://tasks/~u/"))
+			throw new EngineTargetError("invalid_request", "Legacy execution requires its immutable project binding");
+	} else if (!agentInstanceRef.startsWith("grimoire://agents/~u/")) {
+		throw new EngineTargetError("invalid_request", "Owned execution requires an owner-scoped Agent");
+	}
+}
+
+/** Binding waits are transport retry, never a terminal command rejection. */
+export class EngineBindingPendingError extends Error {
+	readonly code = "binding_pending";
+	constructor(message = "Installation verification or binding activation is pending") {
+		super(message);
+	}
+}
+
+export interface EngineBindingGate {
+	bindingSnapshot: EngineSemanticBindingSnapshot;
+	phase: "open" | "preparing" | "committed_closed";
+	operationId: string | null;
+	proposalHash: string | null;
+	gateRevision: number;
+	censusMutationRevision: number;
+	committedTarget?: EngineSemanticBindingSnapshot;
+}
+
+export interface EngineBindingOperationResult {
+	agent_ref: string;
+	revision: number;
+	binding_revision: number;
+	task_ref: string | null;
+	work_step_id: string | null;
+	installation_id: string;
+	phase: "active" | "preparing" | "committed_await_adopt";
+	operation_id: string;
+	proposal_hash: string;
+	status: "prepared" | "committed" | "adopted" | "aborted" | "unchanged";
+}
+
+export interface EngineBindingResult extends EngineBindingOperationResult {
+	schema: "grimoire.agent_binding.result.v1";
+	action: "prepare" | "status" | "commit" | "abort" | "adopt";
+	operation_result: EngineBindingOperationResult;
+}
+
+export interface EngineBindingCheckpoint {
+	agent_ref: string;
+	installation_id: string;
+	operation_id: string;
+	proposal_hash: string;
+	binding_revision: number;
+	gate_revision: number;
+	census_mutation_revision: number;
+	runtime_contract_revision: 16;
+	engine_generation: number;
+	status: "complete" | "busy" | "unknown";
+	nonterminal_starts: number;
+	nonterminal_attempts: number;
+	open_effects: number;
+	unsettled_children: number;
+	mutable_pending_writes: number;
+	next_cursor: string | null;
 }
 
 /** Resolve pre-S0 child birth from immutable parent scope and retained delegation, never URI scope. */
@@ -40,7 +100,9 @@ export function legacyLocalChildBirth(
 	command: { agentInstanceRef?: string; parentAgentInstanceRef?: string; payload: Record<string, unknown> },
 	parent: EngineSemanticBindingSnapshot,
 ): { agentInstanceId: string; bindingSnapshot: EngineSemanticBindingSnapshot } {
-	validateS0Binding(parent, command.parentAgentInstanceRef ?? "");
+	validateSemanticBinding(parent, command.parentAgentInstanceRef ?? "");
+	if (parent.installationId !== null)
+		throw new EngineTargetError("source_unavailable", "Owned child birth requires its frozen snapshot");
 	const child = command.payload.localChild;
 	if (!isRecord(child) || typeof child.parentAttemptId !== "string" || !child.parentAttemptId ||
 		typeof child.toolCallId !== "string" || !child.toolCallId ||
@@ -61,7 +123,7 @@ export function legacyLocalChildBirth(
 		parentAttemptId: child.parentAttemptId,
 		parentBindingRevision: 0,
 	};
-	validateS0Binding(bindingSnapshot, agentInstanceRef);
+	validateSemanticBinding(bindingSnapshot, agentInstanceRef);
 	return { agentInstanceId, bindingSnapshot };
 }
 
@@ -523,7 +585,7 @@ export function validateStartRequest(request: EngineStartRequest): void {
 	if (request.agentInstanceRef !== undefined || request.bindingSnapshot !== undefined) {
 		if (!request.agentInstanceRef || !request.bindingSnapshot)
 			throw new EngineTargetError("invalid_request", "Hosted Start requires both agentInstanceRef and bindingSnapshot");
-		validateS0Binding(request.bindingSnapshot, request.agentInstanceRef);
+		validateSemanticBinding(request.bindingSnapshot, request.agentInstanceRef);
 	}
 	if (
 		request.profileSelectionRevision !== undefined &&

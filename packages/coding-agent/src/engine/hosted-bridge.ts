@@ -11,11 +11,13 @@ import {
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { storageCanonicalJson } from "../session/storage-client";
 import type { EngineChildLaunchResult } from "../tools";
-import { type EngineSemanticBindingSnapshot, legacyLocalChildBirth, validateS0Binding } from "./contracts";
+import { type EngineSemanticBindingSnapshot, legacyLocalChildBirth, validateSemanticBinding } from "./contracts";
 import {
 	type AgentMessageEnvelope,
 	ENGINE_EVENT_STREAM,
+	engineCommandIdentity,
 	ENGINE_MAX_ENVELOPE_BYTES,
 	type EngineCommandEnvelope,
 	type EngineEventEnvelope,
@@ -97,7 +99,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 				"X-Grimoire-Client-Version": this.#options.clientVersion ?? "0.4.0",
 				"X-Grimoire-Client-Surface": "agent_engine_bridge",
 				"X-Grimoire-Client-Protocol-Version": this.#options.protocolVersion ?? "2026-08-01",
-				"X-Grimoire-Client-Features": '["grimoire.task.v4"]',
+				"X-Grimoire-Client-Features": '["grimoire.task.v4","agent_binding.v1"]',
 				...(this.#options.installedSequence !== undefined
 					? { "X-Grimoire-Client-Installed-Sequence": String(this.#options.installedSequence) } : {}),
 				...(this.#options.sourceSignature
@@ -197,7 +199,7 @@ export async function projectLocalEngineChild(
 		snapshot = birth.bindingSnapshot;
 		birthId = birth.agentInstanceId;
 	}
-	validateS0Binding(snapshot, ref);
+	validateSemanticBinding(snapshot, ref);
 	if (snapshot.parentAgentInstanceRef !== command.parentAgentInstanceRef ||
 		snapshot.parentAttemptId !== child.parentAttemptId || typeof birthId !== "string")
 		throw new Error("Local child projection differs from its frozen birth");
@@ -207,6 +209,7 @@ export async function projectLocalEngineChild(
 		agent_instance_id: birthId,
 		parent_agent_ref: command.parentAgentInstanceRef,
 		work_step_id: snapshot.workStepId,
+		...(snapshot.installationId ? { installation_id: snapshot.installationId } : {}),
 		objective: String(command.payload.input).slice(0, 16_000),
 		status,
 		context_refs: [child.profileRef],
@@ -214,6 +217,7 @@ export async function projectLocalEngineChild(
 		requested_execution: {
 			role: "executor",
 			parent_attempt_id: child.parentAttemptId,
+			parent_binding_revision: snapshot.parentBindingRevision,
 			agent_profile_ref: child.profileRef,
 			selection: { mode: "manual" },
 		},
@@ -432,9 +436,12 @@ export class HostedEngineBridge {
 	async #claimCommands(lane: "ordinary" | "control"): Promise<void> {
 		const js = jetstream(this.#connection);
 		let generation = 0;
+		let ownedRoute = false;
 		const belongs = (claim: BridgeClaim) =>
 			ENGINE_CONTROL_OPS.has(claim.work.command?.op ?? "") === (lane === "control");
 		while (this.#accepting && !this.#stopping) {
+			ownedRoute = !ownedRoute;
+			const installationId = ownedRoute ? this.#options.eventStore?.verifiedInstallationId : undefined;
 			try {
 				const claims = [...this.#active.values()].filter(claim => !claim.accepted && belongs(claim));
 				const pending = claims.find(claim => !claim.published);
@@ -449,6 +456,7 @@ export class HostedEngineBridge {
 					const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 						action: "claim",
 						lane,
+						...(installationId ? { installation_id: installationId } : {}),
 						device_id: this.#options.deviceId,
 						engine_id: this.#options.engineId,
 						engine_generation: this.#options.engineGeneration,
@@ -474,6 +482,7 @@ export class HostedEngineBridge {
 							"grimoire_agent_engine_bridge",
 							{
 								action: "wait",
+								...(installationId ? { installation_id: installationId } : {}),
 								device_id: this.#options.deviceId,
 								engine_id: this.#options.engineId,
 								wake_generation: generation,
@@ -510,8 +519,51 @@ export class HostedEngineBridge {
 			this.#active.delete(claim.jobId);
 			return;
 		}
-		const command = claim.work.command;
+		let command = claim.work.command;
 		if (!command) throw new Error("Agent Engine command claim has no command envelope");
+		const installationId = this.#options.eventStore?.verifiedInstallationId;
+		if (command.bindingSnapshot?.installationId &&
+			command.bindingSnapshot.installationId !== installationId) {
+			await this.#releaseDelivery(claim, "installation_mismatch");
+			return;
+		}
+		if (command.op === "start") {
+			const localized = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "localize_start", job_id: claim.jobId, lease_token: claim.leaseToken,
+				installation_id: installationId ?? null, command,
+			});
+			if (localized.status === "binding_pending" || localized.status === "host_unavailable") {
+				await this.#releaseDelivery(claim, "binding_pending");
+				return;
+			}
+			if (localized.status !== "localized" &&
+				!(localized.status === "rejected" && localized.code === "immutable_mismatch"))
+				throw new Error("ClientHost did not localize the hosted Start");
+			const next = isRecord(localized.command) ? localized.command as unknown as EngineCommandEnvelope : undefined;
+			// CH may add executable context/workspace data, never retarget the admitted occurrence.
+			const mismatch = localized.status === "rejected" || !next ||
+				(["commandId", "agentInstanceId", "agentInstanceRef", "executionId", "attemptId",
+					"principalId", "authorityGeneration", "parentAgentInstanceId", "parentAgentInstanceRef",
+					"deviceId", "engineId", "engineGeneration", "op"] as const).some(field => next[field] !== command![field]) ||
+				!next.bindingSnapshot || !command.bindingSnapshot ||
+				storageCanonicalJson(next.bindingSnapshot) !== storageCanonicalJson(command.bindingSnapshot) ||
+				!isRecord(next.payload) ||
+				["cwd", "input", "profileDigest", "launchProfile", "selectedRouteRef", "profileSelectionRevision"].some(field =>
+					command!.payload[field] !== undefined && !(field === "cwd" && !command!.payload[field]) &&
+					(next.payload[field] === undefined ||
+						storageCanonicalJson(next.payload[field]) !== storageCanonicalJson(command!.payload[field])));
+			if (mismatch) {
+				if (!this.#options.eventStore) throw new Error("Terminal localization needs the durable event store");
+				await this.#options.eventStore.rejectUnadmittedCommand(
+					engineCommandIdentity(command as EngineCommandEnvelope),
+					{ outcome: "rejected", detail: { code: "invalid_request", message: "Hosted Start immutable localization mismatch" } },
+					this.#options.engineGeneration,
+				);
+				claim.published = true;
+				return;
+			}
+			command = next!;
+		}
 		if (
 			!Number.isSafeInteger(command.engineGeneration) ||
 			Number(command.engineGeneration) <= 0 ||
@@ -524,6 +576,15 @@ export class HostedEngineBridge {
 			msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
 		});
 		claim.published = true;
+	}
+
+	async #releaseDelivery(claim: BridgeClaim, reason: "installation_mismatch" | "binding_pending"): Promise<void> {
+		await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+			action: "release_delivery", job_id: claim.jobId, lease_token: claim.leaseToken,
+			installation_id: this.#options.eventStore?.verifiedInstallationId ?? null, reason,
+		});
+		this.#active.delete(claim.jobId);
+		await waitForEngineWake(this.#stop.promise, 1_000, this.#admissionCancellation.signal);
 	}
 
 	async #eventLoop(messages: ConsumerMessages): Promise<void> {
@@ -561,6 +622,7 @@ export class HostedEngineBridge {
 							return;
 						}
 						if (!(await this.#deliverEvent(event))) throw new Error("Hosted Engine event was not accepted");
+						await this.#options.eventStore?.markEventDelivered(Number(event.eventId), "hosted-binding");
 						retries?.delete(sequence);
 						if (retries?.size === 0) this.#eventRetries.delete(agentId);
 						message.ack();
@@ -609,6 +671,7 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
+		if (event.type === "attempt.reconciled" && event.payload?.semanticBinding === true) return true;
 		if (["attempt.agent_registered", "attempt.holds_changed", "attempt.message_updated"].includes(event.type))
 			return true;
 		if (
@@ -642,6 +705,7 @@ export class HostedEngineBridge {
 		if (event.type === "attempt.inbox_changed" && event.payload?.action === "wake_due") {
 			const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "wake",
+				installation_id: event.bindingSnapshot?.installationId ?? null,
 				device_id: this.#options.deviceId,
 				engine_id: this.#options.engineId,
 				engine_generation: this.#options.engineGeneration,
@@ -674,6 +738,7 @@ export class HostedEngineBridge {
 		if (!claim) {
 			const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "claim",
+				installation_id: event.bindingSnapshot?.installationId ?? null,
 				device_id: this.#options.deviceId,
 				engine_id: this.#options.engineId,
 				engine_generation: this.#options.engineGeneration,
@@ -684,6 +749,7 @@ export class HostedEngineBridge {
 			if (recovered.status !== "claimed") {
 				const terminal = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 					action: "event",
+					installation_id: event.bindingSnapshot?.installationId ?? null,
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
 					job_id: jobId,
@@ -721,6 +787,7 @@ export class HostedEngineBridge {
 			};
 			const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "accepted",
+				installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,
 				device_id: this.#options.deviceId,
 				engine_id: this.#options.engineId,
 				job_id: claim.jobId,
@@ -745,6 +812,7 @@ export class HostedEngineBridge {
 
 		const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 			action: "event",
+			installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,
 			device_id: this.#options.deviceId,
 			engine_id: this.#options.engineId,
 			job_id: jobId,
@@ -769,6 +837,7 @@ export class HostedEngineBridge {
 						try {
 							await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 								action: "heartbeat",
+								installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,
 								device_id: this.#options.deviceId,
 								engine_id: this.#options.engineId,
 								job_id: claim.jobId,

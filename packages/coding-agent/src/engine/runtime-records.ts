@@ -296,6 +296,25 @@ export class RuntimeTransaction {
 		) as StoragePayload;
 		this.#puts.set(key, { kind, id, value: payload });
 	}
+	/** Retain a read-only fence in the atomic commit, including an absent marker. */
+	async revision(kind: StorageRuntimeKind, id: string): Promise<number> {
+		await this.get(kind, id);
+		return this.#read.get(recordKey(kind, id))?.revision ?? 0;
+	}
+	changedAgentIds(censusState: (kind: StorageRuntimeKind, value: StoragePayload | null) => unknown): Set<string> {
+		const agents = new Set<string>();
+		const collect = (kind: StorageRuntimeKind, before: StoragePayload | null, after: StoragePayload | null) => {
+			const previous = censusState(kind, before);
+			const next = censusState(kind, after);
+			if (previous === next && (next === null || before?.agent_instance_id === after?.agent_instance_id)) return;
+			for (const value of [before, after]) {
+				if (typeof value?.agent_instance_id === "string") agents.add(value.agent_instance_id);
+			}
+		};
+		for (const [key, row] of this.#puts) collect(row.kind, this.#read.get(key)?.value ?? null, row.value);
+		for (const [key, row] of this.#deletes) collect(row.kind, this.#read.get(key)?.value ?? null, null);
+		return agents;
+	}
 	async delete(kind: StorageRuntimeKind, id: string): Promise<void> {
 		await this.get(kind, id);
 		const key = recordKey(kind, id);

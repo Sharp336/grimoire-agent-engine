@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { sameSemanticBinding, validateS0Binding, validateStartRequest } from "../src/engine/contracts";
+import { type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding, validateStartRequest } from "../src/engine/contracts";
 import { engineCommandIdentity } from "../src/engine/nats-adapter";
+import { engineAgentInstanceId } from "../src/engine/route";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import {
 	RUNTIME_PROTOCOL_HASH,
@@ -34,10 +35,10 @@ function failCommit(
 	});
 }
 
-it("fences semantic scope independently of opaque Agent provenance and rejects dormant S1 admission", () => {
+it("fences semantic scope independently of opaque Agent provenance and validates owned birth snapshots", () => {
 	const ref = "grimoire://tasks/birth/provenance/agents/legacy";
 	const snapshot = semanticBinding(ref, "grimoire://tasks/current/explicit", "step");
-	validateS0Binding(snapshot, ref);
+	validateSemanticBinding(snapshot, ref);
 	expect(sameSemanticBinding(snapshot, { ...snapshot })).toBe(true);
 	for (const changed of [
 		{ ...snapshot, taskRef: "grimoire://tasks/current/other" },
@@ -50,10 +51,14 @@ it("fences semantic scope independently of opaque Agent provenance and rejects d
 		{ ...snapshot, taskRef: null, workStepId: null },
 		{ ...snapshot, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` },
 		{ ...snapshot, bindingRevision: Number.MAX_SAFE_INTEGER + 1 },
-	]) expect(() => validateS0Binding(rejected, ref)).toThrow();
+	]) expect(() => validateSemanticBinding(rejected, ref)).toThrow();
 	const ownedRef = `grimoire://agents/~u/${"b".repeat(64)}/owned`;
 	validateRuntimeValue("agi", ownedRef);
-	expect(() => validateS0Binding({ ...snapshot, agentInstanceRef: ownedRef }, ownedRef)).toThrow();
+	expect(() => validateSemanticBinding({ ...snapshot, agentInstanceRef: ownedRef }, ownedRef)).toThrow();
+	const owned = { ...snapshot, agentInstanceRef: ownedRef, bindingRevision: 1, installationId: `install_${"a".repeat(32)}` };
+	validateSemanticBinding(owned, ownedRef);
+	validateSemanticBinding({ ...owned, taskRef: null, workStepId: null }, ownedRef);
+	expect(() => validateSemanticBinding({ ...owned, taskRef: null }, ownedRef)).toThrow();
 	expect(() => validateRuntimeValue("agi", `${ref}\n`)).toThrow();
 	const native = {
 		commandId: "native", agentInstanceId: "native", executionId: "execution", attemptId: "attempt",
@@ -88,6 +93,223 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			}),
 		);
 	}
+
+	it("keeps owned admission closed across restart, certifies exact idle and adopts only the committed successor", async () => {
+		const store = await createStore();
+		const principalId = "grimoire:user:binding-owner";
+		const installationId = `install_${"a".repeat(32)}`;
+		const owner = new Bun.CryptoHasher("sha256").update(principalId).digest("hex");
+		const agentInstanceRef = `grimoire://agents/~u/${owner}/bound`;
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		const snapshot = { ...semanticBinding(agentInstanceRef), bindingRevision: 1, installationId };
+		await expect(store.checkSemanticStart(agentInstanceId, snapshot, principalId)).rejects.toMatchObject({ code: "binding_pending" });
+		store.verifyInstallation(installationId, principalId);
+		await store.checkSemanticStart(agentInstanceId, snapshot, principalId);
+		const proposalHash = `sha256:${"b".repeat(64)}`;
+		const gate: EngineBindingGate = { bindingSnapshot: snapshot, phase: "preparing",
+			operationId: "operation-one", proposalHash, gateRevision: 0, censusMutationRevision: 0 };
+		const prepared = await store.bindingPrepare(gate);
+		await expect(store.bindingPrepare({ ...gate, operationId: "another-operation" })).rejects.toMatchObject({ code: "stale_target" });
+		const pending = { ...command("pending-owned"), agentInstanceRef, agentInstanceId, principalId,
+			bindingSnapshot: snapshot, browserPayloadHash: undefined };
+		expect(await store.admitCommand(pending, 1)).toEqual({ status: "binding_pending" });
+		const secondPending = { ...command("pending-owned-two"), agentInstanceRef, agentInstanceId, principalId,
+			bindingSnapshot: snapshot, browserPayloadHash: undefined };
+		expect(await store.admitCommand(secondPending, 1)).toEqual({ status: "binding_pending" });
+		const pendingRows = await store.records.getMany([
+			{ kind: "command", id: pending.commandId }, { kind: "command", id: secondPending.commandId },
+		]);
+		let notified = false;
+		void store.changeSignal().then(() => { notified = true; });
+		for (let retry = 0; retry < 3; retry++)
+			expect(await Promise.all([store.admitCommand(pending, 1), store.admitCommand(secondPending, 1)]))
+				.toEqual([{ status: "binding_pending" }, { status: "binding_pending" }]);
+		expect(await store.records.getMany(pendingRows.map(({ kind, id }) => ({ kind, id })))).toEqual(pendingRows);
+		expect(notified).toBe(false);
+		let restarted = reopen();
+		let generation = await restarted.nextEngineGeneration();
+		await restarted.interruptGeneration(generation);
+		expect((await restarted.records.get("command", pending.commandId)).value).toMatchObject({
+			state: "received", binding_pending: true, receipt: null,
+		});
+		restarted.verifyInstallation(installationId, principalId);
+		const params = { agentInstanceRef, installationId, operationId: gate.operationId!, proposalHash, bindingRevision: 1 };
+		expect(await restarted.bindingCensus(params, generation)).toMatchObject({ status: "busy", nonterminal_starts: 2 });
+		const operation = { agent_ref: agentInstanceRef, revision: 2, binding_revision: 1,
+			task_ref: snapshot.taskRef, work_step_id: snapshot.workStepId, installation_id: installationId,
+			phase: "active" as const, operation_id: gate.operationId!, proposal_hash: proposalHash, status: "aborted" as const };
+		const aborted: EngineBindingResult = { schema: "grimoire.agent_binding.result.v1", action: "abort", ...operation, operation_result: operation };
+		const firstAbort = await restarted.bindingTransition("abort", aborted);
+		const secondGate = { ...gate, operationId: "operation-two" };
+		await restarted.bindingPrepare(secondGate);
+		const secondOperation = { ...operation, operation_id: secondGate.operationId! };
+		const secondAbort = await restarted.bindingTransition("abort",
+			{ ...aborted, ...secondOperation, operation_result: secondOperation });
+		expect(await restarted.bindingPrepare(gate)).toEqual(firstAbort);
+		for (const action of ["abort", "status", "prepare"] as const)
+			expect(await restarted.bindingTransition("abort", { ...aborted, action })).toEqual(firstAbort);
+		await expect(restarted.bindingTransition("abort", { ...aborted, revision: aborted.revision + 1,
+			operation_result: { ...operation, revision: operation.revision + 1 } })).rejects.toMatchObject({ code: "stale_target" });
+		expect(await restarted.semanticGate(agentInstanceId)).toEqual(secondAbort);
+		expect(await restarted.admitCommand(pending, generation)).toEqual({ status: "claimed" });
+		const claimed = await restarted.records.get("command", pending.commandId);
+		await restarted.bindingPrepare({ ...gate, operationId: "release-claimed" });
+		expect(await restarted.admitCommand(pending, generation)).toEqual({ status: "binding_pending" });
+		const released = await restarted.records.get("command", pending.commandId);
+		expect(released.revision).toBe(claimed.revision! + 1);
+		expect(released.value).toMatchObject({ binding_pending: true, processor_generation: null });
+		expect(await restarted.admitCommand(pending, generation)).toEqual({ status: "binding_pending" });
+		expect(await restarted.records.get("command", pending.commandId)).toEqual(released);
+		const releaseOperation = { ...operation, operation_id: "release-claimed" };
+		await restarted.bindingTransition("abort", { ...aborted, ...releaseOperation, operation_result: releaseOperation });
+		expect(await restarted.admitCommand(pending, generation)).toEqual({ status: "claimed" });
+		expect(await restarted.canRearmBindingStart(pending.commandId, generation)).toBe(true);
+		await restarted.settleCommand(pending.commandId, pending.canonicalHash, { outcome: "rejected", detail: { code: "cancelled" } });
+		// An empty born-owned Agent proves the positive idle/adoption path without synthetic settlement.
+		const emptyRef = `grimoire://agents/~u/${owner}/empty`;
+		const emptyId = engineAgentInstanceId(emptyRef);
+		const emptySnapshot = { ...snapshot, agentInstanceRef: emptyRef };
+		const closed = await restarted.bindingPrepare({ ...gate, bindingSnapshot: emptySnapshot, operationId: "operation-empty" });
+		const emptyParams = { ...params, agentInstanceRef: emptyRef, operationId: "operation-empty" };
+		// An immutable-mismatch rejection may have no identity; it belongs to neither this Agent nor its subtree.
+		await restarted.rejectUnadmittedCommand({ ...command("unknown-rejection"), agentInstanceId: "unknown-agent" },
+			{ outcome: "rejected", detail: { code: "immutable_mismatch" } }, generation);
+		let checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		// Exhausting an empty record page still yields a durable child-scan cursor.
+		expect(checkpoint).toMatchObject({ status: "unknown", next_cursor: expect.any(String) });
+		restarted = reopen();
+		restarted.verifyInstallation(installationId, principalId);
+		checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		expect(checkpoint).toMatchObject({ status: "complete", nonterminal_starts: 0, nonterminal_attempts: 0,
+			open_effects: 0, unsettled_children: 0, mutable_pending_writes: 0, next_cursor: null });
+		expect(await restarted.bindingCensus(emptyParams, generation)).toEqual(checkpoint);
+		const target = { ...emptySnapshot, taskRef: null, workStepId: null, bindingRevision: 2 };
+		const committedOperation = { ...operation, agent_ref: emptyRef, operation_id: "operation-empty",
+			revision: 3, binding_revision: 2, task_ref: null, work_step_id: null,
+			phase: "committed_await_adopt" as const, status: "committed" as const };
+		const committed: EngineBindingResult = { schema: "grimoire.agent_binding.result.v1", action: "commit",
+			...committedOperation, operation_result: committedOperation };
+		const staged = { ...closed, phase: "committed_closed" as const, committedTarget: target };
+		// A new owned event after the certificate makes adoption stale, even without an Attempt or identity.
+		const late = await restarted.appendEvent({ ...binding("late-owned"), engineGeneration: generation, agentInstanceId: emptyId,
+			causationCommandId: "late-owned", kind: "reconciled" });
+		await expect(restarted.bindingTransition("adopt", committed, staged)).rejects.toMatchObject({ code: "binding_pending" });
+		restarted = reopen();
+		generation = await restarted.nextEngineGeneration();
+		restarted.verifyInstallation(installationId, principalId);
+		await expect(restarted.bindingTransition("adopt", { ...committed, action: "status", revision: 4,
+			operation_result: { ...committedOperation, revision: 4 } }, staged)).rejects.toMatchObject({ code: "stale_target" });
+		await expect(restarted.bindingCensus({ ...emptyParams, bindingRevision: 2 }, generation))
+			.rejects.toMatchObject({ code: "stale_target" });
+		expect(await restarted.bindingCensus(emptyParams, generation))
+			.toMatchObject({ status: "busy", mutable_pending_writes: 1 });
+		await restarted.markEventDelivered(late.eventId, "hosted-binding");
+		checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		for (let page = 0; checkpoint.next_cursor && page < 30; page++)
+			checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		expect(checkpoint).toMatchObject({ status: "complete", mutable_pending_writes: 0, next_cursor: null });
+		const firstAdopt = await restarted.bindingTransition("adopt", { ...committed, action: "status" }, staged);
+		for (const action of ["commit", "status", "prepare"] as const)
+			expect(await restarted.bindingTransition("adopt", { ...committed, action }, staged)).toEqual(firstAdopt);
+		await expect(restarted.bindingTransition("adopt", { ...committed, revision: 4,
+			operation_result: { ...committedOperation, revision: 4 } }, staged)).rejects.toMatchObject({ code: "stale_target" });
+		await expect(restarted.checkSemanticStart(emptyId, target, principalId)).rejects.toMatchObject({ code: "binding_pending" });
+		const adoptedOperation = { ...committedOperation, phase: "active" as const, status: "adopted" as const };
+		const adopted: EngineBindingResult = { ...committed, ...adoptedOperation, action: "adopt", operation_result: adoptedOperation };
+		await expect(restarted.bindingTransition("activate", adopted)).rejects.toMatchObject({ code: "binding_pending" });
+		const targetParams = { ...emptyParams, bindingRevision: target.bindingRevision };
+		checkpoint = await restarted.bindingCensus(targetParams, generation);
+		expect(checkpoint).toMatchObject({ status: "unknown", binding_revision: 2 });
+		for (let page = 0; checkpoint.next_cursor && page < 30; page++)
+			checkpoint = await restarted.bindingCensus(targetParams, generation);
+		expect(checkpoint).toMatchObject({ status: "complete", next_cursor: null });
+		const firstActivate = await restarted.bindingTransition("activate", adopted);
+		await restarted.checkSemanticStart(emptyId, target, principalId);
+		await expect(restarted.checkSemanticStart(emptyId, emptySnapshot, principalId)).rejects.toMatchObject({ code: "stale_target" });
+		restarted = reopen();
+		restarted.verifyInstallation(installationId, principalId);
+		for (const action of ["adopt", "status", "prepare"] as const)
+			expect(await restarted.bindingTransition("activate", { ...adopted, action })).toEqual(firstActivate);
+		await expect(restarted.bindingTransition("activate", { ...adopted, binding_revision: 3,
+			operation_result: { ...adoptedOperation, binding_revision: 3 } })).rejects.toMatchObject({ code: "stale_target" });
+		expect(firstActivate.gateRevision).toBe(closed.gateRevision + 2);
+		await expect(restarted.bindingTransition("abort", { ...aborted, agent_ref: emptyRef })).rejects.toThrow();
+		expect(prepared.bindingSnapshot).toEqual(snapshot);
+	});
+
+	it("admits a pre-enrolled owned child once and never recreates its lost established gate", async () => {
+		const store = await createStore();
+		const principalId = "grimoire:user:owned-birth";
+		const installationId = `install_${"f".repeat(32)}`;
+		const owner = new Bun.CryptoHasher("sha256").update(principalId).digest("hex");
+		const parentRef = `grimoire://agents/~u/${owner}/parent`;
+		const parentId = engineAgentInstanceId(parentRef);
+		const snapshot = { ...semanticBinding(parentRef), installationId, bindingRevision: 1 };
+		store.verifyInstallation(installationId, principalId);
+		await store.checkSemanticStart(parentId, snapshot, principalId);
+		await store.registerAgent({ agentInstanceId: parentId, agentInstanceRef: parentRef, principalId, authorityGeneration: 1 });
+		const parent = { ...binding("parent"), agentInstanceId: parentId, bindingSnapshot: snapshot };
+		await store.commitAttemptTransition(parent, "running", [{ kind: "running" }]);
+		const childRef = `grimoire://agents/~u/${owner}/child`;
+		const childId = engineAgentInstanceId(childRef);
+		const childSnapshot = { ...snapshot, agentInstanceRef: childRef, parentAgentInstanceRef: parentRef,
+			parentAttemptId: parent.attemptId, parentBindingRevision: 1 };
+		await store.registerAgent({ agentInstanceId: childId, agentInstanceRef: childRef, principalId,
+			parentAgentInstanceId: parentId, authorityGeneration: 1 });
+		await expect(store.checkSemanticStart(childId, { ...childSnapshot, parentBindingRevision: 2 }, principalId))
+			.rejects.toMatchObject({ code: "stale_target" });
+		await store.checkSemanticStart(childId, childSnapshot, principalId);
+		expect((await store.semanticGate(childId))?.bindingSnapshot).toEqual(childSnapshot);
+		const event = await store.appendEvent({ ...parent, causationCommandId: parent.commandId, kind: "reconciled" });
+		const marker = `binding-mutation:${parentId}`;
+		const before = (await store.records.get("metadata", marker)).revision!;
+		// Hold both independent family commits until both have read the same marker revision.
+		const ready = Promise.withResolvers<void>();
+		let arrivals = 0;
+		const write = store.storageClient.write.bind(store.storageClient);
+		const concurrent = spyOn(store.storageClient, "write").mockImplementation(async (input, ...rest) => {
+			if (input.runtime?.puts.some(row => row.kind === "metadata" && row.id === marker) && arrivals < 2) {
+				if (++arrivals === 2) ready.resolve();
+				await ready.promise;
+			}
+			return write(input, ...rest);
+		});
+		let nextEvent: EngineEvent;
+		try {
+			[nextEvent] = await Promise.all([
+				store.appendEvent({ ...parent, causationCommandId: parent.commandId, kind: "reconciled" }),
+				store.markEventDelivered(event.eventId, "hosted-binding"),
+			]);
+		} finally {
+			concurrent.mockRestore();
+		}
+		// The losing record CAS retries; both writes and both cut invalidations survive.
+		expect((await store.records.get("metadata", marker)).revision).toBe(before + 2);
+		expect((await store.records.get("delivery", `hosted-binding:${event.eventId}`)).value).toMatchObject({
+			state: "delivered", agent_instance_id: parentId,
+		});
+		expect((await store.records.get("event", String(nextEvent.eventId))).value?.eventId).toBe(nextEvent.eventId);
+		const stableCut = (await store.records.get("metadata", marker)).revision;
+		await store.markEventPublished(nextEvent.eventId);
+		await store.markEventDelivered(nextEvent.eventId, "other-sink");
+		await store.markEventDelivered(event.eventId, "hosted-binding");
+		await store.markEventDeliveryFailed(nextEvent.eventId, "hosted-binding", "retryable");
+		expect((await store.records.get("metadata", marker)).revision).toBe(stableCut);
+		await store.mutation(childId, tx => tx.delete("metadata", `semantic-binding:${childId}`));
+		await expect(store.checkSemanticStart(childId, childSnapshot, principalId))
+			.rejects.toMatchObject({ code: "binding_pending" });
+		const proposalHash = `sha256:${"9".repeat(64)}`;
+		await store.bindingPrepare({ bindingSnapshot: snapshot, phase: "preparing", operationId: "parent-move",
+			proposalHash, gateRevision: 0, censusMutationRevision: 0 });
+		await store.mutation(childId, async tx => {
+			const child = (await tx.get<Record<string, unknown>>("identity", childId))!;
+			await tx.put("identity", childId, { ...child, parent_agent_instance_ref: "grimoire://agents/broken-parent" });
+		});
+		const census = { agentInstanceRef: parentRef, installationId, operationId: "parent-move", proposalHash, bindingRevision: 1 };
+		await expect((async () => {
+			for (let page = 0; page < 20; page++) await store.bindingCensus(census, 1);
+		})()).rejects.toMatchObject({ code: "binding_pending" });
+	});
 
 	it("refuses a too-wide branch atomically without imposing a device AgentInstance cap", async () => {
 		const store = await createStore();

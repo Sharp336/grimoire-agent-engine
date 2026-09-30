@@ -1,10 +1,12 @@
 import type { StorageRuntimeIndex, StorageRuntimeKey } from "../session/storage-protocol";
 import {
 	type EngineEvent,
+	type EngineBindingGate,
 	type EngineInboxItem,
 	type EngineProfileRouteState,
 	type EngineRetryState,
 	type EngineTarget,
+	sameSemanticBinding,
 	EngineTargetError,
 } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
@@ -672,16 +674,25 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 	let summary: Record<string, unknown> | null = null;
 	if (summaryEvents.has(event.kind) || !identity.summary_json) {
 		const binding = await tx.get<RocksBinding>("binding", event.agentInstanceId);
-		const current = binding
+		const gate = identity.agent_instance_ref?.startsWith("grimoire://agents/~u/")
+			? (await tx.get<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${event.agentInstanceId}`))?.gate
+			: undefined;
+		let current = binding
 			? binding.attempt_id === attempt?.attempt_id
 				? attempt
 				: await tx.get<RocksAttempt>("attempt", binding.attempt_id)
 			: undefined;
+		if (gate && !sameSemanticBinding(current?.binding_snapshot, gate.committedTarget ?? gate.bindingSnapshot))
+			current = undefined;
 		const pending = await pendingStartCommand(tx, event.agentInstanceId, current?.attempt_id);
 		const detail = await projectedDetail(tx, identity, current, event.eventId);
 		const value = {
 			agentInstanceRef: identity.agent_instance_ref,
-			...(binding?.binding_snapshot ? { bindingSnapshot: binding.binding_snapshot } : {}),
+			...(gate ? {
+				bindingSnapshot: gate.committedTarget ?? gate.bindingSnapshot,
+				bindingPhase: gate.phase === "open" ? "active" : gate.phase === "preparing" ? "preparing" : "committed_await_adopt",
+				bindingOperationId: gate.operationId,
+			} : binding?.binding_snapshot ? { bindingSnapshot: binding.binding_snapshot } : {}),
 			rootAgentInstanceRef: identity.root_agent_instance_ref,
 			parentAgentInstanceRef: identity.parent_agent_instance_ref,
 			revision: Math.max(1, identity.summary_revision),

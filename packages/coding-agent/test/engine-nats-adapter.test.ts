@@ -12,6 +12,7 @@ import {
 	type EngineControlQueryServer,
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
+import { EngineBindingPendingError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	AGENT_MESSAGE_STREAM,
 	ENGINE_COMMAND_STREAM,
@@ -1701,7 +1702,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}
 	}, 30000);
 
-	it("ends a peer message that keeps failing after the bounded delivery budget", async () => {
+	it("keeps binding-pending peer messages without spending the bounded failure budget", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-mailbox-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const runtime = await EngineRuntime.create({
@@ -1709,8 +1710,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			dispatchPrompt: async () => true,
 		});
 		let deliveries = 0;
+		let bindingPending = true;
+		let failures = 0;
 		const delivering = spyOn(runtime, "deliverPeerMessage").mockImplementation(async message => {
 			deliveries++;
+			if (bindingPending) throw new EngineBindingPendingError();
+			failures++;
 			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
 		});
 		const adapter = await NatsEngineAdapter.connect({
@@ -1741,9 +1746,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			await js.publish(adapter.messageSubject("agent-a", "agent-c"), JSON.stringify(message), {
 				msgID: message.messageId,
 			});
+			await waitFor(async () => deliveries >= 3, 15_000);
+			expect((await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages).toBe(1);
+			expect(failures).toBe(0);
+			bindingPending = false;
 			// Work-queue retention drops the message once it is terminated; a redelivered one stays in the stream.
 			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 0, 15_000);
-			expect(deliveries).toBe(2);
+			expect(failures).toBe(2);
 		} finally {
 			delivering.mockRestore();
 			await client.drain();

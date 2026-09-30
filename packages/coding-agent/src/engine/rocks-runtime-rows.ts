@@ -51,6 +51,7 @@ export interface RocksCommand {
 	updated_at: number;
 	pending_accounted: boolean;
 	start_applied_intent_revision?: number;
+	binding_pending?: boolean;
 }
 export interface RocksEffect extends EngineEffectRow {
 	command_id: string;

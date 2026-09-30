@@ -753,7 +753,12 @@ export class Settings {
 	}
 
 	async cloneForCwd(cwd: string): Promise<Settings> {
-		this.#assertMutable();
+		if (this.#readOnly) {
+			const cloned = new Settings({ cwd, agentDir: this.#agentDir, readOnly: true });
+			cloned.#configFiles = [...this.#configFiles];
+			cloned.#overrides = this.#buildOriginalOverrides();
+			return cloned.#loadReadOnly();
+		}
 		const cloned = new Settings({
 			cwd,
 			agentDir: this.#agentDir,

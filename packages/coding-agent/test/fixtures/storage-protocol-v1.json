@@ -1118,6 +1118,7 @@
             }
           },
           "then": {
+            "$ref": "#/$defs/semanticMetadataPut",
             "properties": {
               "value": {
                 "required": [
@@ -1136,7 +1137,10 @@
                       "native_tombstone",
                       "native_delete_progress",
                       "blob_upload",
-                      "restore_workspace"
+                      "restore_workspace",
+                      "semantic_binding",
+                      "binding_result",
+                      "binding_mutation"
                     ]
                   }
                 }
@@ -1202,6 +1206,178 @@
               }
             }
           }
+        }
+      ]
+    },
+    "semanticId": {
+      "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[A-Za-z0-9:_.-]+$"
+    },
+    "semanticRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "semanticAgentRef": {
+      "type": "string", "maxLength": 1000,
+      "pattern": "^grimoire://(?:tasks/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/agents|agents/~u/[a-f0-9]{64})/[A-Za-z0-9._-]+$"
+    },
+    "semanticTaskRef": {
+      "type": ["string", "null"], "maxLength": 1000,
+      "pattern": "^grimoire://tasks/(?:[A-Za-z0-9._-]+|~u/[a-f0-9]{64})/[A-Za-z0-9._-]+$"
+    },
+    "semanticInstallation": { "type": "string", "pattern": "^install_[a-f0-9]{32}$" },
+    "semanticSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agentInstanceRef", "taskRef", "workStepId", "bindingRevision", "installationId", "parentAgentInstanceRef", "parentAttemptId", "parentBindingRevision"],
+      "properties": {
+        "agentInstanceRef": { "$ref": "#/$defs/semanticAgentRef" },
+        "taskRef": { "$ref": "#/$defs/semanticTaskRef" },
+        "workStepId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
+        "bindingRevision": { "$ref": "#/$defs/semanticRevision" },
+        "installationId": { "anyOf": [{ "$ref": "#/$defs/semanticInstallation" }, { "type": "null" }] },
+        "parentAgentInstanceRef": { "anyOf": [{ "$ref": "#/$defs/semanticAgentRef" }, { "type": "null" }] },
+        "parentAttemptId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
+        "parentBindingRevision": { "anyOf": [{ "$ref": "#/$defs/semanticRevision" }, { "type": "null" }] }
+      }
+    },
+    "semanticGate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bindingSnapshot", "phase", "operationId", "proposalHash", "gateRevision", "censusMutationRevision"],
+      "properties": {
+        "bindingSnapshot": { "$ref": "#/$defs/semanticSnapshot" },
+        "phase": { "enum": ["open", "preparing", "committed_closed"] },
+        "operationId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
+        "proposalHash": { "anyOf": [{ "$ref": "#/$defs/bytesHash" }, { "type": "null" }] },
+        "gateRevision": { "$ref": "#/$defs/semanticRevision" },
+        "censusMutationRevision": { "$ref": "#/$defs/semanticRevision" },
+        "committedTarget": { "$ref": "#/$defs/semanticSnapshot" }
+      }
+    },
+    "semanticCheckpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent_ref", "installation_id", "operation_id", "proposal_hash", "binding_revision", "gate_revision", "census_mutation_revision", "runtime_contract_revision", "status", "nonterminal_starts", "nonterminal_attempts", "open_effects", "unsettled_children", "mutable_pending_writes", "next_cursor"],
+      "properties": {
+        "agent_ref": { "$ref": "#/$defs/semanticAgentRef" },
+        "installation_id": { "$ref": "#/$defs/semanticInstallation" },
+        "operation_id": { "$ref": "#/$defs/semanticId" },
+        "proposal_hash": { "$ref": "#/$defs/bytesHash" },
+        "binding_revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
+        "gate_revision": { "$ref": "#/$defs/semanticRevision" },
+        "census_mutation_revision": { "$ref": "#/$defs/semanticRevision" },
+        "runtime_contract_revision": { "const": 16 },
+        "engine_generation": { "$ref": "#/$defs/semanticRevision" },
+        "status": { "enum": ["complete", "busy", "unknown"] },
+        "nonterminal_starts": { "$ref": "#/$defs/semanticRevision" },
+        "nonterminal_attempts": { "$ref": "#/$defs/semanticRevision" },
+        "open_effects": { "$ref": "#/$defs/semanticRevision" },
+        "unsettled_children": { "$ref": "#/$defs/semanticRevision" },
+        "mutable_pending_writes": { "$ref": "#/$defs/semanticRevision" },
+        "next_cursor": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] }
+      }
+    },
+    "semanticOperationResult": {
+      "type": "object",
+      "required": ["agent_ref", "revision", "binding_revision", "task_ref", "work_step_id", "installation_id", "phase", "operation_id", "proposal_hash", "status"],
+      "properties": {
+        "agent_ref": { "$ref": "#/$defs/semanticAgentRef" },
+        "revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
+        "binding_revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
+        "task_ref": { "$ref": "#/$defs/semanticTaskRef" },
+        "work_step_id": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
+        "installation_id": { "$ref": "#/$defs/semanticInstallation" },
+        "phase": { "enum": ["active", "preparing", "committed_await_adopt"] },
+        "operation_id": { "$ref": "#/$defs/semanticId" },
+        "proposal_hash": { "$ref": "#/$defs/bytesHash" },
+        "status": { "enum": ["prepared", "committed", "adopted", "aborted", "unchanged"] }
+      }
+    },
+    "semanticResult": {
+      "allOf": [{ "$ref": "#/$defs/semanticOperationResult" }],
+      "unevaluatedProperties": false,
+      "required": ["schema", "action", "operation_result"],
+      "properties": {
+        "schema": { "const": "grimoire.agent_binding.result.v1" },
+        "action": { "enum": ["prepare", "status", "commit", "abort", "adopt"] },
+        "operation_result": {
+          "allOf": [{ "$ref": "#/$defs/semanticOperationResult" }], "unevaluatedProperties": false
+        }
+      }
+    },
+    "semanticMetadataPut": {
+      "description": "Reserved metadata key prefixes require exact subtype/envelopes. All changed keys retain exactly one revision check; nested contracts mirror runtime16 without changing its bytes. The 256 KiB runtime value bound also bounds census depth.",
+      "allOf": [
+        {
+          "if": { "properties": { "id": { "pattern": "^(semantic-binding|semantic-birth|binding-census|binding-result|binding-terminal|binding-mutation):" } } },
+          "then": {
+            "oneOf": [
+              {
+                "properties": {
+                  "id": { "pattern": "^semantic-binding:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype", "gate"],
+                    "properties": { "subtype": { "const": "semantic_binding" }, "gate": { "$ref": "#/$defs/semanticGate" } }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": { "pattern": "^semantic-birth:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype", "established"],
+                    "properties": { "subtype": { "const": "semantic_binding" }, "established": { "const": true } }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": { "pattern": "^binding-census:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype", "checkpoint", "stack"],
+                    "properties": {
+                      "subtype": { "const": "semantic_binding" },
+                      "checkpoint": { "$ref": "#/$defs/semanticCheckpoint" },
+                      "stack": {
+                        "type": "array",
+                        "items": {
+                          "type": "object", "additionalProperties": false, "required": ["id", "ref", "stage"],
+                          "properties": {
+                            "id": { "$ref": "#/$defs/semanticId" },
+                            "ref": { "$ref": "#/$defs/semanticAgentRef" },
+                            "stage": { "enum": [0, 1] },
+                            "after": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/runtimeId" } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": { "pattern": "^binding-result:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype", "result", "gate"],
+                    "properties": { "subtype": { "const": "binding_result" }, "result": { "$ref": "#/$defs/semanticResult" }, "gate": { "$ref": "#/$defs/semanticGate" } }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": { "pattern": "^binding-terminal:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype", "result", "gate", "old"],
+                    "properties": { "subtype": { "const": "binding_result" }, "result": { "$ref": "#/$defs/semanticResult" }, "gate": { "$ref": "#/$defs/semanticGate" }, "old": { "$ref": "#/$defs/semanticSnapshot" } }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": { "pattern": "^binding-mutation:[A-Za-z0-9:_.-]+$" },
+                  "value": {
+                    "type": "object", "additionalProperties": false, "required": ["subtype"],
+                    "properties": { "subtype": { "const": "binding_mutation" } }
+                  }
+                }
+              }
+            ]
+          },
+          "else": { "properties": { "value": { "properties": { "subtype": { "not": { "enum": ["semantic_binding", "binding_result", "binding_mutation"] } } } } } }
         }
       ]
     },
@@ -1802,7 +1978,7 @@
     }
   },
   "x-artel": {
-    "protocolRevision": 19,
+    "protocolRevision": 20,
     "hash": {
       "algorithm": "sha-256",
       "encoding": "hex",

@@ -1,7 +1,7 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex, StorageRuntimeRecord } from "../session/storage-protocol";
-import { type EngineAttemptState, type EngineEvent, type EngineSemanticBindingSnapshot, type EngineTarget, EngineTargetError, legacyLocalChildBirth, sameSemanticBinding } from "./contracts";
+import { type EngineAttemptState, type EngineBindingGate, type EngineEvent, type EngineSemanticBindingSnapshot, type EngineTarget, EngineTargetError, legacyLocalChildBirth, sameSemanticBinding } from "./contracts";
 import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import {
 	nativeHistoryEntry,
@@ -347,47 +347,54 @@ export class RocksEngineStore extends RocksEngineMutations {
 		signal?: AbortSignal,
 	): Promise<{ attemptId?: string; state: EngineAttemptState; payload: Record<string, unknown> }> {
 		let pinned = attemptId;
-		for (;;) {
-			signal?.throwIfAborted();
-			const changed = this.changeSignal();
-			const command = await this.row<RocksCommand>("command", commandId);
-			if (command && command.agent_instance_id !== agentId)
-				throw new EngineTargetError("stale_target", "Child command belongs to another agent");
-			if (command?.identity.attemptId) {
-				if (pinned && pinned !== command.identity.attemptId)
-					throw new EngineTargetError("stale_target", "Child Attempt changed");
-				pinned = command.identity.attemptId;
-			}
-			const attempt = pinned ? await this.getAttempt(pinned) : undefined;
-			if (attempt && (attempt.agent_instance_id !== agentId || attempt.command_id !== commandId))
-				throw new EngineTargetError("stale_target", "Child Attempt belongs to another launch");
-			if (attempt && terminal.has(attempt.state)) {
-				const event = attempt.result_payload ? undefined : await this.terminalEvent(attempt.attempt_id);
-				if (attempt.result_payload || event)
+		const cancelled = Promise.withResolvers<void>();
+		const abort = () => cancelled.resolve();
+		signal?.addEventListener("abort", abort, { once: true });
+		try {
+			for (;;) {
+				signal?.throwIfAborted();
+				const changed = this.changeSignal();
+				const command = await this.row<RocksCommand>("command", commandId);
+				signal?.throwIfAborted();
+				if (command && command.agent_instance_id !== agentId)
+					throw new EngineTargetError("stale_target", "Child command belongs to another agent");
+				if (command?.identity.attemptId) {
+					if (pinned && pinned !== command.identity.attemptId)
+						throw new EngineTargetError("stale_target", "Child Attempt changed");
+					pinned = command.identity.attemptId;
+				}
+				const attempt = pinned ? await this.getAttempt(pinned) : undefined;
+				signal?.throwIfAborted();
+				if (attempt && (attempt.agent_instance_id !== agentId || attempt.command_id !== commandId))
+					throw new EngineTargetError("stale_target", "Child Attempt belongs to another launch");
+				if (attempt && terminal.has(attempt.state)) {
+					const event = attempt.result_payload ? undefined : await this.terminalEvent(attempt.attempt_id);
+					signal?.throwIfAborted();
+					if (attempt.result_payload || event)
+						return {
+							attemptId: pinned,
+							state: attempt.state,
+							payload: attempt.result_payload ?? event?.payload ?? {},
+						};
+				}
+				if (command?.receipt?.outcome === "rejected")
 					return {
 						attemptId: pinned,
-						state: attempt.state,
-						payload: attempt.result_payload ?? event?.payload ?? {},
+						state: "failed",
+						payload: {
+							error: command.receipt.detail?.message ?? command.receipt.detail?.code ?? "Child launch rejected",
+						},
 					};
+				const wake = Promise.withResolvers<void>();
+				const timer = setTimeout(() => wake.resolve(), runtimeLimits.eventWaitMs);
+				try {
+					await Promise.race([changed, cancelled.promise, wake.promise]);
+				} finally {
+					clearTimeout(timer);
+				}
 			}
-			if (command?.receipt?.outcome === "rejected")
-				return {
-					attemptId: pinned,
-					state: "failed",
-					payload: {
-						error: command.receipt.detail?.message ?? command.receipt.detail?.code ?? "Child launch rejected",
-					},
-				};
-			const wake = Promise.withResolvers<void>();
-			const abort = () => wake.resolve();
-			signal?.addEventListener("abort", abort, { once: true });
-			const timer = setTimeout(abort, runtimeLimits.eventWaitMs);
-			try {
-				await Promise.race([changed, wake.promise]);
-			} finally {
-				clearTimeout(timer);
-				signal?.removeEventListener("abort", abort);
-			}
+		} finally {
+			signal?.removeEventListener("abort", abort);
 		}
 	}
 	constructor(client: StorageClient) {
@@ -431,6 +438,13 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const attempt = id ? await this.row<RocksAttempt>("attempt", id, work) : undefined;
 		if ((attemptId && !attempt) || (attempt && attempt.agent_instance_id !== identity.agent_instance_id))
 			throw new EngineTargetError("stale_target", "Exact Attempt is not owned by this agent");
+		if (!attemptId && attempt) {
+			const gate = identity.agent_instance_ref?.startsWith("grimoire://agents/~u/")
+				? (await this.row<{ gate: EngineBindingGate }>("metadata", `semantic-binding:${identity.agent_instance_id}`, work))?.gate
+				: undefined;
+			if (gate && !sameSemanticBinding(attempt.binding_snapshot, gate.committedTarget ?? gate.bindingSnapshot))
+				return undefined;
+		}
 		return attempt;
 	}
 	async assertCut(

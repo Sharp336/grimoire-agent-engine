@@ -197,6 +197,7 @@ export interface EngineApprovalRow {
 export type EngineCommandAdmission =
 	| { status: "claimed" }
 	| { status: "in_progress" }
+	| { status: "binding_pending" }
 	| { status: "replay"; receipt: EngineCommandReceipt };
 
 export class EngineCommandConflictError extends Error {
