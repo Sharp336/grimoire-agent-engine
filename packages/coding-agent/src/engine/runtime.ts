@@ -320,7 +320,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 		selectors: Array<string | undefined>;
 		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
 		activateCandidate: ResolvedEngineExecution["activateCandidate"];
-		ruleEventPending?: string;
+		ruleEventsPending?: string[];
 		choice: ExecutorChoice;
 	};
 	leaseHeartbeat?: NodeJS.Timeout;
@@ -1327,7 +1327,9 @@ export class EngineRuntime {
 						this.#trackRun(this.#finishPause(binding, binding.attemptId));
 					}
 				} else if (action === "resume") {
-					if (binding.attemptState === "paused" && binding.approvalPauseCause) {
+					if ((binding.attemptState === "paused" || binding.attemptState === "pause_requested") && binding.approvalPauseCause) {
+						if (binding.attemptState === "pause_requested")
+							throw new EngineBindingPendingError("Branch Resume awaits its retained approval pause");
 						const approvals = await this.store.durableApprovalPause(binding.attemptId);
 						if (!approvals || approvals.some(approval =>
 							approval.status !== "approved" && approval.status !== "denied"))
@@ -3078,10 +3080,12 @@ export class EngineRuntime {
 								digest, parent.execution.config.routingLimits,
 							);
 							if (!changed) return false;
+							if (changed.event.kind !== "executor_route_changed")
+								throw new EngineTargetError("stale_target", "Fallback did not commit its route event");
 							parent.execution.activateCandidate(index, digest);
 							parent.executionDigest = digest;
 							parent.execution.choice = changed.choice;
-							parent.execution.ruleEventPending = (changed.event.payload as ExecutorChoice["transitions"][number]).event_id;
+							(parent.execution.ruleEventsPending ??= []).push(changed.event.payload.event_id);
 							this.#notifyEvents([changed.event]);
 							return true;
 						},
@@ -3090,10 +3094,11 @@ export class EngineRuntime {
 							if (!parent) throw new EngineTargetError("stale_target", "Executor binding disappeared after route admission");
 							// Persist and append before retry sends its first provider request. A nextTurn queue
 							// may not drain during fallback and is not evidence that the rule was delivered.
-							const eventId = parent.execution.ruleEventPending;
-							if (!eventId) throw new EngineTargetError("stale_target", "Fallback lost its committed rule event");
-							await this.#repairExecutorRuleMessages(parent, parent.execution.choice, parent.execution.config, eventId);
-							parent.execution.ruleEventPending = undefined;
+							const eventIds = parent.execution.ruleEventsPending;
+							if (!eventIds?.length) throw new EngineTargetError("stale_target", "Fallback lost its committed rule events");
+							for (const eventId of eventIds)
+								await this.#repairExecutorRuleMessages(parent, parent.execution.choice, parent.execution.config, eventId);
+							parent.execution.ruleEventsPending = undefined;
 						},
 					},
 				},

@@ -299,6 +299,19 @@ describe("createTools", () => {
 		expect(tools.map(tool => tool.name)).toEqual(["read", "write"]);
 	});
 
+	it("honors explicit restricted hub admission without bypassing IRC gates", async () => {
+		const settings = createSettingsWithOverrides({ "tools.xdev": false, "task.maxRecursionDepth": 2 });
+		const admitted = await createTools(createTestSession({ settings, restrictToolNames: true }), ["read", "hub"]);
+		expect(admitted.map(tool => tool.name)).toContain("hub");
+		const absent = await createTools(createTestSession({ settings, restrictToolNames: true }), ["read"]);
+		expect(absent.map(tool => tool.name)).not.toContain("hub");
+		const disabled = await createTools(createTestSession({ settings, restrictToolNames: true, enableIrc: false }), ["read", "hub"]);
+		expect(disabled.map(tool => tool.name)).not.toContain("hub");
+		const noPeers = await createTools(createTestSession({ restrictToolNames: true,
+			settings: createSettingsWithOverrides({ "tools.xdev": false, "task.maxRecursionDepth": 0 }) }), ["read", "hub"]);
+		expect(noPeers.map(tool => tool.name)).not.toContain("hub");
+	});
+
 	it("records active tools on the original session object", async () => {
 		const session = createTestSession();
 

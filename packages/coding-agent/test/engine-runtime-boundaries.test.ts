@@ -947,6 +947,50 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		} finally { releaseLeaf.resolve(); releaseResumedLeaf.resolve(); releaseSibling.resolve(); await runtime.dispose(); }
 	}, 60_000);
 
+	it("delivers committed shared rules after an unavailable fallback credential before the next route runs", async () => {
+		const primary = createMockModel({ id: "rules-primary", handler: { throw: "401 Unauthorized" } });
+		const revoked = createMockModel({ id: "rules-revoked", handler: { content: ["must not dispatch"] } });
+		const final = createMockModel({ id: "rules-final", handler: { content: ["authorized route completed"] } });
+		const env = await setup(primary.model, (session, input, identity) => session.prompt(input, identity));
+		const finalRef = "gctx:eeeeeeeeeeeeeeee";
+		const sharedRule = "SHARED_RULE_MUST_PRECEDE_FINAL_ROUTE";
+		const execution = admittedExecution(primary.model, env.registry, { fallbackModel: revoked.model, rules: [{
+			ref: "gctx:ffffffffffffffff", revision: 1, content_hash: hash(sharedRule), content: sharedRule,
+			route_refs: ["gctx:dddddddddddddddd", finalRef],
+		}] });
+		const route = structuredClone(execution.config.routes.routes[1]!);
+		route.route_ref = finalRef;
+		route.model_id = final.model.id;
+		route.modelId = final.model.id;
+		route.execution.provider_model_id = final.model.id;
+		route.execution.route_content_hash = hash({ route: finalRef });
+		execution.config.routes.routes.push(route);
+		env.executions.push(execution);
+		const find = spyOn(env.registry, "find").mockImplementation((provider, id) =>
+			[primary.model, revoked.model, final.model].find(model => model.provider === provider && model.id === id));
+		const key = spyOn(env.registry, "getApiKey").mockImplementation(async model => {
+			if (model.id === revoked.model.id) throw new Error("Fixture credential revoked");
+			return "fixture-key";
+		});
+		try {
+			const target = await env.start("rules-skipped-route", {}, env.runtime, execution);
+			await withTimeout(env.runtime.drain(), 10_000, "Authorized fallback did not finish");
+			expect((await env.runtime.store.getAttempt(target.attemptId))?.state).toBe("completed");
+			expect(primary.calls).toHaveLength(1);
+			expect(revoked.calls).toHaveLength(0);
+			expect(final.calls).toHaveLength(1);
+			const context = JSON.stringify(final.calls[0]!.context.messages);
+			expect(context.split(sharedRule)).toHaveLength(2);
+			const choice = (await env.runtime.store.getAttempt(target.attemptId))!.execution!.executor_choice;
+			expect(choice.transitions.map(transition => [transition.from.route_ref, transition.to.route_ref]))
+				.toEqual([["gctx:bbbbbbbbbbbbbbbb", "gctx:dddddddddddddddd"], ["gctx:dddddddddddddddd", finalRef]]);
+		} finally {
+			await env.runtime.dispose();
+			find.mockRestore();
+			key.mockRestore();
+		}
+	}, 30_000);
+
 	for (const outcome of ["answered", "auth_failed", "retry_failed"] as const) for (const restart of [false, true]) {
 		it(`records frozen fallback and resets selection on the next Attempt (${outcome}, restart=${restart})`, async () => {
 			const exhausted = outcome !== "answered";
