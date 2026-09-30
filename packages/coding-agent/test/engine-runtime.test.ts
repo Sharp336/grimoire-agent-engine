@@ -3174,6 +3174,89 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.dispose();
 		}, 60000);
 	}
+
+	it("applies a Stop compiled before Start binding using only the persisted source revision", async () => {
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [async () => {
+			await release.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async () => {
+			await release.promise;
+			return true;
+		});
+		const request = startRequest(execution, {
+			commandId: "start-bound-race", agentInstanceId: "agent-bound-race",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/bound-race",
+			executionId: "execution-bound-race", attemptId: "attempt-bound-race",
+		}, { cwd, principalId: "owner", input: "active", expectedIntentRevision: 0 });
+		const command: EngineCommandEnvelope = {
+			schema: "grimoire.engine.command.v1", op: "start", commandId: request.commandId,
+			deviceId: "device", engineId: "engine",
+			engineGeneration: runtime.engineGeneration, agentInstanceId: request.agentInstanceId,
+			agentInstanceRef: request.agentInstanceRef, bindingSnapshot: request.bindingSnapshot,
+			principalId: request.principalId,
+			executionId: request.executionId, attemptId: request.attemptId, authorityGeneration: 1,
+			issuedAt: Date.now(),
+			payload: {
+				cwd: request.cwd, input: request.input,
+				expectedIntentRevision: 0,
+				executionConfiguration: execution.config,
+				dispatchRef: execution.dispatchRef,
+				dispatchHash: execution.dispatchHash,
+				executionKind: "ordinary", specialRef: null,
+				originReceiptId: request.originReceiptId,
+			},
+		};
+		execution.captureCommand(command);
+		try {
+			await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+			const started = await runtime.start(request);
+			expect(started.intentRevision).toBe(1);
+			const result = await runtime.cancelPendingStart({
+				commandId: "stop-bound-race",
+				agentInstanceId: request.agentInstanceId,
+				executionId: request.executionId,
+				attemptId: request.attemptId,
+				authorityGeneration: request.authorityGeneration,
+				engineGeneration: runtime.engineGeneration,
+				pendingStartCommandId: command.commandId,
+				expectedStartIntentRevision: 0,
+				expectedIntentRevision: 0,
+			});
+			expect(result).toMatchObject({ manualHold: true, intentRevision: 2 });
+			expect((await runtime.store.getAttempt(command.attemptId))?.state).toBe("cancel_requested");
+		} finally {
+			release.resolve();
+			await runtime.drain();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("attributes parent-driven cancellation to the start command that owns the Attempt", async () => {
+		const prompt = Promise.withResolvers<boolean>();
+		const mock = createMockModel({ responses: [async () => {
+			await prompt.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, () => prompt.promise);
+		const events: Array<{ kind: string; causationCommandId: string }> = [];
+		runtime.subscribe(event => {
+			events.push(event);
+		});
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-parent-owned", agentInstanceId: "agent-parent-owned",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/agent-parent-owned",
+			executionId: "execution-parent-owned", attemptId: "attempt-parent-owned",
+		}, { cwd, principalId: "owner", input: "wait" }));
+		await runtime.cancelAgentInstance(started, "parent aborted");
+		prompt.resolve(true);
+		await runtime.drain();
+		expect(events.find(event => event.kind === "cancelled")?.causationCommandId).toBe("command-parent-owned");
+		await runtime.dispose();
+	}, 60000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
