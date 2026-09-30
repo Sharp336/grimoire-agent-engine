@@ -2309,6 +2309,8 @@ export class RocksEngineMutations {
 					for (const saved of ownership.value.members) {
 						parents.set(saved.agentInstanceId, saved.parentAgentInstanceId);
 						targets.set(saved.agentInstanceId, saved);
+						const original = await tx.get<RocksAttempt>("attempt", saved.attemptId);
+						if (original && terminal.has(original.state)) continue;
 						const current = await tx.get<RocksBinding>("binding", saved.agentInstanceId);
 						if (current && this.sameFence(current, saved) &&
 							sameSemanticBinding(current.binding_snapshot, saved.bindingSnapshot) &&

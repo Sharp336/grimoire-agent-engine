@@ -1241,6 +1241,11 @@ export class EngineRuntime {
 			let superseded = changed.superseded;
 			const blockedAncestors = new Set<string>();
 			const apply = async (agentId: string) => {
+				const saved = changed!.targets.get(agentId);
+				if (action === "resume" && saved) {
+					const original = await this.store.getAttempt(saved.attemptId);
+					if (original && TERMINAL_ATTEMPT_STATES.has(original.state)) return;
+				}
 				const binding = this.#bindings.get(agentId);
 				if (!binding) {
 					const retained = await this.store.getBinding(agentId);
@@ -1250,7 +1255,6 @@ export class EngineRuntime {
 					return;
 				}
 				const retained = await this.store.getBinding(agentId);
-				const saved = changed!.targets.get(agentId);
 				if (action === "resume" && (!saved || !retained ||
 					retained.attemptId !== saved.attemptId || retained.bindingId !== saved.bindingId ||
 					retained.executionId !== saved.executionId || retained.engineGeneration !== saved.engineGeneration ||
@@ -1387,10 +1391,10 @@ export class EngineRuntime {
 						}
 					}
 				}
+				if (queued) throw queued;
 				if (superseded)
 					throw new EngineTargetError("stale_target", "Branch Resume was partially superseded by a newer intent",
 						{ partial: true, superseded: true });
-				if (queued) throw queued;
 			} catch (error) {
 				if (resumeMessage && !(error instanceof EngineRoutingQueuedError) && !(error instanceof EngineBindingPendingError))
 					throw new EngineTargetError("message_accepted_resume_unknown", "User message was accepted; resume outcome is unknown");
