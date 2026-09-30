@@ -31,9 +31,8 @@ import {
 	type EngineCommandEnvelope,
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineAgentId } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentId, engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import type { RocksAttempt, RocksCommand } from "@oh-my-pi/pi-coding-agent/engine/rocks-runtime-rows";
 import {
 	type RuntimeScope,
 	runtimeLimits,
@@ -176,6 +175,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			continuation?: Partial<EngineExecutionConfiguration["continuationConfiguration"]>;
 			spawn?: EngineExecutionConfiguration["dispatch"]["spawn"];
 			continuationPolicy?: "exact" | "fresh";
+			scopeAgents?: number;
 			fallbackModel?: { provider: string; id: string } | null;
 		} = {},
 	) {
@@ -208,6 +208,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const routes: EngineExecutionConfiguration["routes"]["routes"] = [route(primaryRouteRef, model.id, model.provider)];
 		if (options.fallbackModel)
 			routes.push(route(fallbackRouteRef, options.fallbackModel.id, options.fallbackModel.provider));
+		const scopeAgents = options.scopeAgents ?? 4;
 		const spawn = options.spawn ?? spawnOff;
 		const config: EngineExecutionConfiguration = {
 			dispatch: {
@@ -238,8 +239,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			},
 			record_revisions: {},
 			routingLimits: {
-				scopes: [{ scope_ref: taskRef, agents: 4, by_tier: [], consultations: null }],
-				accounts: { "gctx:aaaaaaaaaaaaaaaa": 4 }, providers: { [model.provider]: 4 },
+				scopes: [{ scope_ref: taskRef, agents: scopeAgents, by_tier: [], consultations: null }],
+				accounts: { "gctx:aaaaaaaaaaaaaaaa": scopeAgents },
+				providers: { [model.provider]: scopeAgents },
 			},
 			scope_revision: hash("engine-runtime-test-scope"),
 			roster_revision: hash("engine-runtime-test-roster"),
@@ -277,8 +279,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					command.agentInstanceRef !== identity.agentInstanceRef ||
 					command.attemptId !== identity.attemptId || command.principalId !== identity.principalId)
 					throw new EngineTargetError("stale_target", "Origin differs from the exact fixture command");
+				// Return the exact captured binding snapshot, never a synthesized one: owned
+				// installation/bindingRevision/workStep/parent provenance must survive verification.
+				if (!command.bindingSnapshot)
+					throw new EngineTargetError("invalid_request", "Fixture Start command has no captured binding snapshot");
 				return {
-					verified: true, dispatchHash, bindingSnapshot: semanticBinding(command.agentInstanceRef!, taskRef),
+					verified: true, dispatchHash, bindingSnapshot: command.bindingSnapshot,
 					authContextId: "engine-runtime-test-auth", approvalSettings: null, specialApproval: null,
 				};
 			},
@@ -1641,6 +1647,893 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			flush.mockRestore();
 		}
 	});
+
+	it("removes a prepared history fork when execution resolution fails and preserves the source", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		// The failing branch resolution uses its own admitted execution whose resolver refuses after the fork.
+		let failResolution = false;
+		const failingExecution = admittedExecution(mock.model, {
+			taskRef: "grimoire://tasks/grimoire/fork-cleanup",
+		});
+		const failingOptions = failingExecution.optionsFor({ deviceId: "engine-runtime-test-device" });
+		const originalResolve = failingOptions.resolveExecution!;
+		const refusingResolve: typeof originalResolve = (config, frozen, attempt, resolverCwd, signal) => {
+			if (!failResolution) return originalResolve(config, frozen, attempt, resolverCwd, signal);
+			return Promise.reject(new Error("execution resolution unavailable"));
+		};
+		failingExecution.optionsFor = () => ({
+			...failingOptions,
+			resolveExecution: refusingResolve,
+		});
+
+		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		});
+		// Bind the failing resolver into this runtime's options before starting the branch.
+		const source = await runtime.start(startRequest(execution, {
+			commandId: "cleanup-source", agentInstanceId: "cleanup-source",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/cleanup-source",
+			executionId: "cleanup-source", attemptId: "cleanup-source",
+		}, { cwd, principalId: "owner", input: "retained source" }));
+		await runtime.drain();
+		const history = await nativeHistory(runtime, source.agentInstanceId);
+		const fork = spyOn(SessionManager, "forkNativeContext");
+		try {
+			failResolution = true;
+			await expect(
+				runtime.start(startRequest(failingExecution, {
+					commandId: "cleanup-branch", agentInstanceId: "cleanup-branch",
+					agentInstanceRef: "grimoire://tasks/grimoire/fork-cleanup/agents/cleanup-branch",
+					executionId: "cleanup-branch", attemptId: "cleanup-branch",
+				}, {
+					cwd, principalId: "owner",
+					historyEdit: {
+						mode: "branch",
+						source,
+						sourceSessionId: history.sessionId,
+						expectedLeafEntryId: history.sessionLeafEntryId!,
+						entryId: history.entries[0]!.entryId,
+					},
+				})),
+			).rejects.toThrow();
+			expect(fork).toHaveBeenCalledTimes(1);
+			expect(((await fork.mock.results[0]!.value) as SessionManager).getSessionFile()).toBeDefined();
+			expect(await runtime.store.getBinding("cleanup-branch")).toBeUndefined();
+			expect(await runtime.store.getAttempt("cleanup-branch")).toBeUndefined();
+			expect(await nativeHistory(runtime, source.agentInstanceId)).toEqual(history);
+		} finally {
+			fork.mockRestore();
+			await runtime.dispose();
+		}
+	});
+
+	it("fails a history fork when its retained conversation cannot be read", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		});
+		const first = await runtime.start(startRequest(execution, {
+			commandId: "command-retained-read-a", agentInstanceId: "agent-retained-read",
+			agentInstanceRef: "grimoire://tasks/grimoire/retained-read/agents/agent-retained-read",
+			executionId: "execution-retained-read-a", attemptId: "attempt-retained-read-a",
+		}, { cwd, principalId: "owner", input: "Keep this context" }));
+		await runtime.drain();
+		const failedRead = spyOn(RocksNativeSessionStorage.prototype, "readContext").mockRejectedValue(
+			new Error("injected retained storage failure"),
+		);
+		try {
+			await expect(
+				runtime.start(startRequest(execution, {
+					commandId: "command-retained-read-b", agentInstanceId: first.agentInstanceId,
+					agentInstanceRef: "grimoire://tasks/grimoire/retained-read/agents/agent-retained-read",
+					executionId: "execution-retained-read-b", attemptId: "attempt-retained-read-b",
+				}, { cwd, principalId: "owner", input: "Must not silently reset" })),
+			).rejects.toThrow("Retained AgentSession conversation could not be loaded");
+		} finally {
+			failedRead.mockRestore();
+		}
+		await runtime.dispose();
+	}, 60_000);
+
+	it("cancels a pending Start before waiting for shutdown lanes", async () => {
+		let dispatched = false;
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		// Park the resolver: resolution only finishes after the Engine cancels it.
+		let releaseResolution: (() => void) | undefined;
+		const resolutionGate = new Promise<void>(resolve => {
+			releaseResolution = resolve;
+		});
+		const { runtime, cwd, options } = await createRuntime(execution, async () => {
+			dispatched = true;
+			return true;
+		});
+		// Swap in a resolver that blocks until cancelled; keep the same verified origin contract.
+		const blockedOptions: EngineRuntimeOptions = {
+			...options,
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				const gate = resolutionGate;
+				void gate;
+				const abort = new Promise<never>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+				});
+				await Promise.race([resolutionGate, abort]);
+				return execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!(
+					config, frozen, attempt, resolverCwd, signal);
+			},
+		};
+		await runtime.dispose();
+		const blocked = await openRuntime(blockedOptions);
+		const pending = blocked
+			.start(startRequest(execution, {
+				commandId: "shutdown-resolution-start", agentInstanceId: "shutdown-resolution-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/shutdown-resolution/agents/one",
+				executionId: "shutdown-resolution-execution", attemptId: "shutdown-resolution-attempt",
+			}, { cwd, principalId: "owner", input: "work" }))
+			.then(
+				value => ({ value }),
+				error => ({ error }),
+			);
+		const disposed = blocked.dispose({ closeStore: false });
+		try {
+			await withTimeout(disposed, 2000, "Shutdown waited for pending execution resolution");
+			expect(await pending).toHaveProperty("error");
+			expect(dispatched).toBeFalse();
+			expect(await blocked.store.getAttempt("shutdown-resolution-attempt")).toBeUndefined();
+		} finally {
+			releaseResolution?.();
+			await Promise.allSettled([pending]);
+			await blocked.store.close();
+		}
+	}, 15000);
+
+	it("applies Pause while a native usage query is pending and aborts the provider on IPC close", async () => {
+		const entered = Promise.withResolvers<void>();
+		const aborted = Promise.withResolvers<void>();
+		const provider = Promise.withResolvers<void>();
+		const prompt = Promise.withResolvers<boolean>();
+		const ready = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [async () => {
+			await prompt.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			session.fetchUsageReports = async signal => {
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				entered.resolve();
+				await provider.promise;
+				return [];
+			};
+			ready.resolve();
+			return await prompt.promise;
+		});
+		const agentInstanceRef = "grimoire://tasks/grimoire/usage-control/agents/one";
+		const runtimeDir = path.join(cwd, "control-query");
+		fs.mkdirSync(runtimeDir);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "device",
+			engineId: "engine",
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		let usage: Promise<unknown> = Promise.resolve();
+		try {
+			const started = await runtime.start(startRequest(execution, {
+				commandId: "start-usage-control",
+				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+				agentInstanceRef,
+				executionId: "execution-usage-control", attemptId: "attempt-usage-control",
+			}, { cwd, principalId: "owner", input: "test pending usage" }));
+			await ready.promise;
+			usage = client
+				.request("runtime.usage", { agentInstanceRef, attemptId: started.attemptId, principalId: "owner" })
+				.then(
+					() => undefined,
+					error => error,
+				);
+			await withTimeout(entered.promise, 2_000, "Native usage query did not reach the provider");
+			const paused = await withTimeout(
+				runtime.pause({ ...started, commandId: "pause-during-usage", initiator: { kind: "human" } }),
+				2_000,
+				"Provider usage blocked Pause",
+			);
+			expect(paused.manualHold).toBeTrue();
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
+			await server.close();
+			expect(await usage).toBeInstanceOf(Error);
+			await withTimeout(aborted.promise, 2_000, "Disconnected usage query retained its provider request");
+		} finally {
+			await server.close();
+			provider.resolve();
+			prompt.resolve(true);
+			await usage;
+			await runtime.dispose();
+		}
+	}, 20_000);
+
+	it("reports unsupported provider usage when no reports exist", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async session => {
+			session.fetchUsageReports = async () => [];
+			return true;
+		});
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "usage-empty", agentInstanceId: "usage-agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/usage-empty/agents/one",
+			executionId: "usage-execution", attemptId: "usage-attempt",
+		}, { cwd, principalId: "owner", input: "test usage" }));
+		await runtime.drain();
+		expect((await runtime.sessionUsage(started)).provider).toEqual({
+			status: "unavailable",
+			reason: "provider_usage_not_supported",
+		});
+		await runtime.dispose();
+	});
+
+	it("records unrestricted tools without exposing their raw input", async () => {
+		const mock = toolTurnModel("read-unrestricted", "read", { path: "secret-name.txt" });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
+		await runtime.start(startRequest(execution, {
+			commandId: "command-unrestricted", agentInstanceId: "agent-unrestricted",
+			agentInstanceRef: "grimoire://tasks/grimoire/unrestricted/agents/one",
+			executionId: "execution-unrestricted", attemptId: "attempt-unrestricted",
+		}, { cwd, principalId: "owner", input: "read" }));
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("tool_"));
+		expect(events.map(event => event.kind)).toEqual(["tool_started", "tool_settled"]);
+		expect(JSON.stringify(events)).not.toContain("secret-name.txt");
+		const effectId = String((events[0]?.payload as { invocationId?: string }).invocationId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			state: "settled",
+			outcome: "completed",
+			policy: "unrestricted",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
+	it("records model dispatch certainty without exposing the prompt", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		await runtime.start(startRequest(execution, {
+			commandId: "command-model-effect", agentInstanceId: "agent-model-effect",
+			agentInstanceRef: "grimoire://tasks/grimoire/model-effect/agents/one",
+			executionId: "execution-model-effect", attemptId: "attempt-model-effect",
+		}, { cwd, principalId: "owner", input: "private prompt sentinel" }));
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("model_"));
+		expect(events.map(event => event.kind)).toEqual(["model_started", "model_settled"]);
+		expect(JSON.stringify(events)).not.toContain("private prompt sentinel");
+		const effectId = String((events[0]?.payload as { effectId?: string }).effectId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			effect_kind: "model",
+			state: "settled",
+			outcome: "completed",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
+	it("keeps reasoning and tool input out of public trace events", async () => {
+		const mock = createMockModel({
+			reasoning: true,
+			responses: [
+				{
+					content: [
+						{ type: "thinking", thinking: "private reasoning sentinel" },
+						{ type: "toolCall", id: "read-private", name: "read", arguments: { path: "private-input.txt" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const execution = admittedExecution(mock.model, {
+			continuation: { toolNames: ["read"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		fs.writeFileSync(path.join(cwd, "private-input.txt"), "private tool output sentinel");
+		await runtime.start(startRequest(execution, {
+			commandId: "command-public-trace", agentInstanceId: "agent-public-trace",
+			agentInstanceRef: "grimoire://tasks/grimoire/public-trace/agents/one",
+			executionId: "execution-public-trace", attemptId: "attempt-public-trace",
+		}, { cwd, principalId: "owner", input: "inspect the file" }));
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		const trace = events.filter(event => event.kind.startsWith("trace_"));
+		expect(trace.some(event => event.kind === "trace_reasoning")).toBe(true);
+		expect(trace.some(event => event.kind === "trace_tool")).toBe(true);
+		const tools = trace.filter(event => event.kind === "trace_tool").map(event => (event.payload as { tool?: unknown }).tool);
+		expect(tools).toEqual([
+			{ callId: "read-private", name: "read" },
+			expect.objectContaining({ callId: "read-private", name: "read", outcome: "ok" }),
+		]);
+		expect(JSON.stringify(trace)).not.toMatch(
+			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
+		);
+		expect(
+			events.some(
+				event =>
+					event.kind === "message_updated" &&
+					event.payload?.stream === "thinking" &&
+					event.payload?.text === "private reasoning sentinel",
+			),
+		).toBeTrue();
+		await runtime.dispose();
+	}, 60_000);
+
+	it("applies native history edit and branch starts without flattening or changing the source branch", async () => {
+		const dispatches: Array<{
+			kind: string | undefined;
+			input: string;
+			sessionId: string;
+			messages: string;
+		}> = [];
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async (session, input, _identity, kind) => {
+			dispatches.push({
+				kind,
+				input,
+				sessionId: session.sessionId,
+				messages: JSON.stringify(session.sessionManager.buildSessionContext().messages),
+			});
+			if (kind === "prompt" || kind === undefined) {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			}
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `answer:${input}` }],
+				api: "engine-runtime-test",
+				provider: "mock",
+				model: "test",
+				usage: {
+					input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			return true;
+		});
+		const request = (commandId: string, attemptId: string, agentInstanceId: string, input?: string) =>
+			startRequest(execution, {
+				commandId, agentInstanceId,
+				agentInstanceRef: `grimoire://tasks/grimoire/history-edit/agents/${agentInstanceId}`,
+				executionId: `execution-${attemptId}`, attemptId,
+			}, { cwd, principalId: "owner", ...(input !== undefined ? { input } : {}) });
+		const source = await runtime.start(request("history-source-command", "history-source-attempt", "history-source", "original user"));
+		await runtime.drain();
+		const sourceHistory = await nativeHistory(runtime, source.agentInstanceId);
+		const sourceUser = sourceHistory.entries.find(entry => entry.role === "user");
+		const sourceAssistant = sourceHistory.entries.find(entry => entry.role === "assistant");
+		if (!sourceUser || !sourceAssistant || !sourceHistory.sessionLeafEntryId || !source.sessionFile) {
+			throw new Error("Expected complete source history");
+		}
+		const firstPending = await runtime.enqueueInbox(source, {
+			sourceEventId: "history-edit-pending-first",
+			sourceType: "user",
+			body: "review first",
+			createdAt: Date.now(),
+		});
+		const secondPending = await runtime.enqueueInbox(source, {
+			sourceEventId: "history-edit-pending-second",
+			sourceType: "user",
+			body: "review second",
+			createdAt: Date.now() + 1,
+		});
+		await runtime.reorderInbox(
+			source,
+			"history-edit-pending-order",
+			[firstPending.item.queueId, secondPending.item.queueId],
+			[secondPending.item.queueId, firstPending.item.queueId],
+		);
+		const pendingBeforeEdit = await runtime.listInbox(source);
+
+		const branchRequest = request("history-branch-command", "history-branch-attempt", "history-branch", "new branch prompt");
+		branchRequest.historyEdit = {
+			mode: "branch",
+			source,
+			sourceSessionId: sourceHistory.sessionId,
+			expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+			entryId: sourceUser.entryId,
+		};
+		const branched = await runtime.start(branchRequest);
+		await runtime.drain();
+		expect(branched.sessionFile).not.toBe(source.sessionFile);
+		expect(branched.historyEdit).toMatchObject({ mode: "branch", sourceEntryId: sourceUser.entryId });
+		const branchDispatch = dispatches.find(call => call.input === "new branch prompt");
+		expect(branchDispatch?.messages).toContain("original user");
+		expect(branchDispatch?.messages).not.toContain("answer:original user");
+		expect(await runtime.listInbox(branched, true)).toEqual([]);
+		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
+		const unchanged = await nativeHistory(runtime, source.agentInstanceId);
+		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
+
+		const editedRequest = request(
+			"history-edit-command", "history-edit-attempt", source.agentInstanceId,
+		);
+		editedRequest.context = JSON.stringify({ work_tracking: { receipt: "R-history-edit" } });
+		editedRequest.clientMessageId = "edited-client-message";
+		editedRequest.historyEdit = {
+			mode: "edit",
+			source,
+			sourceSessionId: sourceHistory.sessionId,
+			expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+			entryId: sourceAssistant.entryId,
+			replacementText: "edited assistant",
+		};
+		const edited = await runtime.start(editedRequest);
+		await runtime.drain();
+		expect(edited.sessionFile).not.toBe(source.sessionFile);
+		expect(edited.historyEdit).toMatchObject({
+			mode: "edit",
+			sourceEntryId: sourceAssistant.entryId,
+			sessionId: expect.any(String),
+			replacementEntryId: expect.any(String),
+		});
+		const editDispatch = dispatches.find(call => call.kind === "continue_after_assistant");
+		expect(editDispatch?.messages).toContain('"role":"assistant"');
+		expect(editDispatch?.messages).toContain("edited assistant");
+		expect(editDispatch?.messages).toContain("R-history-edit");
+		expect(JSON.stringify((await nativeHistory(runtime, source.agentInstanceId)).entries)).not.toContain(
+			"R-history-edit",
+		);
+		expect(edited.manualHold).toBeTrue();
+		await runtime.dispose();
+	}, 60_000);
+
+	it("rejects a history branch while the exact source Attempt is unfinished", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [async () => {
+			entered.resolve();
+			await release.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		});
+		const source = await runtime.start(startRequest(execution, {
+			commandId: "active-history-source-command", agentInstanceId: "active-history-source",
+			agentInstanceRef: "grimoire://tasks/grimoire/active-history/agents/one",
+			executionId: "active-history-source-execution", attemptId: "active-history-source-attempt",
+		}, { cwd, principalId: "owner", input: "active source" }));
+		await entered.promise;
+		await runtime.agentRegistry.get(source.engineAgentId)!.session!.sessionManager.flush();
+		const history = await nativeHistory(runtime, source.agentInstanceId);
+		if (!history.sessionLeafEntryId || !history.entries[0]) throw new Error("Expected active source history");
+
+		const branchRequest = startRequest(execution, {
+			commandId: "active-history-branch-command", agentInstanceId: "active-history-branch",
+			agentInstanceRef: "grimoire://tasks/grimoire/active-history/agents/branch",
+			executionId: "active-history-branch-execution", attemptId: "active-history-branch-attempt",
+		}, { cwd, principalId: "owner", input: "branch while active" });
+		branchRequest.historyEdit = {
+			mode: "branch",
+			source,
+			sourceSessionId: history.sessionId,
+			expectedLeafEntryId: history.sessionLeafEntryId,
+			entryId: history.entries[0].entryId,
+		};
+		await expect(runtime.start(branchRequest)).rejects.toMatchObject({ code: "agent_busy" });
+		expect(runtime.getBinding("active-history-branch")).toBeUndefined();
+		release.resolve();
+		await runtime.drain();
+		await runtime.dispose();
+	}, 60_000);
+
+	it("rejects an over-budget Resume before adding its context to the live or retained session", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [async () => {
+			entered.resolve();
+			await release.promise;
+			return { content: ["answer"] };
+		}] });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async () => {
+			entered.resolve();
+			await release.promise;
+			return true;
+		});
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "budget-context-start", agentInstanceId: "budget-context-root",
+			agentInstanceRef: "grimoire://tasks/grimoire/context-budget/agents/root",
+			executionId: "budget-context-execution", attemptId: "budget-context-attempt",
+		}, { cwd, principalId: "owner", input: "hold this Attempt" }));
+		await entered.promise;
+		const paused = nextEngineEvent(runtime, "paused");
+		const hold = await runtime.pause({
+			...started,
+			commandId: "budget-context-pause",
+			initiator: { kind: "human" },
+			expectedIntentRevision: 0,
+		});
+		release.resolve();
+		await paused;
+		const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+		await session.sessionManager.flush();
+		await runtime.store.assertIntent(started.agentInstanceId, hold.intentRevision);
+		const messages = JSON.stringify(session.messages);
+		const retained = JSON.stringify(session.sessionManager.buildSessionContext().messages);
+		try {
+			for (let n = 1; n <= runtimeLimits.branchControlRecords; n++)
+				await runtime.store.registerAgent({
+					agentInstanceId: `budget-context-child-${n}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/context-budget/agents/child-${n}`,
+					parentAgentInstanceId: started.agentInstanceId,
+					principalId: "",
+					authorityGeneration: 1,
+				});
+			const error = await runtime
+				.resume({
+					...started,
+					commandId: "budget-context-resume",
+					initiator: { kind: "human" },
+					expectedIntentRevision: hold.intentRevision,
+					context: "This rejected context must never reach the agent",
+				})
+				.then(
+					() => null,
+					(resumeError: unknown) => resumeError,
+				);
+			expect(error).toMatchObject({ code: "restore_budget" });
+			expect(JSON.stringify(session.messages)).toBe(messages);
+			expect(JSON.stringify(session.sessionManager.buildSessionContext().messages)).toBe(retained);
+			expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+				manualHold: true,
+				intentRevision: hold.intentRevision,
+			});
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		} finally {
+			await runtime.dispose();
+		}
+	}, 120_000);
+
+	it("starts one new Attempt from an immediate ordinary queue wake after the active Attempt settles", async () => {
+		const firstPrompt = Promise.withResolvers<boolean>();
+		const inputs: string[] = [];
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model);
+		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
+			inputs.push(input);
+			return inputs.length === 1 ? await firstPrompt.promise : true;
+		});
+		const started = await runtime.start(startRequest(execution, {
+			commandId: "command-auto-queue-a", agentInstanceId: "agent-auto-queue",
+			agentInstanceRef: "grimoire://tasks/grimoire/auto-queue/agents/one",
+			executionId: "execution-auto-queue-a", attemptId: "attempt-auto-queue-a",
+		}, { cwd, principalId: "owner", input: "first" }));
+		const wakes: EngineEvent[] = [];
+		runtime.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
+		});
+		const queued = await runtime.enqueueInbox(started, {
+			sourceEventId: "ordinary-auto-queue",
+			sourceType: "user",
+			body: "queued canonical body",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		const queuedSecond = await runtime.enqueueInbox(started, {
+			sourceEventId: "ordinary-auto-queue-second",
+			sourceType: "user",
+			body: "second queued canonical body",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		await Bun.sleep(100);
+		expect(wakes).toHaveLength(0);
+
+		firstPrompt.resolve(true);
+		await runtime.drain();
+		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(wakes[0]?.payload).toEqual({
+			action: "wake_due",
+			queueId: queued.item.queueId,
+			revision: 2,
+			intentRevision: started.intentRevision,
+			manualHold: false,
+		});
+		const intervening = await runtime.start(startRequest(execution, {
+			commandId: "command-auto-queue-intervening", agentInstanceId: started.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/grimoire/auto-queue/agents/one",
+			executionId: "execution-auto-queue-intervening", attemptId: "attempt-auto-queue-intervening",
+		}, { cwd, principalId: "owner", input: "intervening direct Send" }));
+		const staleWake = startRequest(execution, {
+			commandId: "command-auto-queue-old-wake", agentInstanceId: started.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/grimoire/auto-queue/agents/one",
+			executionId: "execution-auto-queue-old-wake", attemptId: "attempt-auto-queue-old-wake",
+		}, {
+			cwd, principalId: "owner",
+			queueId: queued.item.queueId,
+			expectedRevision: 2,
+			mutationId: "wake:ordinary-auto-queue:2",
+			expectedIntentRevision: started.intentRevision,
+		});
+		await expect(runtime.start(staleWake)).rejects.toMatchObject({ code: "stale_target" });
+		await runtime.drain();
+		for (let remaining = 50; wakes.length < 2 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(wakes[1]?.payload).toMatchObject({
+			queueId: queued.item.queueId,
+			revision: 3,
+			intentRevision: intervening.intentRevision,
+		});
+		const next = await runtime.start(startRequest(execution, {
+			commandId: "command-auto-queue-b", agentInstanceId: started.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/grimoire/auto-queue/agents/one",
+			executionId: "execution-auto-queue-b", attemptId: "attempt-auto-queue-b",
+		}, {
+			cwd, principalId: "owner",
+			queueId: queued.item.queueId,
+			expectedRevision: 3,
+			mutationId: "wake:ordinary-auto-queue:3",
+			expectedIntentRevision: intervening.intentRevision,
+		}));
+		expect(next).toMatchObject({
+			duplicate: false,
+			queueId: queued.item.queueId,
+			queueRevision: 4,
+			manualHold: false,
+		});
+		const nextEvents = (await runtime.store.pendingEvents()).filter(event => event.attemptId === next.attemptId);
+		expect(
+			nextEvents.find(
+				event =>
+					event.kind === "inbox_changed" &&
+					event.payload?.action === "acknowledge" &&
+					event.payload?.queueId === queued.item.queueId,
+			),
+		).toMatchObject({
+			causationCommandId: "command-auto-queue-b",
+			payload: {
+				action: "acknowledge",
+				queueId: queued.item.queueId,
+				revision: 4,
+				sourceEventId: "ordinary-auto-queue",
+			},
+		});
+		await runtime.drain();
+		expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+			disposition: "acknowledged",
+			revision: 4,
+		});
+		expect(inputs).toEqual([
+			"first",
+			"intervening direct Send",
+			"queued canonical body",
+		]);
+		await runtime.dispose();
+	}, 60_000);
+
+	it("binds hosted MCP tools to their own origin across legacy history, children and restart, without fallback", async () => {
+		const live = { owned: new Set<string>(), foreign: new Set<string>() };
+		const calls = { owned: 0, foreign: 0 };
+		let unavailable = false;
+		const failedConnectionClosed = Promise.withResolvers<void>();
+		const serve = (origin: "owned" | "foreign") =>
+			Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					if (
+						origin === "owned" &&
+						(new URL(request.url).pathname !== "/mcp/core" ||
+							request.headers.get("Authorization") !== "Bearer isolated-mcp-test" ||
+							request.headers.get("X-Grimoire-Client") !== "engine-route-test")
+					) {
+						return new Response(null, { status: 403 });
+					}
+					if (request.method === "DELETE") {
+						live[origin].delete(request.headers.get("Mcp-Session-Id") ?? "");
+						if (origin === "owned" && unavailable) failedConnectionClosed.resolve();
+						return new Response(null, { status: 204 });
+					}
+					if (request.method === "GET") return new Response(null, { status: 405 });
+					const message = (await request.json()) as { id?: string | number; method: string };
+					if (message.id === undefined) return new Response(null, { status: 202 });
+					if (message.method === "initialize") {
+						const id = `${origin}-${++calls[origin]}`;
+						live[origin].add(id);
+						return Response.json(
+							{
+								jsonrpc: "2.0",
+								id: message.id,
+								result: {
+									protocolVersion: "2025-11-25",
+									capabilities: { tools: {} },
+									serverInfo: { name: origin, version: "1" },
+								},
+							},
+							{ headers: { "Mcp-Session-Id": id } },
+						);
+					}
+					if (message.method === "tools/list") {
+						if (origin === "owned") {
+							if (unavailable) return new Response(null, { status: 503 });
+							// Exceed MCPManager's UI startup grace: hosted model dispatch must wait for tools.
+							await Bun.sleep(350);
+						}
+						return Response.json({
+							jsonrpc: "2.0",
+							id: message.id,
+							result: {
+								tools: [
+									{
+										name: `${origin}_probe`,
+										description: `${origin} fixture lookup`,
+										inputSchema: { type: "object", properties: {} },
+									},
+								],
+							},
+						});
+					}
+					return Response.json({
+						jsonrpc: "2.0",
+						id: message.id,
+						error: { code: -32601, message: "unsupported fixture method" },
+					});
+				},
+			});
+		const owned = serve("owned");
+		const foreign = serve("foreign");
+		const discover = spyOn(mcpConfig, "loadAllMCPConfigs").mockResolvedValue({
+			configs: { foreign: { type: "http", url: `${foreign.url}mcp` } },
+			sources: {},
+			exaApiKeys: [],
+		});
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, {
+			continuation: { enableMCP: true },
+		});
+		const setup = await createRuntime(execution, (session, input) => session.prompt(input));
+		let runtime = setup.runtime;
+		const request = (agent: string, turn: number) =>
+			startRequest(execution, {
+				commandId: `${agent}-command-${turn}`, agentInstanceId: agent,
+				agentInstanceRef: `grimoire://tasks/grimoire/mcp-route/agents/${agent}`,
+				executionId: `${agent}-execution-${turn}`, attemptId: `${agent}-attempt-${turn}`,
+			}, { cwd: setup.cwd, principalId: "owner", input: `${agent} turn ${turn}` });
+		const lastMcpTools = () =>
+			mock.calls
+				.at(-1)
+				?.context.tools?.map(tool => tool.name)
+				.filter(name => name.startsWith("mcp__")) ?? [];
+		try {
+			const first = await runtime.start(request("route-root", 1));
+			await runtime.drain();
+			await runtime.start(request("route-root", 2));
+			await runtime.drain();
+			await runtime.start(request("route-root", 3));
+			await runtime.drain();
+			expect(lastMcpTools()).toEqual(["mcp__foreign_probe"]);
+			const oldHistory = await retainedEntries(runtime, first.sessionFile!);
+			const oldMessages = oldHistory.entries.filter(entry => entry.type === "message");
+			expect(oldMessages).toHaveLength(6);
+			await runtime.dispose();
+			expect(live.foreign.size).toBe(0);
+			const boundOptions: EngineRuntimeOptions = {
+				...setup.options,
+				mcpServer: {
+					...hostedCoreMcpConfig({
+						serverUrl: `${owned.url}mcp/client_agents`,
+						token: "isolated-mcp-test",
+						clientId: "engine-route-test",
+					}),
+					timeout: 1000,
+				},
+			};
+			runtime = await openRuntime(boundOptions);
+			const upgraded = await runtime.start(request("route-root", 4));
+			await runtime.drain();
+			expect(upgraded.sessionFile).toBe(first.sessionFile);
+			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
+			expect(calls.foreign).toBe(1);
+			expect(live.owned.size).toBe(1);
+			unavailable = true;
+			const modelCallsBeforeFailure = mock.calls.length;
+			await expect(runtime.start(request("mcp-unavailable", 1))).rejects.toThrow(
+				"Hosted Core MCP binding failed",
+			);
+			expect(mock.calls).toHaveLength(modelCallsBeforeFailure);
+			expect(runtime.getBinding("mcp-unavailable")).toBeUndefined();
+			// MCPManager rejects promptly and closes failed catalog sessions in the background.
+			await Promise.race([failedConnectionClosed.promise, Bun.sleep(1000)]);
+			expect(live.owned.size).toBeLessThanOrEqual(1);
+			expect(calls.foreign).toBe(1);
+			unavailable = false;
+			await runtime.dispose();
+			expect(live.owned.size).toBe(0);
+			runtime = await openRuntime(boundOptions);
+			const restarted = await runtime.start(request("route-root", 5));
+			await runtime.drain();
+			expect(restarted.sessionFile).toBe(first.sessionFile);
+			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
+			const retained = await retainedEntries(runtime, restarted.sessionFile!);
+			expect(retained.entries[0]).toEqual(oldHistory.entries[0]);
+			expect(retained.entries.filter(entry => entry.type === "message").slice(0, 6)).toEqual(oldMessages);
+			expect(JSON.stringify(retained.entries)).not.toContain("isolated-mcp-test");
+			await runtime.dispose();
+			expect(live.owned.size).toBe(0);
+			owned.stop(true);
+			runtime = await openRuntime(boundOptions);
+			const modelCallsBeforeOffline = mock.calls.length;
+			await expect(runtime.start(request("mcp-offline", 1))).rejects.toThrow(
+				"Hosted Core MCP binding failed",
+			);
+			expect(runtime.getBinding("mcp-offline")).toBeUndefined();
+			expect(mock.calls).toHaveLength(modelCallsBeforeOffline);
+			expect(calls.foreign).toBe(1);
+		} finally {
+			await runtime.dispose();
+			discover.mockRestore();
+			owned.stop(true);
+			foreign.stop(true);
+		}
+	}, 60_000);
+
+	it("launches six pinned children in parallel and rejects the seventh", async () => {
+		const taskCall = (index: number) => ({
+			type: "toolCall" as const,
+			id: `tool-child-${index}`,
+			name: "task",
+			arguments: {
+				target: { task_ref: "grimoire://tasks/grimoire/child-ceiling", work_step_id: `child-step-${index}` },
+				assignment: `Do child step ${index}`,
+			},
+		});
+		const mock = createMockModel({
+			responses: [{ content: Array.from({ length: 7 }, (_, index) => taskCall(index)) }, { content: ["done"] }],
+		});
+		const launches: Array<{ toolCallId: string; target: { work_step_id: string | null } }> = [];
+		const execution = admittedExecution(mock.model, {
+			spawn: { allowed: "auto", max_depth: 1, max_children: 6, on_exceed: "deny" },
+			continuation: { toolNames: ["task"], restrictToolNames: true },
+			scopeAgents: 8,
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {
+			launchChild: async request => {
+				launches.push(request);
+				return {
+					agentInstanceId: `child-${request.toolCallId}`,
+					status: "completed",
+					assistantFinal: `done ${request.toolCallId}`,
+				};
+			},
+		});
+		await runtime.start(startRequest(execution, {
+			commandId: "command-parent", agentInstanceId: "parent-agent",
+			agentInstanceRef: "grimoire://tasks/grimoire/child-ceiling/agents/parent-agent",
+			executionId: "execution-parent", attemptId: "attempt-parent",
+		}, { cwd, principalId: "owner", input: "delegate" }));
+		await runtime.drain();
+		expect(launches).toHaveLength(6);
+		// Parallel calls reserve the ceiling in any order: exactly one of the seven is refused.
+		const outcomes = Array.from({ length: 7 }, (_, index) => {
+			const id = `tool-child-${index}`;
+			const text = toolResultOf(mock, id)?.content.find(part => part.type === "text")?.text ?? "";
+			if (text === `done ${id}`) return "done";
+			return text.includes("Child spawn ceiling reached") ? "ceiling" : text;
+		});
+		expect([...outcomes].sort()).toEqual(["ceiling", ...Array.from({ length: 6 }, () => "done")]);
+		expect(launches.map(launch => launch.toolCallId)).not.toContain(`tool-child-${outcomes.indexOf("ceiling")}`);
+		for (const launch of launches) {
+			expect(launch).toMatchObject({
+				target: { work_step_id: launch.toolCallId.replace("tool-child-", "child-step-") },
+			});
+		}
+		await runtime.dispose();
+	}, 60_000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {

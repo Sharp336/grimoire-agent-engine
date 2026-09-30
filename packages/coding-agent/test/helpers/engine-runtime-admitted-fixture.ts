@@ -190,8 +190,11 @@ export function admittedExecution(
 				command.agentInstanceRef !== identity.agentInstanceRef ||
 				command.attemptId !== identity.attemptId || command.principalId !== identity.principalId)
 				throw new EngineTargetError("stale_target", "Origin differs from the exact fixture command");
+			// Return the exact captured binding snapshot, never a synthesized one.
+			if (!command.bindingSnapshot)
+				throw new EngineTargetError("invalid_request", "Fixture Start command has no captured binding snapshot");
 			return {
-				verified: true, dispatchHash, bindingSnapshot: semanticBinding(command.agentInstanceRef!, taskRef),
+				verified: true, dispatchHash, bindingSnapshot: command.bindingSnapshot,
 				authContextId: "engine-runtime-test-auth", approvalSettings: null, specialApproval: null,
 			};
 		},
