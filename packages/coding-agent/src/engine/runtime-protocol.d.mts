@@ -2311,9 +2311,21 @@ export type ExecutorSettingsRequest = {
 } | {
 	"kind": "graph";
 	"action": "plan_executor_graph";
-	"source_ref": ArtifactRef | null;
+	"source_ref": null;
+	"source_revision": 0;
+	"source_hash": null;
+	"payer_principal_id": string;
+	"records": Array<{
+		"ref": ArtifactRef;
+		"expected_revision": number;
+		"data": UserProviderRequest | UserModelRequest | ProviderAccountRequest | AvailableModelRouteRequest;
+	}>;
+} | {
+	"kind": "graph";
+	"action": "plan_executor_graph";
+	"source_ref": ArtifactRef;
 	"source_revision": number;
-	"source_hash": Hash | null;
+	"source_hash": Hash;
 	"payer_principal_id": string;
 	"records": Array<{
 		"ref": ArtifactRef;
@@ -2323,9 +2335,24 @@ export type ExecutorSettingsRequest = {
 } | {
 	"kind": "graph";
 	"action": "publish_executor_graph";
-	"source_ref": ArtifactRef | null;
+	"source_ref": null;
+	"source_revision": 0;
+	"source_hash": null;
+	"payer_principal_id": string;
+	"records": Array<{
+		"ref": ArtifactRef;
+		"expected_revision": number;
+		"data": UserProviderRequest | UserModelRequest | ProviderAccountRequest | AvailableModelRouteRequest;
+	}>;
+	"expected_graph_hash": Hash;
+	"expected_policy_hash": Hash;
+	"expected_after_policy_hash": Hash;
+} | {
+	"kind": "graph";
+	"action": "publish_executor_graph";
+	"source_ref": ArtifactRef;
 	"source_revision": number;
-	"source_hash": Hash | null;
+	"source_hash": Hash;
 	"payer_principal_id": string;
 	"records": Array<{
 		"ref": ArtifactRef;
