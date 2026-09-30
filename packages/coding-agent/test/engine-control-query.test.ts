@@ -4,6 +4,9 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { type EngineBindingSnapshot, EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
@@ -21,6 +24,7 @@ import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/sto
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
@@ -729,49 +733,97 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	}, 120_000);
 	it("serves an exact paused tool baseline through the native request validator", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
 		const agentInstanceRef = "grimoire://tasks/grimoire/control-tools/agents/agent";
-		await runtime.store.registerAgent({
-			agentInstanceId: "control-tools",
-			agentInstanceRef,
-			principalId: "owner",
-			authorityGeneration: 1,
+		const taskRef = "grimoire://tasks/grimoire/control-tools";
+		const bindingSnapshot = semanticBinding(agentInstanceRef, taskRef);
+		const dispatchRef = "gctx:cccccccccccccccc";
+		const hash = (value: unknown) => `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
+		const spawn = { allowed: "no", max_depth: 0, max_children: 0, on_exceed: "deny" } as const;
+		const limits = { timeout_seconds: null, max_iterations: null };
+		const dispatch = {
+			schema: "grimoire.dispatch.v2" as const, execution_kind: "ordinary" as const, special_ref: null,
+			dispatch_id: "control-tools-dispatch", target: { task_ref: taskRef, work_step_id: null },
+			prompt: "", instructions: "", skill_refs: [], display_name: null, preset: null,
+			tools: ["read"], tools_permit: [], tools_on_request: "none" as const, spawn,
+			requirement: {
+				min_tier: 0, required: [], required_tags: [], preferred_tags: [], models: null,
+				exclude: { models: [], families: [], agent_instances: [] }, min_context: null, min_output: null,
+				latency_ceiling_ms: null, min_effort: null, service_tier: "standard" as const, downgrade: "forbidden" as const,
+				pin: null, require_trusted_provider: true, fallback_mode: "none" as const,
+			},
+			output_schema: null, limits,
+		};
+		const dispatchHash = hash(dispatch);
+		const config = {
+			dispatch, routes: { routes: [{
+				model_id: "control-tools-model", route_ref: "gctx:bbbbbbbbbbbbbbbb", account_ref: "gctx:aaaaaaaaaaaaaaaa",
+				effort: "none" as const, service_tier: "standard" as const, billing_pool_id: "control-tools-pool",
+				billing_pool_basis: "expected" as const, tier: 0, provider_id: "control-tools-provider",
+				quota_window_ids: [], shadow_cost: null, price_source: "unknown" as const, estimated: false,
+				record_revisions: {}, provider: "mock", modelId: "control-tools-model", billing_pools: [], quota_windows: [],
+				execution: {
+					api: "openai-completions" as const, base_url: "http://127.0.0.1:1/v1", provider_model_id: "control-tools-model",
+					context_window: 32_000, max_output_tokens: 1024, input_modalities: ["text" as const],
+					supports_tools: true, supports_reasoning: false, header_refs: [], compat: null,
+					route_content_hash: hash("route"), account_content_hash: hash("account"),
+					display_name: "Control tools route", efforts: ["none" as const], trusted: true,
+					credential: { method: "none" as const, local_ref: null, hosted_ref: null, generation: 1 },
+					account_binding_id: null,
+				},
+				family: null, tags: [], efforts: ["none" as const], hard_quota_window_ids: [], order_match: null,
+			}] },
+			continuationPolicy: "exact" as const,
+			continuationConfiguration: {
+				systemPrompt: "", toolNames: ["read"], restrictToolNames: true, toolPolicies: {},
+				enableMCP: false, enableLsp: false, lspShared: false, disabledCapabilityProviders: [],
+				outputSchema: null, requireYieldTool: false, spawn, limits, tools_permit: [],
+				tools_on_request: "none" as const, providerPromptCacheKey: null,
+			},
+			stableDependencyDigest: hash("dependency"), sessionDefaults: {}, record_revisions: {},
+			routingLimits: {
+				scopes: [{ scope_ref: taskRef, agents: 1, by_tier: [], consultations: null }],
+				accounts: { "gctx:aaaaaaaaaaaaaaaa": 1 }, providers: { "control-tools-provider": 1 },
+			},
+			scope_revision: hash("scope"), roster_revision: hash("roster"), roster_complete: true as const,
+		};
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-cwd-${Snowflake.next()}-`));
+		const settings = await Settings.loadReadOnly({ cwd, agentDir: cwd });
+		const gate = Promise.withResolvers<void>();
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			deviceId: "device",
+			sessionDefaults: {
+				cwd, agentDir: cwd, settings, disableExtensionDiscovery: true, skills: [], contextFiles: [],
+				promptTemplates: [], slashCommands: [], enableMCP: false, enableLsp: false,
+				modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
+				model: { id: "control-tools-model", name: "Control tools model", provider: "mock", api: "mock",
+					baseUrl: "mock://", reasoning: false, input: ["text"], contextWindow: 32_000, maxTokens: 1024,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } as unknown as CreateAgentSessionOptions["model"],
+			},
+			dispatchPrompt: () => gate.promise.then(() => true),
+			resolveExecution: async (_execution, frozen) => ({
+				options: {}, selectors: frozen.map((_, index) => `control-tools-route-${index}`),
+				verifyCandidate: async () => {}, activateCandidate: () => {}, dispose: () => {},
+			}),
+			verifyOriginReceipt: async received => ({
+				verified: true, dispatchHash, bindingSnapshot, authContextId: "control-tools-auth",
+				approvalSettings: null, specialApproval: null,
+			}),
+		});
+		const attemptId = "tools-attempt";
+		const started = await runtime.start({
+			commandId: "tools-start", agentInstanceId: "control-tools", agentInstanceRef, bindingSnapshot,
+			executionId: "tools-execution", attemptId, authorityGeneration: 1, principalId: "owner", cwd,
+			input: "start", executionConfiguration: config, dispatchRef, dispatchHash,
+			executionKind: "ordinary", specialRef: null, originReceiptId: "origin:tools-start",
 		});
 		const target = {
-			agentInstanceId: "control-tools",
-			attemptId: "tools-attempt",
-			executionId: "tools-execution",
-			bindingId: "tools-binding",
-			commandId: "tools-start",
-			engineAgentId: "Engine-tools",
-			profileDigest: "profile",
-			state: "running" as const,
-			engineGeneration: runtime.engineGeneration,
-			authorityGeneration: 1,
-			bindingGeneration: 1,
+			agentInstanceId: "control-tools", attemptId, executionId: "tools-execution",
+			bindingId: started.bindingId, commandId: "tools-pause", authorityGeneration: 1,
+			engineGeneration: runtime.engineGeneration, bindingGeneration: started.bindingGeneration,
 		};
-		const startCommand: EngineCommandEnvelope = {
-			schema: "grimoire.engine.command.v1",
-			commandId: target.commandId,
-			op: "start",
-			deviceId: "device",
-			engineId: "engine",
-			engineGeneration: runtime.engineGeneration,
-			agentInstanceId: target.agentInstanceId,
-			agentInstanceRef,
-			bindingSnapshot: semanticBinding(agentInstanceRef, "grimoire://tasks/grimoire/control-tools"),
-			executionId: target.executionId,
-			attemptId: target.attemptId,
-			authorityGeneration: 1,
-			principalId: "owner",
-			issuedAt: Date.now(),
-			payload: { originReceiptId: "origin:tools-start" },
-		};
-		const identity = engineCommandIdentity(startCommand);
-		const admitted = await runtime.store.admitCommand(identity, runtime.engineGeneration);
-		expect(admitted.status).toBe("claimed");
-		await runtime.store.settleCommand(startCommand.commandId, identity.canonicalHash, { outcome: "applied" });
-		await runtime.store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
+		await runtime.pause({ ...target, initiator: { kind: "human" } });
+		gate.resolve();
 		const server = await startEngineControlQueryServer({
 			runtime,
 			runtimeDir: tempDir,
@@ -781,11 +833,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		});
 		try {
 			const client = new EngineControlQueryClient(tempDir);
-			const request = { agentInstanceRef, attemptId: target.attemptId, principalId: "owner", limit: 16 };
+			const request = { agentInstanceRef, attemptId, principalId: "owner", limit: 16 };
 			expect(await client.request("runtime.tools", request)).toMatchObject({
 				version: "1.0",
 				agentInstanceRef,
-				attemptId: target.attemptId,
+				attemptId,
 				revision: 0,
 				items: [],
 				nextCursor: null,
