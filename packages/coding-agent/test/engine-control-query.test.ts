@@ -831,8 +831,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			bindingId: liveBinding.bindingId, commandId: "tools-pause", authorityGeneration: 1,
 			engineGeneration: runtime.engineGeneration, bindingGeneration: liveBinding.bindingGeneration,
 		};
-		await runtime.pause({ ...target, initiator: { kind: "human" } });
-		gate.resolve();
+		void gate;
 		const server = await startEngineControlQueryServer({
 			runtime,
 			runtimeDir: tempDir,
