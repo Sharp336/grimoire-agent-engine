@@ -19,12 +19,14 @@ import type {
 	ProviderAdmissionIdentity,
 	ProviderApiKeyRouteIdentity,
 } from "./provider-admission";
+import { ProviderExecutionError } from "./provider-execution";
 import type {
+	BillingPoolProposal,
 	ProviderExecutionClient,
 	ProviderExecutionIdentity,
+	ProviderExecutionDescriptor,
 	ProviderExecutionMaterial,
 } from "./provider-execution";
-import { candidateIdentity } from "./routing-admission";
 
 /** Admitted Attempt facts every credential/admission request is bound to (§3, §8.3). */
 export type ExecutionAttemptIdentity = Omit<
@@ -56,8 +58,11 @@ export interface ResolvedEngineExecution {
 	/** Native retry selector per admitted frozen route unit (index-aligned); undefined = unusable here. */
 	selectors: Array<string | undefined>;
 	/** Recheck current route/credential authorization before a lease transfer or model swap. */
-	verifyCandidate(index: number, currentExecutionDigest: string, signal?: AbortSignal): Promise<void>;
+	verifyCandidate(index: number, currentExecutionDigest: string, signal?: AbortSignal): Promise<{
+		billing_pool_id: string; billing_pool_basis: "expected" | "observed";
+	}>;
 	activateCandidate(index: number, executionDigest: string): void;
+	setBillingPoolChanged(callback: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>): void;
 	dispose(): void;
 }
 
@@ -65,7 +70,7 @@ type RouteExecution = EngineExecutionRoute["execution"];
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const BROKER_CREDENTIAL_PLACEHOLDER = "gri_pbr_pending";
 
-const LOCAL_OMP_REF = /^localomp:\/([A-Za-z0-9][A-Za-z0-9._~@-]{0,254})(?:#([1-9][0-9]{0,15}))?$/;
+const LOCAL_OMP_REF = /^clientcred:\/\/localomp\.[a-f0-9]{64}$/;
 const CLIENT_CREDENTIAL_REF = /^(?:wincred|clientcred):\/[/]?[A-Za-z0-9][A-Za-z0-9._~-]{0,254}$/;
 
 /**
@@ -94,7 +99,15 @@ export class EngineExecutionResolver {
 		const settings = config.continuationConfiguration;
 		const spawn = config.dispatch.spawn;
 		const maxSpawnDepth = spawn.allowed === "no" ? 0 : spawn.max_depth;
-		const local = primary.execution.credential.local_ref?.match(LOCAL_OMP_REF);
+		const localRef = primary.execution.credential.local_ref;
+		const local = typeof localRef === "string" && LOCAL_OMP_REF.test(localRef);
+		if (local && !this.providerExecutionClient) throw new Error("Owner-local credential proof is unavailable");
+		const localDescriptor = local ? await this.providerExecutionClient!.describe(
+			{ ...attempt, ...routeIdentity(primary), modelId: primary.modelId }, signal) : undefined;
+		const localOAuth = localDescriptor?.localOAuth;
+		if (local && (!localOAuth || localDescriptor?.mode !== "owner_local" ||
+			primary.provider !== "openai-codex"))
+			throw new Error("Owner-local OAuth credential binding differs");
 		const admission: ProviderAdmissionIdentity | undefined =
 			local && primary.execution.account_binding_id
 				? {
@@ -106,8 +119,6 @@ export class EngineExecutionResolver {
 				: undefined;
 		if (admission) {
 			if (!this.providerAdmissionClient) throw new Error("Provider quota admission is unavailable");
-			if (local?.[1] !== admission.accountBindingId)
-				throw new Error("ProviderAccount quota identity does not match its local credential binding");
 			admission.executionPin = await this.providerAdmissionClient.pin(admission, primary.modelId, signal);
 		}
 		const sessionSettings = await Settings.loadReadOnly({
@@ -122,22 +133,30 @@ export class EngineExecutionResolver {
 		const attemptDir = path.join(this.credentialRoot, attempt.attemptId);
 		await fs.mkdir(attemptDir, { recursive: true });
 		const external = new Map<string, ProviderExecutionBinding>();
+		let billingPoolChanged: ((proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>) | undefined;
+		const client = this.providerExecutionClient;
+		const gatedMaterial = async (binding: ProviderExecutionBinding, materialSignal?: AbortSignal) => {
+			if (!client) throw new Error("Provider execution material is unavailable");
+			try {
+				return await client.resolve(binding.identity, materialSignal, binding.executionPin);
+			} catch (error) {
+				if (!(error instanceof ProviderExecutionError) || !error.billing || !billingPoolChanged) throw error;
+				// Current pool gate proposed one same-route transition: record it, then ask once more.
+				await billingPoolChanged(error.billing, materialSignal);
+				return await client.resolve(binding.identity, materialSignal, binding.executionPin);
+			}
+		};
 		const configValueResolver = (value: string, valueSignal?: AbortSignal) =>
-			resolveProviderExecutionCredential(value, external, this.providerExecutionClient, valueSignal);
+			resolveProviderExecutionCredential(value, external, gatedMaterial, valueSignal);
 		let authStorage: AuthStorage;
-		if (local) {
-			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
-			const credential = store
-				.listAuthCredentials(primary.provider)
-				.find(
-					item =>
-						item.credential.type === "oauth" &&
-						item.credential.accountId === local[1] &&
-						(local[2] === undefined || item.id === Number(local[2])),
-				);
+		if (localOAuth) {
+			const store = await SqliteAuthCredentialStore.open(getAgentDbPath(localOAuth.agentDir));
+			const credential = store.listAuthCredentials(primary.provider).find(item =>
+				item.credential.type === "oauth" && item.id === localOAuth.credentialId &&
+				item.credential.accountId === localOAuth.accountId);
 			if (!credential) {
 				store.close();
-				throw new Error("The local OMP account bound to ProviderAccount is unavailable");
+				throw new Error("The exact owned local OMP credential is unavailable");
 			}
 			authStorage = new AuthStorage(externalCredentialOverlay(exactCredentialStore(store, primary.provider, credential.id)), {
 				sourceLabel: "local OMP account",
@@ -174,7 +193,7 @@ export class EngineExecutionResolver {
 					const execution = route.execution;
 					if (execution.header_refs.length > 0)
 						throw new Error("Route header references need ClientHost header material");
-					let material: ProviderExecutionMaterial | undefined;
+					let material: ProviderExecutionDescriptor | undefined;
 					let provider = route.provider;
 					const externalRoute = index > 0 || !local;
 					if (externalRoute) {
@@ -185,11 +204,11 @@ export class EngineExecutionResolver {
 							throw new Error(`Credential method ${execution.credential.method} is unsupported for this route`);
 						if (!this.providerExecutionClient) throw new Error("Provider execution material is unavailable");
 						const identity = Object.freeze({ ...attempt, ...routeIdentity(route), modelId: route.modelId });
-						if (index === 0) material = await this.providerExecutionClient.resolve(identity, signal);
+						if (index === 0) material = await this.providerExecutionClient.describe(identity, signal);
 						const marker = `clientexec://sha256:${createHash("sha256").update(stableStringifyJson(identity), "utf8").digest("hex")}`;
 						const binding: ProviderExecutionBinding = {
 							identity, execution,
-							...(material ? { transport: executionTransport(material), executionPin: material.executionPin } : {}),
+							...(material ? { transport: executionTransport(material) } : {}),
 						};
 						external.set(marker, binding);
 						candidateBindings[index] = binding;
@@ -231,15 +250,17 @@ export class EngineExecutionResolver {
 				}
 			}
 			const quotaHook = this.providerAdmissionClient?.createHook(
-				admission, authStorage, primary.execution.base_url, apiKeyRoutes,
+				admission, authStorage, primary.execution.base_url, apiKeyRoutes, localOAuth?.accountId,
+				async (proposal, signal) => {
+					if (!billingPoolChanged) throw new Error("Billing transition is not bound to the admitted Attempt");
+					await billingPoolChanged(proposal, signal);
+				},
 			);
-			const executionClient = this.providerExecutionClient;
 			const refreshFetch = (runtimeModel: Model, fetch: Fetch): Fetch => async (input, init) => {
 				const binding = externalProviders.get(runtimeModel.provider);
 				if (!binding) return fetch(input, init);
-				if (!executionClient) throw new Error("Provider execution material is unavailable");
-				// Every physical request rechecks live Engine admission and current Core ACL/credential fences.
-				const current = await executionClient.resolve(binding.identity, init?.signal ?? undefined, binding.executionPin);
+				// Every physical request rechecks live Engine admission and current Core ACL/credential/pool fences.
+				const current = await gatedMaterial(binding, init?.signal ?? undefined);
 				if (binding.transport &&
 					stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
 					throw new Error("Provider execution transport changed; start a new Attempt");
@@ -283,20 +304,25 @@ export class EngineExecutionResolver {
 					const candidate = frozen[index];
 					if (!binding || !candidate || !this.providerExecutionClient)
 						throw new Error("Admitted fallback candidate is unavailable");
-					binding.identity = { ...binding.identity, executionDigest: currentExecutionDigest };
-					await this.providerExecutionClient.checkCandidate(binding.identity, {
-						route_ref: candidate.route_ref, account_ref: candidate.account_ref,
-						effort: candidate.effort, service_tier: candidate.service_tier,
-					}, signal);
+					return await this.providerExecutionClient.checkCandidate(
+						{ ...binding.identity, executionDigest: currentExecutionDigest },
+						{
+							route_ref: candidate.route_ref, account_ref: candidate.account_ref,
+							effort: candidate.effort, service_tier: candidate.service_tier,
+						}, signal,
+					);
 				},
 				activateCandidate: (index, executionDigest) => {
+					if (index === 0 && admission) admission.executionDigest = executionDigest;
 					const binding = candidateBindings[index];
-					if (!binding) throw new Error("Admitted fallback candidate is unavailable");
-					binding.identity = { ...binding.identity, executionDigest };
-					const observation = apiKeyRoutes.find(route =>
-						route.runtimeProviderId === binding.runtimeProviderId);
-					if (observation) observation.executionDigest = executionDigest;
+					if (binding) {
+						binding.identity = { ...binding.identity, executionDigest };
+						const observation = apiKeyRoutes.find(route =>
+							route.runtimeProviderId === binding.runtimeProviderId);
+						if (observation) observation.executionDigest = executionDigest;
+					} else if (index !== 0) throw new Error("Admitted fallback candidate is unavailable");
 				},
+				setBillingPoolChanged: callback => { billingPoolChanged = callback; },
 				dispose: () => authStorage.close(),
 			};
 		} catch (error) {
@@ -358,14 +384,13 @@ function toModelSpec(route: EngineExecutionRoute, provider: string, material?: P
 async function resolveProviderExecutionCredential(
 	value: string,
 	identities: ReadonlyMap<string, ProviderExecutionBinding>,
-	client: ProviderExecutionClient | undefined,
+	gatedMaterial: (binding: ProviderExecutionBinding, signal?: AbortSignal) => Promise<ProviderExecutionMaterial>,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	const binding = identities.get(value);
 	if (!binding) return process.env[value] || value;
 	if (binding.transport?.mode === "hosted_broker") return BROKER_CREDENTIAL_PLACEHOLDER;
-	if (!client) throw new Error("Provider execution material is unavailable");
-	const material = await client.resolve(binding.identity, signal, binding.executionPin);
+	const material = await gatedMaterial(binding, signal);
 	if (binding.transport && stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport))
 		throw new Error("Provider execution transport changed; start a new Attempt");
 	if (material.api !== nativeProviderApi(binding.execution.api as Api) ||
@@ -377,15 +402,15 @@ async function resolveProviderExecutionCredential(
 
 interface ProviderExecutionBinding {
 	identity: ProviderExecutionIdentity;
-	transport?: Omit<ProviderExecutionMaterial, "credential" | "executionPin">;
+	transport?: ProviderExecutionDescriptor;
 	execution: RouteExecution;
 	runtimeProviderId?: string;
 	executionPin?: string;
 }
 
 function executionTransport(
-	material: ProviderExecutionMaterial,
-): Omit<ProviderExecutionMaterial, "credential" | "executionPin"> {
+	material: ProviderExecutionDescriptor,
+): ProviderExecutionDescriptor {
 	return {
 		mode: material.mode,
 		providerRuntimeId: material.providerRuntimeId,
@@ -419,7 +444,7 @@ function toProviderModel(
 	};
 }
 
-function exactCredentialStore(store: AuthCredentialStore, provider: string, credentialId: number): AuthCredentialStore {
+export function exactCredentialStore(store: AuthCredentialStore, provider: string, credentialId: number): AuthCredentialStore {
 	return new Proxy(store, {
 		get(target, property) {
 			if (property === "listAuthCredentials") {

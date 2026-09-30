@@ -77,6 +77,39 @@ describe("ProviderExecutionClient", () => {
 		});
 	});
 
+	it("never accepts provider material from a descriptor and keeps a billing proposal typed without material", async () => {
+		const proposal = {
+			from: { model_id: "m", route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
+				effort: "high", service_tier: "standard", billing_pool_id: "included", billing_pool_basis: "expected" },
+			to: { model_id: "m", route_ref: identity.routeRef, account_ref: identity.providerAccountRef,
+				effort: "high", service_tier: "standard", billing_pool_id: "paid", billing_pool_basis: "expected" },
+			from_execution_digest: `sha256:${"d".repeat(64)}`,
+			reason: "billing_pool_exhausted",
+		};
+		const bodies: Record<string, unknown>[] = [];
+		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token",
+			async (_url, init) => {
+				const request = JSON.parse(String(init?.body));
+				bodies.push(request);
+				if (request.descriptorOnly)
+					return Response.json({ ...request, schema: "grimoire.provider_execution.result.v1", status: "ready",
+						allowed: true, secrets_returned: false, provider_credentials_returned: false,
+						mode: "owner_local", providerRuntimeId: "artel-4444444444444444",
+						api: "openai-completions", baseUrl: "https://provider.invalid/v1",
+						credential: "must-not-leak" });
+				return Response.json({ schema: "grimoire.provider_execution.result.v1", allowed: false,
+					status: "billing_pool_changed", secrets_returned: false, billing: proposal });
+			});
+		expect(await client.describe(identity).then(() => null, error => error))
+			.toMatchObject({ code: "provider_execution_invalid_response" });
+		const denied = await client.resolve(identity).then(() => null, error => error);
+		expect(denied).toBeInstanceOf(ProviderExecutionError);
+		expect(denied).toMatchObject({ code: "billing_pool_changed", billing: proposal });
+		expect(denied).not.toHaveProperty("credential");
+		expect(bodies.map(body => [body.descriptorOnly === true, "materialOnly" in body]))
+			.toEqual([[true, false], [false, false]]);
+	});
+
 	it("surfaces fixed actionable trust text without reflecting a server message", async () => {
 		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
 			Response.json({

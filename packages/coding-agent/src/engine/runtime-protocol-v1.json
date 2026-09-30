@@ -231,6 +231,18 @@
       "runtime.summary": {
         "request": "nativeSummaryRequest",
         "response": "summaryRead"
+      },
+      "usage_probe_binding.get": {
+        "request": "usageProbeBindingGet",
+        "response": "usageProbeBindingResult"
+      },
+      "usage_probe_binding.set": {
+        "request": "usageProbeBindingSet",
+        "response": "usageProbeBindingResult"
+      },
+      "usage_probe.run": {
+        "request": "usageProbeRun",
+        "response": "usageProbeRunResult"
       }
     },
     "httpReads": {
@@ -273,6 +285,55 @@
     }
   },
   "$defs": {
+    "usageProbeBindingGet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "accountRef"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "usageProbeBindingSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principalId", "accountRef", "expectedRevision", "modulePath"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "integer", "minimum": 0 },
+        "modulePath": { "type": ["string", "null"] }
+      }
+    },
+    "usageProbeBindingResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accountRef", "modulePath", "revision"],
+      "properties": {
+        "accountRef": { "type": "string", "minLength": 1 },
+        "modulePath": { "type": ["string", "null"] },
+        "revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "usageProbeRun": {
+      "type": "object",
+      "required": ["principalId", "accountRef", "kind", "account", "credential"],
+      "properties": {
+        "principalId": { "type": "string", "minLength": 1 },
+        "accountRef": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["builtin", "module"] },
+        "account": { "type": "object" },
+        "credential": { "type": ["object", "null"] }
+      }
+    },
+    "usageProbeRunResult": {
+      "type": "object",
+      "required": ["status", "observations"],
+      "properties": {
+        "status": { "type": "string" },
+        "observations": { "type": "array" }
+      }
+    },
     "attachmentUploadIds": {
       "type": "array",
       "minItems": 1,

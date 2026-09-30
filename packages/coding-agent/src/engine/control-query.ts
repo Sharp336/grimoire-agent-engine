@@ -44,6 +44,7 @@ import type { RuntimeQueueRequest } from "./runtime-queue";
 import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resources";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 import { waitForEngineWake } from "./wake";
+import { runUsageProbe } from "./usage-probe";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
 
@@ -132,6 +133,9 @@ export type EngineControlQueryMethod =
 	| "inbox.read"
 	| "inbox.mutate"
 	| "inbox.reorder"
+	| "usage_probe_binding.get"
+	| "usage_probe_binding.set"
+	| "usage_probe.run"
 	| "command";
 
 export interface EngineControlQueryRequest {
@@ -362,6 +366,23 @@ async function dispatchRequest(
 ): Promise<unknown> {
 	const params = request.params ?? {};
 	switch (request.method) {
+		case "usage_probe_binding.get":
+			return options.runtime.store.getUsageProbeBinding(
+				requiredString(params, "principalId"), options.deviceId, requiredString(params, "accountRef"));
+		case "usage_probe_binding.set": {
+			const principal = requiredString(params, "principalId");
+			const account = requiredString(params, "accountRef");
+			const expectedRevision = requiredInteger(params, "expectedRevision");
+			const modulePath = params.modulePath;
+			if (modulePath !== null && (typeof modulePath !== "string" || !path.isAbsolute(modulePath)))
+				throw new EngineTargetError("invalid_request", "Usage module path must be absolute");
+			const normalized = modulePath === null ? null : path.normalize(modulePath);
+			if (normalized !== null && !(await fs.stat(normalized).catch(() => null))?.isFile())
+				throw new EngineTargetError("invalid_request", "Usage module path must name an existing regular file");
+			return options.runtime.store.setUsageProbeBinding(principal, options.deviceId, account, expectedRevision, normalized);
+		}
+		case "usage_probe.run":
+			return runUsageProbe(options.runtime.store, options.deviceId, params, signal);
 		case "installation.verify": {
 			if (params.deviceId !== options.deviceId || params.engineId !== options.engineId ||
 				params.runtimeContractRevision !== RUNTIME_PROTOCOL_REVISION || params.runtimeContractHash !== RUNTIME_PROTOCOL_HASH)
@@ -1389,6 +1410,9 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"inbox.read",
 			"inbox.mutate",
 			"inbox.reorder",
+			"usage_probe_binding.get",
+			"usage_probe_binding.set",
+			"usage_probe.run",
 			"command",
 		].includes(method)
 	) {
