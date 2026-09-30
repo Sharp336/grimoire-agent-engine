@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	EngineControlInitiator,
 	EngineEvent,
+	EngineOrdinaryEvent,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineTargetError, validateStartRequest } from "@oh-my-pi/pi-coding-agent/engine/contracts";
@@ -3598,7 +3599,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		releaseFinal.resolve();
 		await runtime.drain();
 		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
-		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const snapshots = events.filter((event): event is typeof event & EngineOrdinaryEvent =>
+			event.kind === "assistant_snapshot");
 		const messageIds = [...new Set(snapshots.map(event => {
 			const messageId = event.payload?.assistantMessageId;
 			if (typeof messageId !== "string") throw new Error("Assistant snapshot lost its message identity");
@@ -3616,7 +3618,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			textTruncated: true,
 		});
 		expect(String(settledSnapshot.text)).toHaveLength(48_000);
-		const completed = events.find(event => event.kind === "completed");
+		const completed = events.find((event): event is typeof event & EngineOrdinaryEvent =>
+			event.kind === "completed");
 		if (!completed?.payload) throw new Error("Completed Attempt lost its assistant identity");
 		expect(completed.payload.assistantMessageId).toBe(messageIds[1]);
 		expect(events.indexOf(settled)).toBeLessThan(events.indexOf(completed));
@@ -3796,7 +3799,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect(JSON.stringify(history)).not.toContain("secretcredential");
 			await runtime.dispose();
 			expect(events.find(event => event.kind === "completed")).toBeUndefined();
-			const failed = events.find(event => event.kind === "failed");
+			const failed = events.find((event): event is typeof event & EngineOrdinaryEvent =>
+				event.kind === "failed");
 			if (!failed?.payload) throw new Error("Failed Attempt lost its public error payload");
 			if (typeof failed.payload.error !== "string") throw new Error("Failed Attempt has no public error");
 			expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
@@ -4162,7 +4166,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.cancel({ ...started, commandId: "command-stop-assistant", reason: "user stopped" });
 		await runtime.drain();
 		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
-		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const snapshots = events.filter((event): event is typeof event & EngineOrdinaryEvent =>
+			event.kind === "assistant_snapshot");
 		const streamingSnapshots = snapshots.filter(event => event.payload?.status === "streaming");
 		expect(streamingSnapshots).toHaveLength(2);
 		const streamingIds = streamingSnapshots.map(event => {
