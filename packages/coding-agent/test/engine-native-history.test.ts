@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
+import { engineAgentInstanceId } from "../src/engine/route";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { EngineRuntime, type EngineRuntimeOptions } from "../src/engine/runtime";
 import { type RuntimeChange, type RuntimeEventsRequest, runtimeRemainingWork } from "../src/engine/runtime-protocol";
@@ -117,7 +118,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			const agentInstanceRef = `grimoire://tasks/grimoire/history-test/agents/${id}`;
 			const identity = (suffix: string, ref: string) => ({
 				commandId: `${id}-${suffix}`,
-				agentInstanceId: `${id}-${suffix === "start" ? "" : suffix}`,
+				agentInstanceId: engineAgentInstanceId(ref),
 				agentInstanceRef: ref,
 				executionId: `${id}-${suffix}-execution`,
 				attemptId: `${id}-${suffix}-attempt`,
@@ -147,6 +148,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				},
 			);
 			const branch = await admitRequest(runtime, request);
+			expect(branch.agentInstanceId).not.toBe(started.agentInstanceId);
 			await runtime.drain();
 			expect(contexts[1]).toContain("ORIGINAL");
 			expect(contexts[1]).not.toContain("ANSWER-1");
@@ -175,6 +177,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					},
 				),
 			);
+			expect(edited.agentInstanceId).toBe(started.agentInstanceId);
 			await runtime.drain();
 			expect(contexts[2]).toContain("EDITED");
 			expect(contexts[2]).not.toContain("ANSWER-1");
@@ -210,7 +213,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			expect(JSON.stringify((await oldStore.readContext()).entries)).toContain("ANSWER-1");
 			await runtime.dispose();
 			runtime = await EngineRuntime.create(options);
-			await admitRequest(
+			const continued = await admitRequest(
 				runtime,
 				startRequest(
 					execution,
@@ -222,6 +225,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					},
 				),
 			);
+			expect(continued.agentInstanceId).toBe(branch.agentInstanceId);
 			await runtime.drain();
 			expect((await runtime.store.getAttempt(`${id}-continue-attempt`))?.state).toBe("completed");
 			expect(contexts[3]).toContain("BRANCH");
