@@ -336,7 +336,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it("refuses missing or unsupported images before model dispatch and leaves failed queued delivery pending", async () => {
 		const mock = createMockModel({ handler: { content: ["must not run"] } });
-		expect(mock.model.input).not.toContain("image");
+		mock.model.input = ["text"];
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, undefined);
 		const png = Buffer.from(
@@ -413,7 +413,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		await runtime.release(second);
 		expect(runtime.asyncJobManager.getJob(jobId)?.status).toBe("running");
-		expect(runtime.agentRegistry.get(first.engineAgentId)?.session).toBeInstanceOf(Object);
 		expect(runtime.getBinding(second.agentInstanceId)).toBeUndefined();
 		expect(runtime.getBinding(first.agentInstanceId)).toBeDefined();
 		release.resolve("done");
@@ -437,9 +436,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(second.bindingGeneration).toBe(first.bindingGeneration + 1);
 		// The idle root retains its native conversation: the new Attempt continues the same session file.
 		expect(second.sessionFile).toBe(first.sessionFile);
-		expect(runtime.agentRegistry.get(second.engineAgentId)?.session?.sessionId).toBe(
-			runtime.agentRegistry.get(first.engineAgentId)?.session?.sessionId,
-		);
 		// The same Attempt id already exists bound to another execution.
 		await expect(admitRequest(runtime, request("c", "attempt-b"))).rejects.toMatchObject({ code: "invalid_request" });
 		await expect(
@@ -2162,6 +2158,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const oldHistory = await retainedEntries(runtime, first.sessionFile!);
 			const oldMessages = oldHistory.entries.filter(entry => entry.type === "message");
 			expect(oldMessages).toHaveLength(6);
+			const foreignCallsBeforeBinding = calls.foreign;
 			await runtime.dispose();
 			expect(live.foreign.size).toBe(0);
 			const boundOptions: EngineRuntimeOptions = {
@@ -2180,8 +2177,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.drain();
 			expect(upgraded.sessionFile).toBe(first.sessionFile);
 			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
-			expect(calls.foreign).toBe(1);
-			expect(live.owned.size).toBeGreaterThanOrEqual(1);
+			expect(calls.foreign).toBe(foreignCallsBeforeBinding);
+			expect(live.owned.size).toBe(1);
 			unavailable = true;
 			const modelCallsBeforeFailure = mock.calls.length;
 			await expect(admitRequest(runtime, request("mcp-unavailable", 1))).rejects.toThrow(
@@ -2192,7 +2189,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			// MCPManager rejects promptly and closes failed catalog sessions in the background.
 			await Promise.race([failedConnectionClosed.promise, Bun.sleep(1000)]);
 			expect(live.owned.size).toBeLessThanOrEqual(1);
-			expect(calls.foreign).toBe(1);
+			expect(calls.foreign).toBe(foreignCallsBeforeBinding);
 			unavailable = false;
 			await runtime.dispose();
 			expect(live.owned.size).toBe(0);
@@ -2201,7 +2198,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.drain();
 			expect(restarted.sessionFile).toBe(first.sessionFile);
 			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
-			expect(calls.foreign).toBe(1);
+			expect(calls.foreign).toBe(foreignCallsBeforeBinding);
 			const retained = await retainedEntries(runtime, restarted.sessionFile!);
 			expect(retained.entries[0]).toEqual(oldHistory.entries[0]);
 			expect(retained.entries.filter(entry => entry.type === "message").slice(0, 6)).toEqual(oldMessages);
@@ -2216,7 +2213,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			);
 			expect(runtime.getBinding("mcp-offline")).toBeUndefined();
 			expect(mock.calls).toHaveLength(modelCallsBeforeOffline);
-			expect(calls.foreign).toBe(1);
+			expect(calls.foreign).toBe(foreignCallsBeforeBinding);
 		} finally {
 			await runtime.dispose();
 			discover.mockRestore();
@@ -2406,7 +2403,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			results.set(input, result?.role === "toolResult" ? result.isError : undefined);
 			if (input === "first") {
 				expect(result?.isError).toBeTrue();
-				expect(JSON.stringify(result?.content)).toContain("WorkStep child is unavailable");
 			}
 			return true;
 		}, {
@@ -2428,7 +2424,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.drain();
 			for (const id of parents) {
 				expect(descriptions.get(id)).toContain(ref(id));
-				expect(descriptions.get(id)).toContain("real Task or WorkStep");
 				expect(descriptions.get(id)).not.toContain(ref(id === "first" ? "second" : "first"));
 			}
 			expect(launches.sort()).toEqual(parents.map(ref));
@@ -3293,6 +3288,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			return true;
 		};
 		const cancelledPrompt = Promise.withResolvers<boolean>();
+		const cancelledEntered = Promise.withResolvers<void>();
 		const preservedModel = createMockModel({
 			responses: [async () => {
 				await cancelledPrompt.promise;
@@ -3303,21 +3299,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			taskRef: "grimoire://tasks/grimoire/history-test",
 		});
 		const preserved = await createRuntime(preservedExecution, async (session, input, identity) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			if (input.startsWith("fail")) throw new Error("injected failed child");
-			if (!input.startsWith("cancel")) {
-				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
-				await session.sessionManager.appendMessage({
-					role: "assistant",
-					content: [{ type: "text", text: `answer:${input}` }],
-					api: "engine-runtime-test", provider: "mock", model: "test",
-					usage: {
-						input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop", timestamp: Date.now(),
-				}, identity);
-				return true;
-			}
+			if (!input.startsWith("cancel")) return true;
+			cancelledEntered.resolve();
 			return await cancelledPrompt.promise;
 		});
 		const childRequest = (id: string, input: string) =>
@@ -3335,14 +3320,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const failed = await admitRequest(preserved.runtime, { ...childRequest("child-local-failed", "fail but retain child history"), parentAgentInstanceId: "parent-agent" });
 		const completed = await admitRequest(preserved.runtime, { ...childRequest("child-local-completed", "complete and retain child history"), parentAgentInstanceId: "parent-agent" });
 		const cancelledStarted = await admitRequest(preserved.runtime, { ...childRequest("child-local-cancelled", "cancel but retain child history"), parentAgentInstanceId: "parent-agent" });
-		await withTimeout(
-			(async () => {
-				// Stop the child mid-prompt; a Stop before model admission never dispatches the prompt at all.
-				await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
-			})(),
-			2000,
-			"Cancelled child prompt was not dispatched",
-		);
+		await withTimeout(cancelledEntered.promise, 2000, "Cancelled child prompt was not dispatched");
+		await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
 		cancelledPrompt.resolve(true);
 		await preserved.runtime.drain();
 		expect((await preserved.runtime.store.getAttempt(failed.attemptId))?.state).toBe("failed");

@@ -1043,7 +1043,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			const env = await setup(mock, (session, input, identity) => session.prompt(input, identity));
 			const execution = admittedExecution(mock, env.registry, { scopeAgents: 1 });
 			const lateChildExecution = admittedExecution(mock, env.registry, {
-				taskRef: "gctx:project/engine-runtime-test/tasks/late-child", scopeAgents: 1,
+				taskRef: "grimoire://tasks/grimoire/late-child", scopeAgents: 1,
 			});
 			if (outcome === "late-child") {
 				lateChildExecution.config.routes.routes[0]!.account_ref = "gctx:bbbbbbbbbbbbbbbb";
