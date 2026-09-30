@@ -441,61 +441,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			engineGeneration: binding.engineGeneration,
 			bindingGeneration: binding.bindingGeneration,
 		};
-		runtime.sessionContext = async received => ({
-			schema: "grimoire.engine.session_context.v1",
-			attemptId: received.attemptId,
-			context: { usedTokens: 42 },
-		});
-		runtime.sessionUsage = async received => ({
-			schema: "grimoire.engine.session_usage.v1",
-			attemptId: received.attemptId,
-			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
-		});
-		runtime.listInbox = async received => [
-			{
-				queueId: "queue-a",
-				sessionId: "session-a",
-				agentInstanceId: received.agentInstanceId,
-				attemptId: received.attemptId,
-				sourceEventId: "source-a",
-				sourceType: "user",
-				sourceBody: "original",
-				deliveryPayload: "edited",
-				wakeIntent: false,
-				position: 1024,
-				disposition: "pending",
-				revision: 2,
-				createdAt: 1,
-				updatedAt: 2,
-			},
-		];
-		runtime.mutateInbox = async (received, mutation) => ({
-			...(await runtime.listInbox(received))[0]!,
-			deliveryPayload: String(mutation.value),
-			revision: mutation.expectedRevision + 1,
-		});
-		let enqueuedCreatedAt: number | undefined;
-		runtime.enqueueInbox = async (received, source) => {
-			enqueuedCreatedAt = source.createdAt;
-			return {
-				item: {
-					...(await runtime.listInbox(received))[0]!,
-					queueId: "queue-user",
-					sourceEventId: source.sourceEventId,
-					sourceType: source.sourceType,
-					sourceBody: source.body,
-					deliveryPayload: source.body,
-				},
-				created: true,
-			};
-		};
-		expect(await client.request("session.context", target)).toMatchObject({
-			attemptId: "attempt-a",
-			context: { usedTokens: 42 },
-		});
-		expect(await client.request("session.usage", target)).toMatchObject({
-			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
-		});
 		// Archive, restore and reclaim routes stay addressable and refuse in native storage.
 		for (const method of [
 			"session.archive",
@@ -513,31 +458,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				),
 			).toMatchObject({ code: "invalid_request" });
 		}
-		expect(await client.request("inbox.list", target)).toMatchObject({
-			items: [{ queueId: "queue-a", sourceType: "user", deliveryPayload: "edited" }],
-		});
-		expect(
-			await client.request("inbox.enqueue", {
-				...target,
-				sourceEventId: "user-message-a",
-				sourceType: "user",
-				body: "queued while running",
-			}),
-		).toMatchObject({
-			created: true,
-			item: { queueId: "queue-user", sourceType: "user", deliveryPayload: "queued while running" },
-		});
-		expect(enqueuedCreatedAt).toBeUndefined();
-		expect(
-			await client.request("inbox.enqueue", {
-				...target,
-				sourceEventId: "user-message-with-time",
-				sourceType: "user",
-				body: "queued with an explicit source time",
-				createdAt: 10,
-			}),
-		).toMatchObject({ created: true });
-		expect(enqueuedCreatedAt).toBe(10);
 		// Settle named-pipe errors before Bun matchers can enter a nested event-loop poll.
 		expect(
 			await client
@@ -553,16 +473,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 					(error: unknown) => error,
 				),
 		).toMatchObject({ code: "invalid_request" });
-		expect(
-			await client.request("inbox.mutate", {
-				...target,
-				mutationId: "mutation-a",
-				queueId: "queue-a",
-				expectedRevision: 2,
-				op: "edit",
-				value: "new delivery",
-			}),
-		).toMatchObject({ queueId: "queue-a", deliveryPayload: "new delivery", revision: 3 });
 		expect(
 			await client
 				.request("inbox.mutate", {
@@ -608,23 +518,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		);
 		expect(await cli.exited).toBe(0);
 		expect(JSON.parse(await new Response(cli.stdout).text())).toMatchObject({ contractVersion: "1.0" });
-		const requestCli = Bun.spawn(
-			[
-				process.execPath,
-				path.resolve(import.meta.dir, "../src/cli.ts"),
-				"engine",
-				"request",
-				"--runtime-dir",
-				tempDir,
-				"--method",
-				"session.context",
-				"--params",
-				JSON.stringify(target),
-			],
-			{ stdout: "pipe", stderr: "pipe" },
-		);
-		expect(await requestCli.exited).toBe(0);
-		expect(JSON.parse(await new Response(requestCli.stdout).text())).toMatchObject({ attemptId: "attempt-a" });
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });

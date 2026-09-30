@@ -131,7 +131,7 @@ import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
 import {
 	type AdmissionRequest, candidateIdentity, candidateRef, currentIdentity, frozenCandidate,
-	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules, ruleDelta,
+	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules,
 } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
@@ -3025,30 +3025,16 @@ export class EngineRuntime {
 								candidates: parent.execution.choice.candidates,
 								selected: updated,
 							});
-							// Route-specific rule delta, committed in the same tx as the route change.
-							const delta = ruleDelta(
-								parent.execution.config.instruction_sources,
-								parent.execution.choice.rules,
-								candidateIdentity(candidate),
-							);
 							const changed = await this.store.commitExecutorRoute(
 								this.#snapshot(parent), candidateIdentity(updated), "route_fallback",
 								digest, parent.execution.config.routingLimits,
-								delta.map(rule => ({ ref: rule.ref, revision: rule.revision, content_hash: rule.content_hash })),
 							);
 							if (!changed) return false;
 							parent.execution.activateCandidate(index, digest);
 							parent.executionDigest = digest;
-							parent.execution.choice = {
-								...parent.execution.choice,
-								execution_digest: digest,
-								rules: [...parent.execution.choice.rules, ...delta.map(rule => ({
-									ref: rule.ref, revision: rule.revision, content_hash: rule.content_hash,
-								}))],
-								transitions: [...parent.execution.choice.transitions, changed.payload as ExecutorChoice["transitions"][number]],
-							};
-							parent.execution.ruleEventPending = (changed.payload as ExecutorChoice["transitions"][number]).event_id;
-							this.#notifyEvents([changed]);
+							parent.execution.choice = changed.choice;
+							parent.execution.ruleEventPending = (changed.event.payload as ExecutorChoice["transitions"][number]).event_id;
+							this.#notifyEvents([changed.event]);
 							return true;
 						},
 						afterApply: async () => {

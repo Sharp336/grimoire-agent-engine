@@ -152,6 +152,7 @@ function nativeEngineHarness(
 				selectors: ["native-fixture-route"],
 				verifyCandidate: async index => {
 					if (index !== 0) throw new EngineTargetError("stale_target", "Unknown fixture route");
+					return { billing_pool_id: "native-fixture-pool", billing_pool_basis: "expected" };
 				},
 				activateCandidate: () => {},
 				setBillingPoolChanged: () => {}, // Local deterministic provider has no hosted billing admission.

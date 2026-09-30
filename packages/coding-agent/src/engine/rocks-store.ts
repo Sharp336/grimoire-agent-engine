@@ -74,6 +74,7 @@ import {
 	candidateRef,
 	currentIdentity,
 	leaseId,
+	ruleDelta,
 	stageAdmission,
 	staleLeaseAttempts,
 	stageQueueCancel,
@@ -2712,8 +2713,7 @@ export class RocksEngineMutations {
 		reason: "route_fallback" | "billing_pool_exhausted" | "billing_pool_observed",
 		toExecutionDigest: string,
 		limits: RoutingLimits,
-		ruleDelta?: ReadonlyArray<{ ref: string; revision: number; content_hash: string }>,
-	): Promise<EngineEvent | undefined> {
+	): Promise<{ event: EngineEvent; choice: ExecutorChoice } | undefined> {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
 			if (!row?.execution || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
@@ -2732,6 +2732,8 @@ export class RocksEngineMutations {
 				throw new EngineTargetError("stale_target", "Frozen Start execution configuration is missing");
 			validateRuntimeValue("engineExecutionConfiguration", wire.payload.executionConfiguration);
 			const config = wire.payload.executionConfiguration as EngineExecutionConfiguration;
+			const delta = ruleDelta(config.instruction_sources, choice.rules, to)
+				.map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash }));
 			const route = config.routes.routes.find(candidate => candidateRef(candidate) === candidateRef(to));
 			const requirement = choice.effective_requirement;
 			if (!route || to.model_id !== route.model_id || to.account_ref !== route.account_ref ||
@@ -2772,20 +2774,20 @@ export class RocksEngineMutations {
 				phase: "loading",
 				eventSeq: 0,
 			};
+			const updatedChoice: ExecutorChoice = {
+				...choice, execution_digest: toExecutionDigest, transitions: [...choice.transitions, transition],
+				rules: delta.length ? [...choice.rules, ...delta] : choice.rules,
+			};
 			await tx.put("attempt", target.attemptId, {
 				...row,
 				execution: {
 					...row.execution,
-					executor_choice: {
-						...choice,
-						execution_digest: toExecutionDigest,
-						transitions: [...choice.transitions, transition],
-						...(ruleDelta && ruleDelta.length > 0 ? { rules: [...choice.rules, ...ruleDelta] } : {}),
-					},
+					executor_choice: updatedChoice,
 				},
 				executor_route_state: JSON.stringify(state),
 			});
-			return this.append(tx, target, { kind: "executor_route_changed", payload: transition });
+			const event = await this.append(tx, target, { kind: "executor_route_changed", payload: transition });
+			return { event, choice: updatedChoice };
 		});
 	}
 	/** A billing change is one Attempt-row mutation; the held lease and its revision are never rewritten. */
