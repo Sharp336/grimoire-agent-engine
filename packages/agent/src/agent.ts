@@ -30,6 +30,7 @@ import {
 	abortReasonText,
 	agentLoop,
 	agentLoopContinue,
+	agentLoopResumeToolCalls,
 	createSyntheticToolResultMessage,
 	normalizeMessagesForProvider,
 	normalizeTools,
@@ -1233,7 +1234,7 @@ export class Agent {
 		return signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 	}
 
-	async continue(signal?: AbortSignal) {
+	async continue(signal?: AbortSignal, pendingToolCallIds?: readonly string[]) {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
@@ -1269,7 +1270,7 @@ export class Agent {
 				}
 				throw new Error("No messages to continue from");
 			}
-			if (messages[messages.length - 1].role === "assistant") {
+			if (messages[messages.length - 1].role === "assistant" && !pendingToolCallIds) {
 				const queuedSteering = await this.#dequeueSteeringMessagesAfterHooks(dequeueSignal);
 				if (queuedSteering.length > 0) {
 					await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true }, signal, true);
@@ -1283,6 +1284,10 @@ export class Agent {
 				}
 
 				throw new Error("Cannot continue from message role: assistant");
+			}
+			if (pendingToolCallIds) {
+				await this.#runLoop(undefined, undefined, signal, true, pendingToolCallIds);
+				return;
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);
@@ -1311,6 +1316,7 @@ export class Agent {
 		options?: AgentPromptOptions & { skipInitialSteeringPoll?: boolean },
 		continuationSignal?: AbortSignal,
 		runStateClaimed = false,
+		pendingToolCallIds?: readonly string[],
 	) {
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");
@@ -1537,9 +1543,11 @@ export class Agent {
 		let turnOpen = false;
 
 		try {
-			const stream = messages
-				? agentLoop(messages, context, config, loopSignal, this.streamFn)
-				: agentLoopContinue(context, config, loopSignal, this.streamFn);
+			const stream = pendingToolCallIds
+				? agentLoopResumeToolCalls(context, config, pendingToolCallIds, loopSignal)
+				: messages
+					? agentLoop(messages, context, config, loopSignal, this.streamFn)
+					: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (const event of stream) {
 				if (event.type === "turn_start") turnOpen = true;

@@ -260,7 +260,7 @@ export async function launchLocalEngineChild(
 		throw new EngineTargetError("invalid_request", "Child launch requires the admitted principal");
 	if (!request.target.task_ref || (request.target.work_step_id !== null && !request.target.work_step_id))
 		throw new EngineTargetError("invalid_request", "Child launch requires a real Task or WorkStep");
-	const prepared = await rpc.call("prepare_child_start", {
+	const preparation = {
 		parentAgentInstanceRef: request.parentAgentInstanceRef,
 		parentAttemptId: request.parentAttemptId,
 		parentBindingSnapshot: request.parentBindingSnapshot,
@@ -271,7 +271,39 @@ export async function launchLocalEngineChild(
 		toolCallId: request.toolCallId,
 		cwd: request.cwd,
 		...(request.spawnApprovalReceiptId ? { spawnApprovalReceiptId: request.spawnApprovalReceiptId } : {}),
-	}, request.signal);
+	};
+	let prepared = await rpc.call("prepare_child_start", preparation, request.signal);
+	if (prepared.status === "escalation_required") {
+		const subject = prepared.subject as Record<string, unknown> | undefined;
+		if (subject?.kind !== "premium_once" ||
+			typeof subject.dispatch_hash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(subject.dispatch_hash) ||
+			typeof subject.model_id !== "string" || !subject.model_id ||
+			typeof prepared.subject_hash !== "string")
+			throw new EngineTargetError("stale_target", "Child preparation returned an invalid premium challenge");
+		const approved = await runtime.requestChildEscalation({
+			parentAgentInstanceId: request.parentAgentInstanceId,
+			parentAttemptId: request.parentAttemptId,
+			parentBindingSnapshot: request.parentBindingSnapshot,
+			toolCallId: request.toolCallId,
+			subject, subjectHash: prepared.subject_hash, signal: request.signal,
+		});
+		prepared = await rpc.call("prepare_child_start", {
+			...preparation,
+			premiumOnceApproval: {
+				receiptId: approved.receiptId,
+				effectId: approved.effectId,
+				caller: {
+					agentInstanceRef: request.parentAgentInstanceRef,
+					attemptId: request.parentAttemptId,
+					bindingRevision: request.parentBindingSnapshot.bindingRevision,
+				},
+			},
+		}, request.signal);
+	}
+	if (prepared.status === "grant_required")
+		throw new EngineTargetError("capacity_unavailable", "Child requires an explicit model grant selection");
+	if (prepared.status === "escalation_required")
+		throw new EngineTargetError("stale_target", "Child premium approval did not satisfy the exact retry");
 	const command = validateEngineCommand(prepared.command);
 	const agentInstanceRef = prepared.agentInstanceRef;
 	const agentInstanceId = prepared.agentInstanceId;

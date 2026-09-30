@@ -598,6 +598,50 @@ export function agentLoopContinue(
 	return stream;
 }
 
+/**
+ * Resume only the unpaired tool calls of an already durable assistant turn.
+ * The caller must provide the exact outstanding call ids from its effect ledger.
+ */
+export function agentLoopResumeToolCalls(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	callIds: readonly string[],
+	signal?: AbortSignal,
+): EventStream<AgentEvent, AgentMessage[]> {
+	if (!callIds.length || new Set(callIds).size !== callIds.length)
+		throw new Error("Native tool recovery requires distinct outstanding calls");
+	const completed = new Set(context.messages.flatMap(message =>
+		message.role === "toolResult" ? [message.toolCallId] : []));
+	const assistant = [...context.messages].reverse().find(message => message.role === "assistant" &&
+		message.content.some(block => block.type === "toolCall" && !completed.has(block.id)));
+	if (!assistant || assistant.role !== "assistant") throw new Error("Native assistant tool turn is missing");
+	type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
+	const outstanding = assistant.content.filter(
+		(block): block is ToolCallContent => block.type === "toolCall" && !completed.has(block.id),
+	);
+	if (outstanding.length !== callIds.length || outstanding.some(block => !callIds.includes(block.id)))
+		throw new Error("Native tool calls differ from the retained effect ledger");
+	const stream = createAgentStream();
+	(async () => {
+		const currentContext: AgentContext = { ...context, messages: [...context.messages] };
+		const newMessages: AgentMessage[] = [];
+		try {
+			stream.push({ type: "agent_start" });
+			const replay = { ...assistant, content: outstanding };
+			const { toolResults } = await executeToolCalls(currentContext, replay, signal, stream, config, undefined, undefined);
+			for (const result of toolResults) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
+			}
+			stream.push(buildAgentEndEvent(newMessages, undefined, 0));
+			stream.end(newMessages);
+		} catch (error) {
+			stream.fail(error);
+		}
+	})();
+	return stream;
+}
+
 function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	return new EventStream<AgentEvent, AgentMessage[]>(
 		(event: AgentEvent) => event.type === "agent_end",

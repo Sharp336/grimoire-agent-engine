@@ -6339,6 +6339,18 @@ export class AgentSession {
 		}
 	}
 
+	/** Continue a retained assistant tool turn without fabricating a new user/model message. */
+	async resumeNativeToolCalls(callIds: readonly string[]): Promise<void> {
+		if (this.isStreaming) throw new AgentBusyError();
+		this.#beginInFlight();
+		try {
+			await this.agent.continue(undefined, callIds);
+		} finally {
+			this.#usagePreflightReadyForNextModelCall = false;
+			this.#endInFlight();
+		}
+	}
+
 	/**
 	 * Send a user message through the prompt flow.
 	 *

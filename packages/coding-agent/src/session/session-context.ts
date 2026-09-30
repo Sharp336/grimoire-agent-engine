@@ -121,12 +121,8 @@ export interface BuildSessionContextOptions {
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
 	/**
-	 * Transcript mode only: keep `toolCall` blocks that have no matching
-	 * `toolResult` on the path instead of stripping them. Pass this when the
-	 * session is mid-turn (a tool is still executing, its result not yet
-	 * persisted) so the rebuilt transcript renders the in-flight call as
-	 * pending; without it a focus/unfocus or overlay-close rebuild silently
-	 * hides the call the agent is still waiting on.
+	 * Keep unpaired native tool calls. The Engine recovery path uses this for the exact
+	 * approved Attempt; transcript surfaces use it to show a still-running call.
 	 */
 	keepDanglingToolCalls?: boolean;
 }
@@ -531,7 +527,7 @@ export function buildSessionContext(
 	// while the tool still executes sees the persisted assistant turn without its result.
 	// Those callers pass `keepDanglingToolCalls` so the in-flight call stays visible as
 	// a pending block instead of vanishing from the chat.)
-	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
+	const keepDangling = options?.keepDanglingToolCalls === true;
 	if (!keepDangling) {
 		const pairedToolResultIds = new Set<string>();
 		for (const message of messages) {

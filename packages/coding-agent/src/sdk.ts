@@ -558,6 +558,8 @@ export interface CreateAgentSessionOptions {
 	turnRetryPolicy?: import("./session/agent-session-types").TurnRetryPolicy;
 	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
 	engineMode?: boolean;
+	/** Exact paused Engine approval recovery retains unpaired native tool calls, not an aborted replacement. */
+	recoverPendingApprovalTools?: boolean;
 	/** Optional host-owned tracking/approval boundary around native tool execution. */
 	toolExecutionHook?: ToolExecutionHook;
 	/** Engine-only conscious child profile dispatcher. */
@@ -1439,13 +1441,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// partial transcript and append one terminal aborted assistant record before
 	// rebuilding runtime context. The helper is idempotent once that record exists.
 	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getContextBranch());
-	const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
+	const interruptedTurnAbort = options.recoverPendingApprovalTools
+		? undefined : createInterruptedTurnAbortMessage(existingBranch);
 	if (interruptedTurnAbort) {
 		sessionManager.appendMessage(interruptedTurnAbort);
 		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getContextBranch());
 	}
 	let existingSession = logger.time("loadSessionContext", () =>
-		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
+		deobfuscateSessionContext(sessionManager.buildSessionContext({
+			keepDanglingToolCalls: options.recoverPendingApprovalTools,
+		}), obfuscator),
 	);
 	const hasExistingSession = existingBranch.length > 0;
 	const hasThinkingEntry = sessionManager.hasContextEntryType("thinking_level_change");
@@ -2662,7 +2667,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// A first-turn user tail has no assistant metadata to copy. Once startup
 		// has selected its final model, use that model to terminate the
 		// interrupted turn before the live agent consumes the restored context.
-		if (model) {
+		if (model && !options.recoverPendingApprovalTools) {
 			const selectedModelAbort = createInterruptedTurnAbortMessage(existingBranch, {
 				api: model.api,
 				provider: model.provider,

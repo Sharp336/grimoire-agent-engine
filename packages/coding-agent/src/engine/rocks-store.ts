@@ -2430,6 +2430,11 @@ export class RocksEngineMutations {
 				request: resolved,
 				updated_at: Date.now(),
 			} satisfies EngineApprovalRow);
+			if (status === "denied" && effect &&
+				(await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "paused")
+				await tx.put("metadata", `approval-recovery:${target.attemptId}`, {
+					subtype: "approval_recovery", request_id: id,
+				});
 			const events = [
 				await this.append(tx, target, {
 					kind: `${request.kind}_approval_resolved`,
@@ -3114,7 +3119,90 @@ export class RocksEngineMutations {
 		return events;
 	}
 
-	async interruptGeneration(generation: number, notify?: (events: EngineEvent[]) => void): Promise<EngineEvent[]> {
+	/** Bounded tool-effect ledger of one Attempt, used to map retained native calls to exact effects. */
+	async attemptToolEffects(attemptId: string): Promise<RocksEffect[]> {
+		const effects: RocksEffect[] = [];
+		for (const state of ["planned", "started", "settled"]) {
+			const page = await this.records.query("effect_attempt", [attemptId, state], undefined, 1_000);
+			if (page.nextCursor) throw new EngineTargetError("restore_budget", "Attempt effect ledger exceeds recovery bound");
+			effects.push(...page.records.map(row => row.value as unknown as RocksEffect));
+		}
+		return effects;
+	}
+
+	/** Only native tool effects fenced by their own undecided or decided-but-unapplied approval survive. */
+	retainedApproval(effect: RocksEffect, approval: EngineApprovalRow | undefined, attemptId: string): boolean {
+		if (!approval || effect.effect_kind !== "tool" || approval.request.requester_attempt_id !== attemptId ||
+			approval.request.effect_id !== effect.effect_id) return false;
+		if (effect.state === "started")
+			return approval.request.kind === "escalation" && approval.request.status !== "cancelled";
+		return effect.state === "planned" && approval.request.kind !== "escalation" &&
+			(approval.state === "pending" || approval.request.status === "approved");
+	}
+
+	/** A settled pause survives only when every open effect has its exact pending or decided approval. */
+	async durableApprovalPause(attemptId: string): Promise<ApprovalRequest[] | undefined> {
+		const attempt = await this.getAttempt(attemptId);
+		if (attempt?.state !== "paused" || attempt.cause !== "approval_deadline" || !attempt.execution ||
+			!attempt.transcript_native) return undefined;
+		const binding = await this.getBinding(attempt.agent_instance_id);
+		if (binding?.attemptId !== attemptId || binding.state !== "running" ||
+			!binding.sessionFile?.startsWith("native:")) return undefined;
+		const effects = [
+			...(await this.records.query("effect_attempt", [attemptId, "planned"], undefined, 1_000)).records,
+			...(await this.records.query("effect_attempt", [attemptId, "started"], undefined, 1_000)).records,
+		];
+		if (effects.length >= 1_000) return undefined;
+		const approvals: ApprovalRequest[] = [];
+		for (const row of effects) {
+			const effect = row.value as unknown as RocksEffect;
+			const approval = await this.getApproval(effect.effect_id);
+			if (!this.retainedApproval(effect, approval, attemptId)) return undefined;
+			approvals.push(approval!.request);
+		}
+		if (!effects.length) {
+			const marker = (await this.records.get("metadata", `approval-recovery:${attemptId}`)).value as
+				{ request_id?: string } | null;
+			const approval = marker?.request_id ? await this.getApproval(marker.request_id) : undefined;
+			if (!approval || approval.request.requester_attempt_id !== attemptId ||
+				approval.request.status !== "denied" || approval.state !== "resolved")
+				return undefined;
+			approvals.push(approval.request);
+		}
+		return approvals;
+	}
+
+	/** Transfer only the paused Attempt's fence; never re-admit its Start or rewrite its effect ledger. */
+	async recoverPausedApproval(attemptId: string, generation: number): Promise<EngineBindingSnapshot | undefined> {
+		const approvals = await this.durableApprovalPause(attemptId);
+		if (!approvals) return undefined;
+		const attempt = await this.getAttempt(attemptId);
+		if (!attempt) return undefined;
+		return this.mutation(attempt.agent_instance_id, async tx => {
+			const current = await tx.get<RocksAttempt>("attempt", attemptId);
+			const binding = await tx.get<RocksBinding>("binding", attempt.agent_instance_id);
+			const engine = await tx.get<{ generation: number }>("metadata", "engine");
+			if (!current || current.state !== "paused" || current.cause !== "approval_deadline" ||
+				binding?.attempt_id !== attemptId || engine?.generation !== generation ||
+				current.engine_generation >= generation || binding.engine_generation !== current.engine_generation)
+				return undefined;
+			const effects = [
+				...await tx.query<RocksEffect>("effect_attempt", [attemptId, "planned"]),
+				...await tx.query<RocksEffect>("effect_attempt", [attemptId, "started"]),
+			];
+			for (const effect of effects)
+				if (!this.retainedApproval(effect, await tx.get<EngineApprovalRow>("approval", effect.effect_id), attemptId))
+					return undefined;
+			await tx.put("binding", attempt.agent_instance_id, { ...binding, engine_generation: generation });
+			await tx.put("attempt", attemptId, { ...current, engine_generation: generation });
+			for (const effect of effects)
+				await tx.put("effect", effect.effect_id, { ...effect, engine_generation: generation });
+			return { ...bindingSnapshot(binding), engineGeneration: generation };
+		});
+	}
+
+	async interruptGeneration(generation: number, notify?: (events: EngineEvent[]) => void,
+		retain?: (attemptId: string) => void): Promise<EngineEvent[]> {
 		// Admission starts only after this scan. Every bounded commit records its own guarded decisions.
 		const events: EngineEvent[] = [];
 		const deliver = (changed: EngineEvent[]) => {
@@ -3144,6 +3232,10 @@ export class RocksEngineMutations {
 		}
 		for (const [id, attempts] of work) {
 			attempts.sort((a, b) => a.created_at - b.created_at || a.attempt_id.localeCompare(b.attempt_id));
+			const durable = new Set<string>();
+			for (const attempt of attempts)
+				if (await this.durableApprovalPause(attempt.attempt_id)) durable.add(attempt.attempt_id);
+			const onlyDurable = durable.size > 0 && durable.size === attempts.length;
 			let held = false;
 			const ensureHold = async () => {
 				if (held) return;
@@ -3181,7 +3273,8 @@ export class RocksEngineMutations {
 				held = true;
 			};
 			const pendingInbox = await this.records.query("inbox_agent_pending", [id], undefined, 1);
-			if (pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation)) await ensureHold();
+			if (!onlyDurable && pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation))
+				await ensureHold();
 			// Stable ordering skips protected Starts without looping on the unchanged pending row.
 			let commandAfter: Array<string | number | null> | undefined;
 			for (;;) {
@@ -3191,7 +3284,7 @@ export class RocksEngineMutations {
 				commandAfter = [command.received_at, command.command_id];
 				if (command.engine_generation >= generation) continue;
 				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
-				await ensureHold();
+				if (!onlyDurable) await ensureHold();
 				await this.mutation(id, async tx => {
 					const current = await tx.get<RocksCommand>("command", command.command_id);
 					if (current?.state === "received" && current.engine_generation < generation)
@@ -3199,6 +3292,7 @@ export class RocksEngineMutations {
 				});
 			}
 			for (const observed of attempts) {
+				if (durable.has(observed.attempt_id)) continue;
 				await ensureHold();
 				const target: EventTarget = {
 					commandId: observed.command_id,
@@ -3224,35 +3318,40 @@ export class RocksEngineMutations {
 							await this.mutation(id, async tx => {
 								const effect = await tx.get<RocksEffect>("effect", effectId);
 								if (!effect || effect.state !== state || effect.engine_generation >= generation) return [];
+								const approval = await tx.get<EngineApprovalRow>("approval", effectId);
+								const cancelledEscalation = state === "started" && approval?.request.kind === "escalation" &&
+									approval.request.status !== "approved";
 								await tx.put("effect", effectId, {
 									...effect,
-									state: state === "started" ? "unknown" : "settled",
-									outcome: state === "started" ? "unknown" : "cancelled",
-									error: "engine_lost",
+									state: state === "started" && !cancelledEscalation ? "unknown" : "settled",
+									outcome: state === "started" && !cancelledEscalation ? "unknown" : "cancelled",
+									error: cancelledEscalation ? "escalation_unperformed" : "engine_lost",
 								});
-								const approval = await tx.get<EngineApprovalRow>("approval", effectId);
-								if (approval?.state === "pending")
+								const approvalEvents: EngineEvent[] = [];
+								if (approval?.state === "pending") {
+									const resolved = { ...approval.request, status: "cancelled" as const,
+										decision_revision: approval.request.decision_revision + 1 };
 									await tx.put("approval", effectId, {
-										...approval,
-										state: "resolved",
-										decision: "cancelled",
-										updated_at: Date.now(),
-										request: {
-											...approval.request,
-											status: "cancelled",
-											decision_revision: approval.request.decision_revision + 1,
-										},
+										...approval, state: "resolved", decision: "cancelled", updated_at: Date.now(),
+										request: resolved,
 									} satisfies EngineApprovalRow);
+									approvalEvents.push(await this.append(tx, target, {
+										kind: `${approval.request.kind}_approval_resolved`,
+										payload: { request_id: effectId, decision_revision: resolved.decision_revision,
+											outcome: "cancelled", decided_by: null },
+									}));
+								}
 								await this.counter(tx, `effects:${effect.attempt_id}:${effect.binding_id}`, "open_effects", -1);
 								return [
+									...approvalEvents,
 									await this.append(tx, target, {
 										kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
 										payload: {
 											...(effect.effect_kind === "model"
 												? modelEffectPayload(effect)
 												: toolEffectPayload(effect)),
-											status: state === "started" ? "unknown" : "cancelled",
-											error: "engine_lost",
+											status: state === "started" && !cancelledEscalation ? "unknown" : "cancelled",
+											error: cancelledEscalation ? "escalation_unperformed" : "engine_lost",
 										},
 									}),
 								];
@@ -3287,6 +3386,7 @@ export class RocksEngineMutations {
 					}),
 				);
 			}
+			if (onlyDurable) for (const attemptId of durable) retain?.(attemptId);
 			if (held)
 				await this.mutation(id, async tx => {
 					const binding = await tx.get<RocksBinding>("binding", id);
