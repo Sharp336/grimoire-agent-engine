@@ -290,14 +290,44 @@ function getMcpAuthChallenge(result: MCPToolCallResult): MCPAuthChallenge | unde
 	return wwwAuthenticate.length > 0 ? { wwwAuthenticate } : undefined;
 }
 
+function escalationChallenge(result: MCPToolCallResult): { subject: Record<string, unknown>; subjectHash: string } | undefined {
+	if (result.isError || result.content.length !== 1 || result.content[0]?.type !== "text") return undefined;
+	let value: unknown;
+	try { value = JSON.parse(result.content[0].text); } catch { return undefined; }
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const challenge = value as Record<string, unknown>;
+	if (challenge.status !== "escalation_required" || typeof challenge.subject_hash !== "string" ||
+		!challenge.subject || typeof challenge.subject !== "object" || Array.isArray(challenge.subject))
+		return undefined;
+	return { subject: challenge.subject as Record<string, unknown>, subjectHash: challenge.subject_hash };
+}
+
 async function callToolWithAuthRetry(
 	connection: MCPServerConnection,
 	toolName: string,
 	args: MCPToolArgs,
 	reconnect: MCPReconnect | undefined,
 	options: MCPRequestOptions,
+	toolCallId: string,
+	engineToolName: string,
 ): Promise<MCPToolCallAttempt> {
 	const result = await callTool(connection, toolName, args, options);
+	const escalation = escalationChallenge(result);
+	if (escalation && connection.config.type === "http" && connection.config.requestEscalation) {
+		try {
+			const receipt = await connection.config.requestEscalation(
+				toolCallId, engineToolName, escalation.subject, escalation.subjectHash, options.signal);
+			const retried = await callTool(connection, toolName, args, {
+				...options, headers: { ...options.headers, "X-Grimoire-Client-Approval-Receipt": receipt },
+			});
+			if (escalationChallenge(retried))
+				return { connection, error: new Error("Escalation receipt did not authorize the original call") };
+			return { connection, result: retried };
+		} catch (error) {
+			rethrowIfAborted(error, options.signal);
+			return { connection, error };
+		}
+	}
 	const authChallenge = getMcpAuthChallenge(result);
 	if (!authChallenge || !reconnect) return { connection, result };
 
@@ -549,7 +579,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 
 		try {
 			const options = await attestedOptions(this.connection, _toolCallId, this.name, this.tool.name, params, args, signal);
-			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, options);
+			const attempt = await callToolWithAuthRetry(this.connection, this.tool.name, args, this.reconnect, options, _toolCallId, this.name);
 			if (attempt.error !== undefined) {
 				return buildErrorResult(attempt.error, this.connection.name, this.tool.name, provider, providerName);
 			}
@@ -674,7 +704,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 			throwIfAborted(signal);
 			try {
 				const options = await attestedOptions(connection, _toolCallId, this.name, this.tool.name, params, args, signal);
-				const attempt = await callToolWithAuthRetry(connection, this.tool.name, args, this.reconnect, options);
+				const attempt = await callToolWithAuthRetry(connection, this.tool.name, args, this.reconnect, options, _toolCallId, this.name);
 				if (attempt.error !== undefined) {
 					return buildErrorResult(
 						attempt.error,

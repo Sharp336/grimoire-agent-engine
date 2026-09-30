@@ -267,6 +267,7 @@ function terminalYield(
 interface LiveBinding extends EngineBindingSnapshot {
 	previousInboxSessionId?: string;
 	principalId: string;
+	approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string };
 	pendingInboxSourceSessionId?: string;
 	uncommittedForkSessionFile?: string;
 	manualHold: boolean;
@@ -287,6 +288,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseProgress: PromiseWithResolvers<void>;
 	pauseCommandIds: Set<string>;
 	pauseRequests: Map<string, EngineControlInitiator>;
+	approvalPauseCause?: { kind: "approval_deadline"; request_id: string; address_revision: number };
 	resumeCommandIds: Set<string>;
 	resumeMessageCommands: Set<string>;
 	pendingPausedMessage?: { input: string; identity: SessionMessageIdentity; images?: ImageContent[] };
@@ -296,6 +298,9 @@ interface LiveBinding extends EngineBindingSnapshot {
 	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunches: Set<string>;
+	spawnApprovals: Map<string, string>;
+	approvalGrants: Map<string, { receiptId: string; ceilingHash: string }>;
+	consultantEffectId?: string;
 	modelCallSequence: number;
 	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
 	execution: {
@@ -370,6 +375,7 @@ interface PendingToolApproval {
 		decision: "approve" | "deny" | "cancelled";
 		reason?: string;
 		causationCommandId?: string;
+		receiptId?: string;
 	}) => void;
 }
 
@@ -387,6 +393,22 @@ interface PreparedHistoryStart {
 	dispatchInput: string;
 	pendingInboxSourceSessionId?: string;
 	result: NonNullable<EngineStartResult["historyEdit"]>;
+}
+
+export interface ApprovalAncestor {
+	root?: boolean;
+	unknown?: boolean;
+	agent_ref?: string;
+	attempt_id?: string;
+	binding_revision?: number;
+	installation_id?: string;
+	ceiling?: {
+		tools: string[] | null;
+		tools_permit: string[];
+		spawn: EngineExecutionConfiguration["dispatch"]["spawn"];
+		trusted: boolean | "unknown";
+	};
+	terminal_known?: boolean;
 }
 
 export interface EngineRuntimeOptions {
@@ -437,14 +459,33 @@ export interface EngineRuntimeOptions {
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string }>;
+	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string; approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string } | null; specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null }>;
 	verifyApprovalReceipt?: (receipt: {
 		originReceiptId: string;
 		commandId: string;
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<{ verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"] }>;
+	}) => Promise<{ verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"]; expectedInputRevision: number | null }>;
+	/** Receipt-backed one-step walk of the requester's exact Start ancestry. */
+	approvalAncestor?: (identity: {
+		agentInstanceRef: string;
+		attemptId: string;
+		principalId: string;
+		installationId: string;
+	}) => Promise<ApprovalAncestor>;
+	reserveChild?: (request: {
+		parentAgentInstanceRef: string;
+		parentAttemptId: string;
+		parentBindingSnapshot: EngineSemanticBindingSnapshot;
+		principalId: string;
+		authorityGeneration: number;
+		target: WorkTarget;
+		assignment: string;
+		toolCallId: string;
+		cwd: string;
+		signal?: AbortSignal;
+	}) => Promise<Extract<ApprovalRequest, { kind: "spawn" }>["subject"]>;
 	launchChild?: (request: {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
@@ -458,6 +499,7 @@ export interface EngineRuntimeOptions {
 		toolCallId: string;
 		cwd: string;
 		signal?: AbortSignal;
+		spawnApprovalReceiptId?: string;
 		enrollChild(agentInstanceRef: string, attemptId?: string): Promise<void>;
 	}) => Promise<EngineChildLaunchResult>;
 }
@@ -492,8 +534,10 @@ export class EngineRuntime {
 	readonly #resolveExecution: EngineRuntimeOptions["resolveExecution"];
 	readonly #verifyOriginReceipt: EngineRuntimeOptions["verifyOriginReceipt"];
 	readonly #verifyApprovalReceipt: EngineRuntimeOptions["verifyApprovalReceipt"];
+	readonly #approvalAncestor: EngineRuntimeOptions["approvalAncestor"];
 	readonly #deviceId: string;
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
+	readonly #reserveChild: EngineRuntimeOptions["reserveChild"];
 	readonly #childHistoryRetention: "local" | "off" | "grimoire";
 	readonly #streamAdmissionLimits: EngineRuntimeOptions["streamAdmissionLimits"];
 	readonly #bindings = new Map<string, LiveBinding>();
@@ -502,6 +546,9 @@ export class EngineRuntime {
 	readonly #listeners = new Set<EngineEventListener>();
 	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
 	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
+	readonly #pendingEscalations = new Map<string, PromiseWithResolvers<EngineApprovalDecision["approvalDecision"]>>();
+	readonly #pendingConsultants = new Map<string, PromiseWithResolvers<"approve" | "deny">>();
+	readonly #approvalTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pendingStarts = new Set<PendingStartResolution>();
 	readonly #sessionRoot: string;
 	#inboxWakeSignal = Promise.withResolvers<void>();
@@ -534,8 +581,10 @@ export class EngineRuntime {
 		this.#resolveExecution = options.resolveExecution;
 		this.#verifyOriginReceipt = options.verifyOriginReceipt;
 		this.#verifyApprovalReceipt = options.verifyApprovalReceipt;
+		this.#approvalAncestor = options.approvalAncestor;
 		this.#deviceId = options.deviceId;
 		this.#launchChild = options.launchChild;
+		this.#reserveChild = options.reserveChild;
 		const childHistoryTtlMinutes = options.childHistoryTtlMinutes ?? 60;
 		if (!Number.isSafeInteger(childHistoryTtlMinutes) || childHistoryTtlMinutes < 1) {
 			throw new Error("childHistoryTtlMinutes must be a positive integer");
@@ -559,8 +608,76 @@ export class EngineRuntime {
 		if (policy.tools_permit.includes(toolName) || policy.toolPolicies[toolName] === "permit") return false;
 		const current = currentIdentity(binding.execution.choice);
 		const route = binding.execution.frozen.find(candidate => candidateRef(candidate) === candidateRef(current));
-		return Boolean(route && (!config.dispatch.requirement.require_trusted_provider || route.execution.trusted));
+		return Boolean(route?.execution.trusted);
 	}
+	/** Binding-local grants never cross Attempts; consumption still requires a fresh live-lease proof. */
+	approvalGrant(agentInstanceId: string, attemptId: string, kind: "tool" | "spawn", name: string,
+		ceilingHash: string, receiptId?: string): string | undefined {
+		const binding = this.#bindings.get(agentInstanceId);
+		if (!binding || binding.attemptId !== attemptId || binding.attemptState !== "running" ||
+			binding.manualHold || !binding.bindingSnapshot) return undefined;
+		const dispatch = binding.execution.config.dispatch;
+		const current = currentIdentity(binding.execution.choice);
+		const route = binding.execution.frozen.find(candidate => candidateRef(candidate) === candidateRef(current));
+		const trusted = route?.execution.trusted === true;
+		const currentHash = executionHash({
+			tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn, trusted,
+		});
+		if (currentHash !== ceilingHash || !trusted ||
+			(kind === "tool" && !this.canApproveTool(agentInstanceId, attemptId, name)) ||
+			(kind === "spawn" && dispatch.spawn.allowed !== "auto"))
+			return undefined;
+		const key = `${kind}\0${name}`;
+		if (receiptId) {
+			if (!/^[A-Za-z0-9._:-]{1,160}$/.test(receiptId)) return undefined;
+			const old = binding.approvalGrants.get(key);
+			if (old && old.receiptId !== receiptId) return undefined;
+			binding.approvalGrants.set(key, { receiptId, ceilingHash });
+		}
+		const grant = binding.approvalGrants.get(key);
+		return grant?.ceilingHash === currentHash ? grant.receiptId : undefined;
+	}
+
+	async #addressApproval(binding: LiveBinding, kind: ApprovalRequest["kind"], name: string,
+		subject?: ApprovalRequest["subject"], timedOut: readonly string[] = []): Promise<ApprovalAddressee | "unknown"> {
+		if (kind === "escalation") return { kind: "human", principal_id: binding.principalId };
+		if (!binding.bindingSnapshot || !this.#approvalAncestor) return "unknown";
+		let agentInstanceRef = binding.bindingSnapshot.agentInstanceRef;
+		let attemptId = binding.attemptId;
+		let installationId = binding.bindingSnapshot.installationId;
+		const visited = new Set<string>([attemptId]);
+		for (let distance = 1; distance <= 256; distance++) {
+			let next: ApprovalAncestor;
+			try {
+				next = await this.#approvalAncestor({
+					agentInstanceRef, attemptId, principalId: binding.principalId,
+					installationId,
+				});
+			} catch {
+				return "unknown";
+			}
+			if (next.unknown || (!next.root && (!next.agent_ref || !next.attempt_id || !next.ceiling || !next.installation_id)))
+				return "unknown";
+			if (next.root) return { kind: "human", principal_id: binding.principalId };
+			if (visited.has(next.attempt_id!)) return "unknown";
+			visited.add(next.attempt_id!);
+			agentInstanceRef = next.agent_ref!;
+			attemptId = next.attempt_id!;
+			installationId = next.installation_id!;
+			const ceiling = next.ceiling!;
+			if (ceiling.trusted === "unknown") return "unknown";
+			const canTool = (ceiling.tools === null || ceiling.tools.includes(name)) &&
+				!ceiling.tools_permit.includes(name) && ceiling.trusted;
+			const capable = kind === "tool" || kind === "consultant"
+				? canTool : kind === "spawn" && subject && "requested_child_ordinal" in subject &&
+					ceiling.spawn.allowed === "auto" && ceiling.spawn.max_depth >= distance + 1 &&
+					subject.requested_child_ordinal <= ceiling.spawn.max_children;
+			if (capable && !next.terminal_known && !timedOut.includes(attemptId))
+				return { kind: "attempt", agent_ref: agentInstanceRef, attempt_id: attemptId };
+		}
+		return "unknown";
+	}
+
 	/** Verify current CH authority for every non-Start command before local admission or side effects. */
 	async verifyCommandOrigin(command: EngineCommandEnvelope): Promise<void> {
 		if (command.op === "start") return; // Start verifies its dispatch and binding in #startInLane.
@@ -1198,6 +1315,18 @@ export class EngineRuntime {
 					binding.pauseRequests.clear();
 					binding.pauseGate.resume();
 					this.#notifyPauseProgress(binding);
+					if (binding.attemptState === "running") {
+						for (const [id, pending] of this.#pendingToolApprovals) {
+							if (pending.record.target.bindingId !== binding.bindingId ||
+								(await this.store.getApproval(id))?.request.status !== "approved") continue;
+							const effect = await this.store.getEffect(id);
+							if (effect?.state === "planned")
+								this.#notifyEvents([await this.store.activateApprovedToolEffect(this.#snapshot(binding), id)]);
+							this.#pendingToolApprovals.delete(id);
+							pending.resolve({ decision: "approve",
+								receiptId: (await this.store.getApproval(id))?.decision_record?.origin_receipt_id });
+						}
+					}
 				}
 			};
 			try {
@@ -1339,8 +1468,11 @@ export class EngineRuntime {
 				principalId: approval.request.principal_id,
 			});
 			if (verified.verified !== true ||
-				storageCanonicalJson(verified.approvalDecision) !== storageCanonicalJson(decision))
-				throw new EngineTargetError("stale_target", "Approval origin differs from its submitted decision");
+				storageCanonicalJson(verified.approvalDecision) !== storageCanonicalJson(decision) ||
+				(verified.expectedInputRevision === null
+					? request.expectedInputRevision !== undefined
+					: verified.expectedInputRevision !== request.expectedInputRevision))
+				throw new EngineTargetError("stale_target", "Approval origin or captured input revision differs from its submitted decision");
 			const events = await this.store.resolveApproval(
 				this.#snapshot(binding), decision.request_id, decision.decision, decision,
 				{
@@ -1351,12 +1483,33 @@ export class EngineRuntime {
 				},
 			);
 			this.#notifyEvents(events);
+			clearTimeout(this.#approvalTimers.get(decision.request_id));
+			this.#approvalTimers.delete(decision.request_id);
+			const effect = await this.store.getEffect(decision.request_id);
+			if (decision.decision !== "deny" && effect &&
+				(effect.state === "planned" || (approval.request.kind === "escalation" && effect.state === "started")) &&
+				(binding.attemptState === "paused" || binding.attemptState === "pause_requested")) {
+				if (binding.attemptState === "paused" && !binding.manualHold)
+					this.#trackRun(this.#resumeApprovedTool(binding, decision.request_id));
+				return;
+			}
 			if (pending && this.#pendingToolApprovals.get(decision.request_id) === pending) {
 				this.#pendingToolApprovals.delete(decision.request_id);
 				pending.resolve({
 					decision: decision.decision === "deny" ? "deny" : "approve",
 					reason: decision.reason ?? undefined,
+					receiptId: decision.origin_receipt_id,
 				});
+			}
+			const escalation = this.#pendingEscalations.get(decision.request_id);
+			if (escalation) {
+				this.#pendingEscalations.delete(decision.request_id);
+				escalation.resolve(decision);
+			}
+			const consultant = this.#pendingConsultants.get(decision.request_id);
+			if (consultant) {
+				this.#pendingConsultants.delete(decision.request_id);
+				consultant.resolve(decision.decision === "deny" ? "deny" : "approve");
 			}
 		});
 	}
@@ -1875,6 +2028,8 @@ export class EngineRuntime {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#storageFailureUnsubscribe?.();
+		for (const timer of this.#approvalTimers.values()) clearTimeout(timer);
+		this.#approvalTimers.clear();
 		this.#signalInboxWake();
 		for (const pending of this.#pendingStarts)
 			pending.controller.abort(new EngineTargetError("cancelled", "Engine stopped during profile resolution"));
@@ -2417,7 +2572,7 @@ export class EngineRuntime {
 			binding = await this.#openBinding(
 				request, resolved, continuationDigest, conversationIdentityDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
-				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit,
+				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings,
 			);
 			resolved = undefined;
 			this.#assertAttachmentSupport(binding.session, images, originals);
@@ -2448,10 +2603,23 @@ export class EngineRuntime {
 			this.#notifyEvents(events);
 			throw error;
 		}
-		this.#trackRun(
-			this.#runPrompt(
+		const promptInput = preparedHistory?.dispatchInput ?? queuedItem?.deliveryPayload ?? request.input ?? "";
+		this.#trackRun((async () => {
+			if (origin.specialApproval) {
+				try {
+					if (!request.specialRef || request.executionKind !== "consultation")
+						throw new EngineTargetError("stale_target", "Consultant approval requires the exact consultation Start");
+					await this.#requestConsultantApproval(binding, origin.specialApproval, request.specialRef,
+						promptInput, preparedAttachments?.originalAttachments, images);
+				} catch (error) {
+					await this.#settleAttempt(binding, binding.attemptId, binding.session.messages.length,
+						"failed", error instanceof Error ? error.message : String(error));
+					return;
+				}
+			}
+			await this.#runPrompt(
 				binding,
-				preparedHistory?.dispatchInput ?? queuedItem?.deliveryPayload ?? request.input ?? "",
+				promptInput,
 				{
 					sourceCommandId: request.commandId,
 					...(preparedAttachments ? { originalAttachments: preparedAttachments.originalAttachments } : {}),
@@ -2471,8 +2639,8 @@ export class EngineRuntime {
 				request.context,
 				{ agentInstanceRef: request.agentInstanceRef },
 				images,
-			),
-		);
+			);
+		})());
 		this.#signalInboxWake();
 		return {
 			...this.#snapshot(binding),
@@ -2574,6 +2742,7 @@ export class EngineRuntime {
 		preparedSessionManager?: SessionManager,
 		pendingStartSignal?: AbortSignal,
 		audit?: LatencyAudit,
+		approvalSettings?: { timeout_seconds: number; settings_revision: number; settings_hash: string },
 	): Promise<LiveBinding> {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
@@ -2645,7 +2814,8 @@ export class EngineRuntime {
 			const spawn = config.dispatch.spawn;
 			const maxChildren = spawn.allowed === "no" ? 0 : spawn.max_children;
 			const engineChildLauncher =
-				this.#launchChild && spawn.allowed !== "no" && spawn.max_depth > 0 && maxChildren > 0
+				this.#launchChild && spawn.allowed !== "no" &&
+					(spawn.max_depth > 0 && maxChildren > 0 || spawn.on_exceed === "approve")
 					? {
 							parentAgentInstanceRef: request.agentInstanceRef,
 							launch: async (child: {
@@ -2658,12 +2828,16 @@ export class EngineRuntime {
 								if (!parent) throw new Error("Engine child launcher is not bound to its parent Attempt");
 								if (!parent.bindingSnapshot)
 									throw new EngineTargetError("source_unavailable", "Parent Attempt binding is unavailable");
-								if (!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren)
+								const spawnApprovalReceiptId = parent.spawnApprovals.get(child.toolCallId);
+								if (!spawnApprovalReceiptId &&
+									(spawn.max_depth < 1 ||
+										(!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren)))
 									throw new EngineTargetError("capacity_unavailable", "Child spawn ceiling reached");
 								parent.childLaunches.add(child.toolCallId);
 								try {
 									return await this.#launchChild!({
 										...child,
+										...(spawnApprovalReceiptId ? { spawnApprovalReceiptId } : {}),
 										parentAgentInstanceId: parent.agentInstanceId,
 										parentAgentInstanceRef: request.agentInstanceRef,
 										parentAttemptId: parent.attemptId,
@@ -2686,6 +2860,7 @@ export class EngineRuntime {
 										},
 									});
 								} finally {
+									parent.spawnApprovals.delete(child.toolCallId);
 									parent.childWaits.delete(child.toolCallId);
 									this.#notifyPauseProgress(parent);
 								}
@@ -2864,6 +3039,11 @@ export class EngineRuntime {
 									.update("grimoire-client-caller-context-v1\0").update(context).digest("hex")}`,
 							};
 						};
+					const requestEscalation: NonNullable<MCPHttpServerConfig["requestEscalation"]> =
+						(toolCallId, toolName, subject, hash, signal) => {
+							if (!liveBinding) throw new EngineTargetError("stale_target", "Escalation binding was released");
+							return this.#requestEscalation(liveBinding, toolCallId, toolName, subject, hash, signal);
+						};
 					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
@@ -2873,6 +3053,7 @@ export class EngineRuntime {
 							mcpManager.connectServers({ grimoire_engine: {
 								...this.#mcpServer,
 								attestToolCall,
+								requestEscalation,
 								headers: {
 									...this.#mcpServer.headers,
 									"X-Grimoire-Client-Caller-Context": callerContext,
@@ -2912,6 +3093,10 @@ export class EngineRuntime {
 				bindingId: `${route}:${bindingGeneration}`,
 				commandId: request.commandId,
 				bindingSnapshot: request.bindingSnapshot,
+				approvalSettings: approvalSettings ?? {
+					timeout_seconds: 300, settings_revision: 0,
+					settings_hash: executionHash({ approval_timeout_seconds: 300 }),
+				},
 				agentInstanceId: request.agentInstanceId,
 				executionId: request.executionId,
 				attemptId: request.attemptId,
@@ -2945,6 +3130,8 @@ export class EngineRuntime {
 				pauseGate,
 				activeToolCallIds: new Set(),
 				childWaits: new Map(),
+				spawnApprovals: new Map(),
+				approvalGrants: new Map(),
 				parkedEffectTools: new Set(),
 				pauseProgress: Promise.withResolvers<void>(),
 				pauseCommandIds: new Set(),
@@ -3452,6 +3639,29 @@ export class EngineRuntime {
 			settled: false,
 		};
 		this.#toolInvocations.set(invocationId, record);
+		const spawn = binding.execution.config.dispatch.spawn;
+		if (call.toolName === "task" && spawn.allowed !== "no" &&
+			(spawn.max_depth < 1 || binding.childLaunches.size >= spawn.max_children)) {
+			try {
+				if (spawn.on_exceed !== "approve" || !this.#reserveChild || !binding.bindingSnapshot)
+					throw new EngineTargetError("capacity_unavailable", "Child spawn ceiling reached");
+				const child = call.input as { target?: WorkTarget; assignment?: string };
+				if (!child.target || typeof child.assignment !== "string")
+					throw new EngineTargetError("invalid_request", "Child target and assignment are required");
+				const subject = await this.#reserveChild({
+					parentAgentInstanceRef: binding.bindingSnapshot.agentInstanceRef,
+					parentAttemptId: binding.attemptId, parentBindingSnapshot: binding.bindingSnapshot,
+					principalId: binding.principalId, authorityGeneration: binding.authorityGeneration,
+					target: child.target, assignment: child.assignment, toolCallId: call.toolCallId,
+					cwd: binding.session.cwd, signal,
+				});
+				return await this.#requestToolApproval(record, signal, subject);
+			} catch (error) {
+				this.#toolInvocations.delete(invocationId);
+				record.resolveDone();
+				throw error;
+			}
+		}
 		if (policy === "permit") return await this.#requestToolApproval(record, signal);
 		try {
 			binding.parkedEffectTools.add(call.toolCallId);
@@ -3469,31 +3679,200 @@ export class EngineRuntime {
 		}
 	}
 
-	async #requestToolApproval(record: ToolInvocationRecord, signal?: AbortSignal): Promise<ToolExecutionHookToken> {
+	#armApprovalDeadline(binding: LiveBinding, request: ApprovalRequest, backoff = 0): void {
+		clearTimeout(this.#approvalTimers.get(request.id));
+		if (!request.expires_at || this.#disposed) return;
+		const delay = backoff || Math.max(0, Date.parse(request.expires_at) - Date.now());
+		const timer = setTimeout(() => {
+			this.#approvalTimers.delete(request.id);
+			this.#trackRun(this.#inLane(binding.agentInstanceId, async () => {
+				if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
+				const current = await this.store.getApproval(request.id);
+				if (current?.state !== "pending" ||
+					current.request.address_revision !== request.address_revision) return;
+				const timedOut = current.request.addressed_to.kind === "attempt"
+					? [...current.timed_out_attempt_ids, current.request.addressed_to.attempt_id]
+					: current.timed_out_attempt_ids;
+				const address = current.request.addressed_to.kind === "human"
+					? { kind: "human" as const, principal_id: binding.principalId }
+					: await this.#addressApproval(binding, current.request.kind, current.request.name,
+						current.request.subject, timedOut);
+				if (address === "unknown") {
+					this.#armApprovalDeadline(binding, current.request, 2_000);
+					return;
+				}
+				const expiresAt = address.kind === "human" ? null
+					: new Date(Date.now() + current.request.timeout_seconds * 1_000).toISOString();
+				const events = await this.store.readdressApproval(this.#snapshot(binding), request.id,
+					request.address_revision, address, expiresAt);
+				this.#notifyEvents(events);
+				if (!events.length) return;
+				const updated = await this.store.getApproval(request.id);
+				if (!updated) return;
+				if (address.kind === "human") {
+					const cause = { kind: "approval_deadline" as const,
+						request_id: request.id, address_revision: updated.request.address_revision };
+					binding.approvalPauseCause = cause;
+					if (binding.attemptState === "running") {
+						binding.pauseGate.pause();
+						binding.attemptState = "pause_requested";
+						await this.#commitAttemptTransition(binding, "pause_requested", [{
+							kind: "pause_requested", payload: { cause },
+						}], { expectedStates: ["running"], cause: "approval_deadline" });
+						this.#trackRun(this.#finishPause(binding, binding.attemptId));
+					}
+				} else this.#armApprovalDeadline(binding, updated.request);
+			}).catch(error => logger.warn("Approval deadline handling failed", { error: String(error) })));
+		}, delay);
+		this.#approvalTimers.set(request.id, timer);
+	}
+
+	async #requestConsultantApproval(binding: LiveBinding,
+		special: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null,
+		ref: NonNullable<EngineStartRequest["specialRef"]>,
+		input: string, originals?: SessionMessageIdentity["originalAttachments"], images?: ImageContent[]): Promise<void> {
+		if (!special || special.kind !== "consultant" || !binding.bindingSnapshot)
+			throw new EngineTargetError("stale_target", "Consultant approval lacks exact Start provenance");
+		const modelCallId = "model-1";
+		const effect: EngineModelEffectInput = {
+			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
+			modelCallId, inputHash: modelInputHash(input, originals, images),
+		};
+		const subject: Extract<ApprovalRequest, { kind: "consultant" }>["subject"] = {
+			call_id: ref.occurrenceOrCallId, definition_ref: ref.definitionRef,
+			definition_revision: ref.revision, dispatch_hash: binding.dispatchHash,
+			unavailable_pin: special.unavailable_pin as Extract<ApprovalRequest, { kind: "consultant" }>["subject"]["unavailable_pin"],
+			proposed_reselection_hash: special.proposed_reselection_hash,
+		};
+		const address = await this.#addressApproval(binding, "consultant", "grimoire_consultant_run", subject);
+		const addressedTo: ApprovalAddressee = address === "unknown"
+			? binding.bindingSnapshot.parentAgentInstanceRef && binding.bindingSnapshot.parentAttemptId
+				? { kind: "attempt", agent_ref: binding.bindingSnapshot.parentAgentInstanceRef,
+					attempt_id: binding.bindingSnapshot.parentAttemptId }
+				: { kind: "human", principal_id: binding.principalId }
+			: address;
+		const now = new Date();
+		const timeoutSeconds = binding.approvalSettings.timeout_seconds;
+		const request: ApprovalRequest = {
+			schema: "grimoire.approval_request.v1", id: effect.effectId,
+			principal_id: binding.principalId, requester_agent_ref: binding.bindingSnapshot.agentInstanceRef,
+			requester_attempt_id: binding.attemptId,
+			requester_binding_revision: binding.bindingSnapshot.bindingRevision,
+			dispatch_hash: binding.dispatchHash, effect_id: effect.effectId,
+			kind: "consultant", name: "grimoire_consultant_run", subject,
+			requires_human: false, reason: "Consultant route pin unavailable",
+			created_at: now.toISOString(), addressed_to: addressedTo, addressed_at: now.toISOString(),
+			expires_at: new Date(now.getTime() + timeoutSeconds * 1_000).toISOString(),
+			address_revision: 1, decision_revision: 0, status: "pending",
+			timeout_seconds: timeoutSeconds,
+			settings_revision: binding.approvalSettings.settings_revision,
+			settings_hash: binding.approvalSettings.settings_hash,
+		};
+		validateRuntimeValue("approvalRequest", request);
+		const pending = Promise.withResolvers<"approve" | "deny">();
+		this.#pendingConsultants.set(effect.effectId, pending);
+		try {
+			const event = await this.store.requestModelApproval(this.#snapshot(binding), effect, request,
+				await this.#effectCheckpoint(binding));
+			binding.consultantEffectId = effect.effectId;
+			this.#notifyEvents([event]);
+			this.#armApprovalDeadline(binding, request);
+			if (await pending.promise !== "approve")
+				throw new EngineTargetError("cancelled", "Consultant route reselection denied");
+		} finally {
+			this.#pendingConsultants.delete(effect.effectId);
+		}
+	}
+
+	async #requestEscalation(binding: LiveBinding, toolCallId: string, toolName: string,
+		subject: Record<string, unknown>, subjectHash: string, signal?: AbortSignal): Promise<string> {
+		signal?.throwIfAborted();
+		const record = [...this.#toolInvocations.values()].find(item =>
+			item.target.bindingId === binding.bindingId && item.toolCallId === toolCallId &&
+			item.toolName === toolName);
+		const effect = record && await this.store.getEffect(record.invocationId);
+		if (!binding.bindingSnapshot || !record || effect?.state !== "started" ||
+			effect.effect_kind !== "tool" || effect.input_hash !== record.inputHash ||
+			`sha256:${sha256(storageCanonicalJson(subject))}` !== subjectHash ||
+			this.#pendingEscalations.has(record.invocationId))
+			throw new EngineTargetError("stale_target", "Escalation requires the exact started MCP ToolEffect and subject hash");
+		const now = new Date();
+		const timeoutSeconds = binding.approvalSettings.timeout_seconds;
+		const approval: ApprovalRequest = {
+			schema: "grimoire.approval_request.v1", id: record.invocationId,
+			principal_id: binding.principalId, requester_agent_ref: binding.bindingSnapshot.agentInstanceRef,
+			requester_attempt_id: binding.attemptId,
+			requester_binding_revision: binding.bindingSnapshot.bindingRevision,
+			dispatch_hash: binding.dispatchHash, effect_id: record.invocationId,
+			kind: "escalation", name: String(subject.kind),
+			subject: subject as Extract<ApprovalRequest, { kind: "escalation" }>["subject"],
+			requires_human: true, reason: `Human approval required for ${subject.kind}`,
+			created_at: now.toISOString(), addressed_to: { kind: "human", principal_id: binding.principalId },
+			addressed_at: now.toISOString(),
+			expires_at: new Date(now.getTime() + timeoutSeconds * 1_000).toISOString(),
+			address_revision: 1, decision_revision: 0, status: "pending",
+			timeout_seconds: timeoutSeconds,
+			settings_revision: binding.approvalSettings.settings_revision,
+			settings_hash: binding.approvalSettings.settings_hash,
+		};
+		validateRuntimeValue("approvalRequest", approval);
+		const pending = Promise.withResolvers<EngineApprovalDecision["approvalDecision"]>();
+		this.#pendingEscalations.set(record.invocationId, pending);
+		const abort = () => {
+			pending.reject(new EngineTargetError("cancelled", "Escalation call was cancelled"));
+			void this.#inLane(binding.agentInstanceId, async () => {
+				if ((await this.store.getApproval(record.invocationId))?.state !== "pending") return;
+				this.#notifyEvents(await this.store.resolveApproval(this.#snapshot(binding),
+					record.invocationId, "cancelled", null));
+			}).catch(error => logger.warn("Escalation cancellation failed", { error: String(error) }));
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		binding.parkedEffectTools.add(toolCallId);
+		this.#notifyPauseProgress(binding);
+		try {
+			const event = await this.store.requestStartedEffectApproval(this.#snapshot(binding), record.invocationId, approval);
+			this.#notifyEvents([event]);
+			this.#armApprovalDeadline(binding, approval);
+			const decision = await pending.promise;
+			if (decision.decision !== "approve")
+				throw new EngineTargetError("cancelled", "Escalation denied");
+			return decision.origin_receipt_id;
+		} finally {
+			signal?.removeEventListener("abort", abort);
+			this.#pendingEscalations.delete(record.invocationId);
+			binding.parkedEffectTools.delete(toolCallId);
+			this.#notifyPauseProgress(binding);
+		}
+	}
+
+	async #requestToolApproval(record: ToolInvocationRecord, signal?: AbortSignal,
+		spawnSubject?: Extract<ApprovalRequest, { kind: "spawn" }>["subject"]): Promise<ToolExecutionHookToken> {
 		signal?.throwIfAborted();
 		const completion = Promise.withResolvers<{
 			decision: "approve" | "deny" | "cancelled";
 			reason?: string;
 			causationCommandId?: string;
+			receiptId?: string;
 		}>();
 		const pending: PendingToolApproval = { record, resolve: completion.resolve };
 		this.#pendingToolApprovals.set(record.invocationId, pending);
 		try {
 			const binding = this.#bindings.get(record.target.agentInstanceId);
 			if (!binding?.bindingSnapshot) throw new EngineTargetError("stale_target", "Approval binding was released");
-			const parentRef = binding.bindingSnapshot.parentAgentInstanceRef;
-			const parent = parentRef && this.#bindings.get(engineAgentInstanceId(parentRef));
-			const parentReceipt = parent && await this.store.runtimeCommand(parent.commandId, { principalId: binding.principalId });
-			const parentCanDecide = Boolean(parent && parent.attemptId === binding.bindingSnapshot.parentAttemptId &&
-				parent.bindingSnapshot?.bindingRevision === binding.bindingSnapshot.parentBindingRevision &&
-				this.canApproveTool(parent.agentInstanceId, parent.attemptId, record.toolName) &&
-				parentReceipt?.stage === "applied" &&
-				(parentReceipt.lease as { held?: boolean } | undefined)?.held === true);
-			const addressedTo: ApprovalAddressee = parentCanDecide
-				? { kind: "attempt", agent_ref: parentRef!, attempt_id: parent!.attemptId }
-				: { kind: "human", principal_id: binding.principalId };
+			const name = spawnSubject ? spawnSubject.exceeded.join("+") : record.toolName;
+			const subject = spawnSubject ?? {
+				tool_name: record.toolName, call_hash: `sha256:${record.inputHash}`,
+				ceiling_hash: executionHash(binding.execution.config.continuationConfiguration.tools_permit),
+			};
+			const address = await this.#addressApproval(binding, spawnSubject ? "spawn" : "tool", name, subject);
+			const addressedTo: ApprovalAddressee = address === "unknown"
+				? binding.bindingSnapshot.parentAgentInstanceRef && binding.bindingSnapshot.parentAttemptId
+					? { kind: "attempt", agent_ref: binding.bindingSnapshot.parentAgentInstanceRef,
+						attempt_id: binding.bindingSnapshot.parentAttemptId }
+					: { kind: "human", principal_id: binding.principalId }
+				: address;
 			const now = new Date();
-			const timeoutSeconds = 300;
+			const timeoutSeconds = binding.approvalSettings.timeout_seconds;
 			const request: ApprovalRequest = {
 				schema: "grimoire.approval_request.v1",
 				id: record.invocationId,
@@ -3503,13 +3882,8 @@ export class EngineRuntime {
 				requester_binding_revision: binding.bindingSnapshot.bindingRevision,
 				dispatch_hash: binding.dispatchHash,
 				effect_id: record.invocationId,
-				kind: "tool",
-				name: record.toolName,
-				subject: {
-					tool_name: record.toolName,
-					call_hash: `sha256:${record.inputHash}`,
-					ceiling_hash: executionHash(binding.execution.config.continuationConfiguration.tools_permit),
-				},
+				...(spawnSubject ? { kind: "spawn" as const, name, subject: spawnSubject } :
+					{ kind: "tool" as const, name, subject: subject as Extract<ApprovalRequest, { kind: "tool" }>["subject"] }),
 				requires_human: false,
 				reason: `Permission requested for ${record.toolName}`,
 				created_at: now.toISOString(),
@@ -3520,8 +3894,8 @@ export class EngineRuntime {
 				decision_revision: 0,
 				status: "pending",
 				timeout_seconds: timeoutSeconds,
-				settings_revision: 0,
-				settings_hash: executionHash({ approval_timeout_seconds: timeoutSeconds }),
+				settings_revision: binding.approvalSettings.settings_revision,
+				settings_hash: binding.approvalSettings.settings_hash,
 			};
 			validateRuntimeValue("approvalRequest", request);
 			const checkpoint = await this.#effectCheckpoint(binding);
@@ -3531,6 +3905,7 @@ export class EngineRuntime {
 				signal,
 			);
 			this.#notifyEvents([event]);
+			this.#armApprovalDeadline(binding, request);
 		} catch (error) {
 			this.#pendingToolApprovals.delete(record.invocationId);
 			this.#toolInvocations.delete(record.invocationId);
@@ -3549,6 +3924,12 @@ export class EngineRuntime {
 		signal?.addEventListener("abort", abort, { once: true });
 		const decision = await completion.promise.finally(() => signal?.removeEventListener("abort", abort));
 		if (decision.decision === "approve") {
+			if (spawnSubject) {
+				const binding = this.#bindings.get(record.target.agentInstanceId);
+				if (!decision.receiptId || !binding || binding.attemptId !== record.target.attemptId)
+					throw new EngineTargetError("stale_target", "Approved child requires a receipt on the original parent Attempt");
+				binding.spawnApprovals.set(record.toolCallId, decision.receiptId);
+			}
 			return { invocationId: record.invocationId };
 		}
 		this.#toolInvocations.delete(record.invocationId);
@@ -3755,6 +4136,50 @@ export class EngineRuntime {
 		await this.cancel({ ...this.#snapshot(binding), commandId: binding.commandId, reason });
 	}
 
+	async #resumeApprovedTool(binding: LiveBinding, id: string): Promise<void> {
+		await this.#inLane(binding.agentInstanceId, async () => {
+			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding ||
+				binding.attemptState !== "paused" || binding.manualHold) return;
+			const approval = await this.store.getApproval(id);
+			if (approval?.request.status !== "approved") return;
+			const route = await this.#resumeRouting(binding);
+			binding.attemptState = "running";
+			try {
+				await this.#commitAttemptTransition(binding, "running", [{
+					kind: "resumed", payload: { cause: binding.approvalPauseCause },
+				}], { expectedStates: ["paused"], routingResume: route });
+				binding.approvalPauseCause = undefined;
+				binding.pauseGate.resume();
+				this.#notifyPauseProgress(binding);
+			} catch (error) {
+				binding.attemptState = "paused";
+				await this.store.releaseRouting(binding.attemptId);
+				logger.warn("Approved tool awaits same-Attempt routing resume", { requestId: id, error: String(error) });
+				return;
+			}
+			const effect = await this.store.getEffect(id);
+			if (effect?.state === "planned") {
+				const event = await this.store.activateApprovedToolEffect(this.#snapshot(binding), id);
+				this.#notifyEvents([event]);
+			}
+			const pending = this.#pendingToolApprovals.get(id);
+			if (pending) {
+				this.#pendingToolApprovals.delete(id);
+				pending.resolve({ decision: "approve", receiptId: approval.decision_record?.origin_receipt_id });
+			}
+			const escalation = this.#pendingEscalations.get(id);
+			if (escalation && approval.decision_record) {
+				this.#pendingEscalations.delete(id);
+				escalation.resolve(approval.decision_record);
+			}
+			const consultant = this.#pendingConsultants.get(id);
+			if (consultant) {
+				this.#pendingConsultants.delete(id);
+				consultant.resolve("approve");
+			}
+		});
+	}
+
 	async #finishPause(binding: LiveBinding, attemptId: string): Promise<void> {
 		while (
 			!this.#disposed &&
@@ -3798,17 +4223,35 @@ export class EngineRuntime {
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
-			const events = [...binding.pauseRequests].map(([commandId, initiator]) => ({
+			const events: EngineTransitionEvent[] = [...binding.pauseRequests].map(([commandId, initiator]) => ({
 				kind: "paused" as const,
 				payload: controlPayload(initiator, "paused", false, binding),
 				causationCommandId: commandId,
 			}));
+			if (binding.approvalPauseCause)
+				events.push({ kind: "paused", payload: { cause: binding.approvalPauseCause },
+					causationCommandId: undefined });
 			await this.#commitAttemptTransition(binding, "paused", events, {
 				expectedStates: ["pause_requested"],
+				cause: binding.approvalPauseCause ? "approval_deadline" : undefined,
 				transcriptCheckpoint,
 			});
 			binding.attemptState = "paused";
 			binding.pauseRequests.clear();
+			if (binding.approvalPauseCause && !binding.manualHold)
+				for (const [id, pending] of this.#pendingToolApprovals) {
+					if (pending.record.target.bindingId === binding.bindingId &&
+						(await this.store.getApproval(id))?.request.status === "approved")
+						this.#trackRun(this.#resumeApprovedTool(binding, id));
+				}
+			if (binding.approvalPauseCause && !binding.manualHold)
+				for (const id of this.#pendingEscalations.keys())
+					if ((await this.store.getApproval(id))?.request.status === "approved")
+						this.#trackRun(this.#resumeApprovedTool(binding, id));
+			if (binding.approvalPauseCause && !binding.manualHold)
+				for (const id of this.#pendingConsultants.keys())
+					if ((await this.store.getApproval(id))?.request.status === "approved")
+						this.#trackRun(this.#resumeApprovedTool(binding, id));
 		});
 	}
 
@@ -3900,19 +4343,7 @@ export class EngineRuntime {
 		const completed = Promise.withResolvers<void>();
 		binding.activeModelCalls.add(completed.promise);
 		const modelCallId = `model-${++binding.modelCallSequence}`;
-		const inputHash =
-			images?.length || identity?.originalAttachments?.length
-				? sha256(
-						stableStringifyJson({
-							input,
-							originalAttachments: identity?.originalAttachments,
-							images: images?.map(image => ({
-								mimeType: image.mimeType,
-								hash: sha256(Buffer.from(image.data, "base64")),
-							})),
-						}),
-					)
-				: sha256(input);
+		const inputHash = modelInputHash(input, identity?.originalAttachments, images);
 		const effect: EngineModelEffectInput = {
 			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
 			modelCallId,
@@ -3930,12 +4361,19 @@ export class EngineRuntime {
 		});
 		audit?.mark("model_admission_start");
 		try {
-			const admissionCheckpoint = await this.#effectCheckpoint(binding);
-			const started = await this.#admitEffect(binding, () =>
-				this.store.startModelEffect(this.#snapshot(binding), effect, admissionCheckpoint),
-			);
-			this.#notifyEvents([started]);
-			audit?.mark("model_started", { eventId: started.eventId });
+			if (binding.consultantEffectId === effect.effectId) {
+				const approved = await this.store.getEffect(effect.effectId);
+				if (approved?.state !== "started" || approved.effect_kind !== "model" ||
+					approved.input_hash !== effect.inputHash)
+					throw new EngineTargetError("stale_target", "Consultant model effect differs from approved call");
+				binding.consultantEffectId = undefined;
+			} else {
+				const admissionCheckpoint = await this.#effectCheckpoint(binding);
+				const started = await this.#admitEffect(binding, () =>
+					this.store.startModelEffect(this.#snapshot(binding), effect, admissionCheckpoint));
+				this.#notifyEvents([started]);
+				audit?.mark("model_started", { eventId: started.eventId });
+			}
 			this.#queueExecutorRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
@@ -5722,6 +6160,18 @@ function assertFilesReadable(readEnabled: boolean, originals?: SessionMessageIde
 			"attachment_requires_read",
 			`File "${file.name}" cannot be sent: this execution does not allow the read tool required for attachments.`,
 		);
+}
+
+function modelInputHash(input: string, originals?: SessionMessageIdentity["originalAttachments"],
+	images?: ImageContent[]): string {
+	return images?.length || originals?.length
+		? sha256(stableStringifyJson({
+				input, originalAttachments: originals,
+				images: images?.map(image => ({
+					mimeType: image.mimeType, hash: sha256(Buffer.from(image.data, "base64")),
+				})),
+			}))
+		: sha256(input);
 }
 
 function executionHash(value: unknown): string {

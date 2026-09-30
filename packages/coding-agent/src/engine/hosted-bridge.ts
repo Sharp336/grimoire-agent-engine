@@ -97,7 +97,8 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 	): Promise<Record<string, unknown>> {
 		const internal = tool === "grimoire_agent_engine_dispatch" || tool === "grimoire_agent_engine_bridge"
 			|| tool === "grimoire_job_get" || tool === "grimoire_job_cancel"
-			|| tool === "verify_origin_receipt" || tool === "verify_approval_receipt" || tool === "prepare_child_start";
+			|| tool === "verify_origin_receipt" || tool === "verify_approval_receipt" || tool === "prepare_child_start"
+			|| tool === "approval_origin";
 		const id = ++this.#requestId;
 		const envelope = internal
 			? { schema: "grimoire.client_internal_request.v1", operation: "engine_tool", request_id: String(id),

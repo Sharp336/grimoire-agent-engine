@@ -2260,7 +2260,7 @@ export class RocksEngineMutations {
 						decision_record: null,
 						timed_out_attempt_ids: [],
 					} satisfies EngineApprovalRow);
-					return this.append(tx, target, { kind: "tool_approval_requested", payload: approval });
+					return this.append(tx, target, { kind: `${approval.kind}_approval_requested`, payload: approval });
 				}
 				return this.append(tx, target, {
 					kind: model ? "model_started" : "tool_started",
@@ -2293,6 +2293,12 @@ export class RocksEngineMutations {
 	): Promise<EngineEvent> {
 		return this.effectStart(target, effect, true, undefined, checkpoint);
 	}
+	async requestModelApproval(
+		target: EventTarget, effect: EngineModelEffectInput, request: ApprovalRequest,
+		checkpoint?: SessionDurabilityCheckpoint,
+	): Promise<EngineEvent> {
+		return this.effectStart(target, effect, true, request, checkpoint);
+	}
 	async requestToolApproval(
 		target: EventTarget,
 		effect: EngineToolEffectInput,
@@ -2300,6 +2306,22 @@ export class RocksEngineMutations {
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
 		return this.effectStart(target, effect, false, request, checkpoint);
+	}
+	/** The MCP call has already started; an escalation parks that exact effect without creating a planned duplicate. */
+	async requestStartedEffectApproval(target: EventTarget, effectId: string, request: ApprovalRequest): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const effect = await tx.get<RocksEffect>("effect", effectId);
+			if (request.kind !== "escalation" || request.id !== effectId || request.effect_id !== effectId ||
+				effect?.state !== "started" || !this.sameFence(effect, target) ||
+				await tx.get<EngineApprovalRow>("approval", effectId))
+				throw new EngineEffectConflictError(effectId);
+			await tx.create("approval", effectId, {
+				approval_id: effectId, effect_id: effectId, state: "pending", decision: null,
+				updated_at: Date.now(), request, decision_record: null, timed_out_attempt_ids: [],
+			} satisfies EngineApprovalRow);
+			return this.append(tx, target, { kind: "escalation_approval_requested", payload: request });
+		});
 	}
 	async effectSettle(
 		tx: RuntimeTransaction,
@@ -2388,11 +2410,11 @@ export class RocksEngineMutations {
 					record.expected_decision_revision !== request.decision_revision)
 			)
 				throw new EngineTargetError("stale_target", "Approval request revision changed");
-			const effect = request.kind === "tool" ? await tx.get<RocksEffect>("effect", request.effect_id) : undefined;
-			if (request.kind === "tool" && (effect?.state !== "planned" || !this.sameFence(effect, target)))
+			const effect = request.kind === "tool" || request.kind === "spawn" || request.kind === "consultant"
+				? await tx.get<RocksEffect>("effect", request.effect_id) : undefined;
+			if (effect && (effect.state !== "planned" || !this.sameFence(effect, target)))
 				throw new EngineEffectConflictError(id);
-			if (outcome !== "cancelled")
-				await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision, outcome !== "deny");
+			await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision);
 			if (options.expectedInputRevision !== undefined) {
 				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
 				if (attempt?.input_revision !== options.expectedInputRevision)
@@ -2420,21 +2442,26 @@ export class RocksEngineMutations {
 					},
 				}),
 			];
-			if (effect && status === "approved") {
+			if (effect && status === "approved" && (await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "running") {
+				const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+				if (!lease || !attempt?.execution || lease.attempt_id !== target.attemptId ||
+					lease.engine_generation !== target.engineGeneration ||
+					lease.dispatch_hash !== attempt.execution.dispatch_hash ||
+					lease.expires_at <= Date.now() ||
+					lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
+					throw new EngineTargetError("stale_target", "Approval cannot start effect without active routing lease");
 				await tx.put("effect", effect.effect_id, { ...effect, state: "started", updated_at: Date.now() });
-				events.push(
-					await this.append(tx, target, {
-						kind: "tool_started",
-						payload: {
-							invocationId: effect.effect_id,
-							toolCallId: effect.tool_call_id,
-							toolName: effect.tool_name,
-							policy: effect.policy,
-							inputHash: effect.input_hash,
-						},
-					}),
-				);
-			} else if (effect)
+				events.push(await this.append(tx, target, {
+					kind: effect.effect_kind === "model" ? "model_started" : "tool_started",
+					payload: effect.effect_kind === "model"
+						? { effectId: effect.effect_id, modelCallId: effect.tool_call_id }
+						: {
+								invocationId: effect.effect_id, toolCallId: effect.tool_call_id,
+								toolName: effect.tool_name, policy: effect.policy, inputHash: effect.input_hash,
+							},
+				}));
+			} else if (effect && status !== "approved")
 				events.push(
 					await this.effectSettle(
 						tx,
@@ -2448,6 +2475,37 @@ export class RocksEngineMutations {
 			return events;
 		});
 	}
+	/** Starts an approved parked effect only after the same Attempt reacquires its routing lease. */
+	async activateApprovedToolEffect(target: EventTarget, id: string): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			await this.checkIntent(tx, target.agentInstanceId, undefined, true);
+			const approval = await tx.get<EngineApprovalRow>("approval", id);
+			const effect = await tx.get<RocksEffect>("effect", id);
+			const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+			if (approval?.state !== "resolved" || approval.request.status !== "approved" ||
+				!effect || effect.state !== "planned" || !this.sameFence(effect, target) ||
+				attempt?.state !== "running" || !attempt.execution ||
+				!lease || lease.attempt_id !== target.attemptId ||
+				lease.engine_generation !== target.engineGeneration ||
+				lease.dispatch_hash !== attempt.execution.dispatch_hash ||
+				lease.expires_at <= Date.now() ||
+				lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
+				throw new EngineTargetError("stale_target", "Approved tool effect requires the resumed Attempt's live routing lease");
+			await tx.put("effect", id, { ...effect, state: "started", updated_at: Date.now() });
+			return this.append(tx, target, {
+				kind: effect.effect_kind === "model" ? "model_started" : "tool_started",
+				payload: effect.effect_kind === "model"
+					? { effectId: effect.effect_id, modelCallId: effect.tool_call_id }
+					: {
+							invocationId: id, toolCallId: effect.tool_call_id, toolName: effect.tool_name,
+							policy: effect.policy, inputHash: effect.input_hash,
+						},
+			});
+		});
+	}
+
 	/** Timeout: address the next capable ancestor, or the human with the same transition when none remains. */
 	async readdressApproval(
 		target: EventTarget,
@@ -2459,7 +2517,8 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			await this.assertFence(tx, target);
 			const approval = await tx.get<EngineApprovalRow>("approval", id);
-			if (approval?.state !== "pending" || approval.request.address_revision !== expectedAddressRevision) return [];
+			if (approval?.state !== "pending" || approval.request.address_revision !== expectedAddressRevision ||
+				!approval.request.expires_at || Date.parse(approval.request.expires_at) > Date.now()) return [];
 			const from = approval.request.addressed_to;
 			const now = new Date().toISOString();
 			const request = {
@@ -2468,6 +2527,7 @@ export class RocksEngineMutations {
 				addressed_at: now,
 				expires_at: expiresAt,
 				address_revision: expectedAddressRevision + 1,
+				status: to.kind === "human" ? "waiting_human_paused" : "pending",
 			} as ApprovalRequest;
 			await tx.put("approval", id, {
 				...approval,

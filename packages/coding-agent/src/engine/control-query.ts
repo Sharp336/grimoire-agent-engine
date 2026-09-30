@@ -4,6 +4,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
+	type ApprovalRequest,
 	type EngineExecutionConfiguration,
 	type EngineAttemptState,
 	type EngineBindingGate,
@@ -101,6 +102,7 @@ export type EngineControlQueryMethod =
 	| "runtime.command.get"
 	| "approval.get"
 	| "approval.authorize"
+	| "approval.grant"
 	| "runtime.context"
 	| "runtime.usage"
 	| "runtime.queue"
@@ -418,24 +420,57 @@ async function dispatchRequest(
 			return await options.runtime.store.runtimeMessages(params as unknown as RuntimePageRequest);
 		case "runtime.tools":
 			return await options.runtime.store.runtimeTools(params as unknown as RuntimePageRequest);
+		case "approval.grant": {
+			const caller = params.callerContext as Record<string, unknown> | undefined;
+			if (!caller || typeof caller.attemptId !== "string" || typeof caller.agentInstanceRef !== "string")
+				throw new EngineTargetError("stale_target", "Grant requires its exact approving Attempt");
+			const actor = await options.runtime.store.getAttempt(caller.attemptId);
+			const start = actor && await options.runtime.store.getStartConversationIdentity(actor.command_id);
+			if (!actor || !start?.principalId || actor.state !== "running" ||
+				actor.binding_snapshot?.agentInstanceRef !== caller.agentInstanceRef ||
+				!sameSemanticBinding(actor.binding_snapshot, caller.bindingSnapshot as EngineSemanticBindingSnapshot) ||
+				actor.execution?.dispatch_hash !== caller.dispatchHash ||
+				(params.principalId !== undefined && params.principalId !== start.principalId))
+				throw new EngineTargetError("stale_target", "Grant approver binding is not live");
+			const receipt = await options.runtime.store.runtimeCommand(actor.command_id, { principalId: start.principalId });
+			if (receipt.stage !== "applied" || !receipt.lease ||
+				typeof receipt.lease !== "object" || !("held" in receipt.lease) || receipt.lease.held !== true)
+				throw new EngineTargetError("stale_target", "Grant requires the live approver lease");
+			const kind = requiredString(params, "kind");
+			if (kind !== "tool" && kind !== "spawn")
+				throw new EngineTargetError("invalid_request", "Only tool and spawn support persistent grants");
+			const grantReceipt = options.runtime.approvalGrant(actor.agent_instance_id, actor.attempt_id, kind,
+				requiredString(params, "name"), requiredString(params, "ceiling_hash"), requiredString(params, "receiptId"));
+			if (!grantReceipt) throw new EngineTargetError("stale_target", "Grant exceeds the current approver ceiling");
+			return { receiptId: grantReceipt };
+		}
 		case "approval.get":
 		case "approval.authorize": {
 			const id = requiredString(params, "requestId");
 			const principalId = requiredString(params, "principalId");
 			const approval = await options.runtime.store.getApproval(id);
-			const approvalRequest = approval?.request;
-			if (!approvalRequest || approvalRequest.principal_id !== principalId)
+			const local = approval?.request;
+			const supplied = request.method === "approval.authorize" && params.request !== undefined
+				? params.request as ApprovalRequest : undefined;
+			if (supplied) validateRuntimeValue("approvalRequest", supplied);
+			if (supplied && local && storageCanonicalJson(supplied) !== storageCanonicalJson(local))
+				throw new EngineTargetError("stale_target", "Approval differs from its requester Engine");
+			const approvalRequest = supplied ?? local;
+			if (!approvalRequest || approvalRequest.id !== id || approvalRequest.principal_id !== principalId)
 				throw new EngineTargetError("agent_not_found", "Approval request is not accessible");
-			const attempt = await options.runtime.store.getAttempt(approvalRequest.requester_attempt_id);
-			if (!attempt || !attempt.execution || attempt.execution.dispatch_hash !== approvalRequest.dispatch_hash)
+			const attempt = local && await options.runtime.store.getAttempt(approvalRequest.requester_attempt_id);
+			if (local && (!attempt || !attempt.execution || attempt.execution.dispatch_hash !== approvalRequest.dispatch_hash))
 				throw new EngineTargetError("stale_target", "Requester Attempt has no admitted approval");
-			const inputRevision = attempt.input_revision;
+			const inputRevision = attempt?.input_revision;
 			if (params.expectedInputRevision !== undefined &&
-				requiredInteger(params, "expectedInputRevision") !== inputRevision)
+				(inputRevision === undefined || requiredInteger(params, "expectedInputRevision") !== inputRevision))
 				throw new EngineTargetError("stale_target", "Approval input revision changed");
 			if (request.method === "approval.authorize" &&
-				(approvalRequest.status !== "pending" || approval.state !== "pending"))
+				(!["pending", "waiting_human_paused"].includes(approvalRequest.status) ||
+					(local && approval?.state !== "pending")))
 				throw new EngineTargetError("too_late", "Approval request is no longer pending");
+			let ceiling_hash = "ceiling_hash" in approvalRequest.subject
+				? approvalRequest.subject.ceiling_hash : approvalRequest.settings_hash;
 			if (request.method === "approval.authorize") {
 				const caller = params.callerContext as Record<string, unknown> | undefined;
 				if (!caller || approvalRequest.requires_human || approvalRequest.addressed_to.kind !== "attempt" ||
@@ -443,6 +478,11 @@ async function dispatchRequest(
 					caller.attemptId !== approvalRequest.addressed_to.attempt_id ||
 					caller.attemptId === approvalRequest.requester_attempt_id)
 					throw new EngineTargetError("stale_target", "Caller is not the addressed ancestor");
+				const ancestorDistance = requiredInteger(params, "ancestorDistance");
+				if (ancestorDistance < 1 ||
+					(local && attempt?.binding_snapshot?.parentAttemptId === caller.attemptId &&
+						ancestorDistance !== 1))
+					throw new EngineTargetError("stale_target", "Approver distance is not backed by the admitted chain");
 				const actor = await options.runtime.store.getAttempt(String(caller.attemptId));
 				const actorBinding = actor && await options.runtime.store.getBinding(actor.agent_instance_id);
 				const actorCommand = actor && await options.runtime.store.getStartConversationIdentity(actor.command_id);
@@ -450,6 +490,7 @@ async function dispatchRequest(
 					(JSON.parse(actorCommand.serializedCommand) as EngineCommandEnvelope).payload.executionConfiguration;
 				if (rawConfig) validateRuntimeValue("engineExecutionConfiguration", rawConfig);
 				const actorConfig = rawConfig as EngineExecutionConfiguration | undefined;
+				const actorReceipt = actor && await options.runtime.store.runtimeCommand(actor.command_id, { principalId });
 				if (!actor || !actor.execution || !actorCommand || !actorConfig ||
 					!actorBinding || actorBinding.attemptId !== actor.attempt_id ||
 					actorBinding.engineGeneration !== options.runtime.engineGeneration ||
@@ -458,26 +499,43 @@ async function dispatchRequest(
 					actorCommand.agentInstanceRef !== caller.agentInstanceRef ||
 					!sameSemanticBinding(actor.binding_snapshot, caller.bindingSnapshot as EngineSemanticBindingSnapshot) ||
 					actor.execution.dispatch_hash !== caller.dispatchHash ||
-					approvalRequest.requester_attempt_id !== attempt.attempt_id ||
-					attempt.binding_snapshot?.parentAttemptId !== actor.attempt_id ||
-					attempt.binding_snapshot?.parentBindingRevision !== actor.binding_snapshot?.bindingRevision ||
-					!["tool", "spawn"].includes(approvalRequest.kind) ||
-					(approvalRequest.kind === "tool" && !options.runtime.canApproveTool(actor.agent_instance_id, actor.attempt_id, approvalRequest.subject.tool_name)) ||
-					(approvalRequest.kind === "spawn" && actorConfig.dispatch.spawn.allowed === "no"))
-					throw new EngineTargetError("stale_target", "Caller lacks the current approval ceiling");
-				const actorReceipt = await options.runtime.store.runtimeCommand(actor.command_id, { principalId });
-				if (actorReceipt.stage !== "applied" ||
+					!actorReceipt || actorReceipt.stage !== "applied" ||
 					!actorReceipt.lease || typeof actorReceipt.lease !== "object" ||
 					!("held" in actorReceipt.lease) || actorReceipt.lease.held !== true)
-					throw new EngineTargetError("stale_target", "Approving ancestor has no live lease");
+					throw new EngineTargetError("stale_target", "Approving ancestor has no live admitted lease");
+				const dispatch = actorConfig.dispatch;
+				const current = actor.execution.executor_choice.selected;
+				const route = actorConfig.routes.routes.find(candidate =>
+					candidate.route_ref === current.route_ref && candidate.effort === current.effort &&
+					candidate.service_tier === current.service_tier);
+				const name = approvalRequest.kind === "consultant" ? "grimoire_consultant_run" : approvalRequest.name;
+				const trusted = route?.execution.trusted === true;
+				const toolCapable = (dispatch.tools === null || dispatch.tools.includes(name)) &&
+					!dispatch.tools_permit.includes(name) && trusted;
+				const spawnCapable = approvalRequest.kind === "spawn" &&
+					dispatch.spawn.allowed === "auto" &&
+					dispatch.spawn.max_depth >= ancestorDistance + 1 &&
+					dispatch.spawn.max_children >= approvalRequest.subject.requested_child_ordinal;
+				if (!((approvalRequest.kind === "tool" || approvalRequest.kind === "consultant")
+					? toolCapable : spawnCapable))
+					throw new EngineTargetError("stale_target", "Caller lacks the current approval ceiling");
+				ceiling_hash = `sha256:${createHash("sha256").update(storageCanonicalJson({
+					tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn, trusted,
+				})).digest("hex")}`;
+				if (params.grant === true) {
+					if (approvalRequest.requires_human || ancestorDistance !== 1 ||
+						(approvalRequest.kind !== "tool" && approvalRequest.kind !== "spawn"))
+						throw new EngineTargetError("stale_target", "Grant only covers a direct child's tool or spawn");
+					const grantReceipt = options.runtime.approvalGrant(actor.agent_instance_id, actor.attempt_id,
+						approvalRequest.kind, approvalRequest.name, ceiling_hash);
+					if (!grantReceipt) throw new EngineTargetError("stale_target", "Live approver lacks the exact grant");
+					return { request: approvalRequest, inputRevision, ceiling_hash,
+						subject_hash: `sha256:${createHash("sha256").update(storageCanonicalJson(approvalRequest.subject)).digest("hex")}`,
+						grant_receipt_id: grantReceipt };
+				}
 			}
 			const subject_hash = `sha256:${createHash("sha256").update(storageCanonicalJson(approvalRequest.subject)).digest("hex")}`;
-			return {
-				request: approvalRequest,
-				inputRevision,
-				ceiling_hash: "ceiling_hash" in approvalRequest.subject ? approvalRequest.subject.ceiling_hash : approvalRequest.settings_hash,
-				subject_hash,
-			};
+			return { request: approvalRequest, inputRevision, ceiling_hash, subject_hash };
 		}
 		case "runtime.command.get": {
 			const effectProof = params.effectId === undefined ? undefined : {
@@ -1301,6 +1359,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"runtime.command.get",
 			"approval.get",
 			"approval.authorize",
+			"approval.grant",
 			"runtime.context",
 			"runtime.usage",
 			"runtime.queue",

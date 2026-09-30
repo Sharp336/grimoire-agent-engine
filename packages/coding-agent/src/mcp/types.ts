@@ -118,6 +118,9 @@ export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	/** Engine-owned per-call ToolEffect attestation; never populated from model arguments. */
 	attestToolCall?: (toolCallId: string, toolName: string, mcpName: string,
 		input: unknown, outbound: Record<string, unknown>) => Promise<Record<string, string>>;
+	/** Pauses an already-started ToolEffect; only the original call receives the exact receipt for retry. */
+	requestEscalation?: (toolCallId: string, toolName: string, subject: Record<string, unknown>,
+		subjectHash: string, signal?: AbortSignal) => Promise<string>;
 	/**
 	 * `origin-locked`: configured headers are literal package data pinned to the
 	 * configured URL's origin (Agent Plugins §7.2.1) — never expanded, never

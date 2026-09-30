@@ -16,7 +16,7 @@ import { EngineExecutionResolver } from "./execution-resolver";
 import { ProviderAdmissionClient } from "./provider-admission";
 import { ProviderExecutionClient } from "./provider-execution";
 import { engineAgentInstanceId } from "./route";
-import { EngineRuntime, type EngineRuntimeOptions } from "./runtime";
+import { EngineRuntime, type ApprovalAncestor, type EngineRuntimeOptions } from "./runtime";
 import { waitForEngineWake } from "./wake";
 
 export interface EngineServiceConfig {
@@ -103,15 +103,42 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 							commandHash?: string;
 							bindingSnapshot?: EngineSemanticBindingSnapshot;
 							authContextId: string;
+							approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string } | null;
+							specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null;
 						};
 					}
 				: undefined,
 			verifyApprovalReceipt: rpc
 				? async identity => {
 						const verified = await rpc.call("verify_approval_receipt", identity);
-						if (verified.verified !== true || !verified.approvalDecision)
-							throw new EngineTargetError("stale_target", "Approval receipt verification returned no decision");
-						return verified as unknown as { verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"] };
+						if (verified.verified !== true || !verified.approvalDecision ||
+							(verified.expectedInputRevision !== null &&
+								(!Number.isSafeInteger(verified.expectedInputRevision) || Number(verified.expectedInputRevision) < 0)) ||
+							!("expectedInputRevision" in verified))
+							throw new EngineTargetError("stale_target", "Approval receipt verification returned no captured decision or input revision");
+						return verified as unknown as { verified: true; approvalDecision: EngineApprovalDecision["approvalDecision"]; expectedInputRevision: number | null };
+					}
+				: undefined,
+			approvalAncestor: rpc
+				? async identity => await rpc.call("approval_origin", { action: "ancestor", ...identity })
+					as unknown as ApprovalAncestor
+				: undefined,
+			reserveChild: rpc
+				? async request => {
+						const { signal, ...identity } = request;
+						const reserved = await rpc.call("prepare_child_start", { ...identity, reserve: true }, signal);
+						if (reserved.reserved !== true || typeof reserved.admission_id !== "string" ||
+							typeof reserved.child_dispatch_hash !== "string" ||
+							typeof reserved.ceiling_hash !== "string" ||
+							!Number.isSafeInteger(reserved.requested_depth) ||
+							!Number.isSafeInteger(reserved.requested_child_ordinal) ||
+							!Array.isArray(reserved.exceeded))
+							throw new EngineTargetError("stale_target", "Child reserve lacks exact approval subject");
+						return reserved as unknown as {
+							admission_id: string; child_dispatch_hash: string;
+							requested_depth: number; requested_child_ordinal: number;
+							exceeded: Array<"max_depth" | "max_children">; ceiling_hash: string;
+						};
 					}
 				: undefined,
 			launchChild: rpc
@@ -243,6 +270,7 @@ export async function launchLocalEngineChild(
 		assignment,
 		toolCallId: request.toolCallId,
 		cwd: request.cwd,
+		...(request.spawnApprovalReceiptId ? { spawnApprovalReceiptId: request.spawnApprovalReceiptId } : {}),
 	}, request.signal);
 	const command = validateEngineCommand(prepared.command);
 	const agentInstanceRef = prepared.agentInstanceRef;
