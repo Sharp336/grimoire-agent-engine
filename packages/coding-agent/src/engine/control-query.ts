@@ -48,15 +48,15 @@ import { runUsageProbe } from "./usage-probe";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
 
-const queuedStartReplays = new WeakMap<EngineRuntime, Map<string, Promise<void>>>();
+const queuedCommandReplays = new WeakMap<EngineRuntime, Map<string, Promise<void>>>();
 
-/** A Control+Query queued Start has no NATS delivery to redeliver; keep its exact command alive on owner wakes. */
-function replayQueuedStart(
+/** Control+Query has no broker redelivery; replay the exact pending command on native owner wakes. */
+function replayQueuedCommand(
 	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "provisionMailbox">,
 	command: EngineCommandEnvelope,
 ): void {
-	let running = queuedStartReplays.get(options.runtime);
-	if (!running) queuedStartReplays.set(options.runtime, running = new Map());
+	let running = queuedCommandReplays.get(options.runtime);
+	if (!running) queuedCommandReplays.set(options.runtime, running = new Map());
 	if (running.has(command.commandId)) return;
 	const pending = (async () => {
 		for (;;) {
@@ -67,13 +67,13 @@ function replayQueuedStart(
 				return;
 			} catch (error) {
 				if (error instanceof EngineRoutingQueuedError || error instanceof EngineBindingPendingError) continue;
-				logger.warn("Queued Engine Start replay failed", { commandId: command.commandId,
+				logger.warn("Queued Engine command replay failed", { commandId: command.commandId,
 					error: error instanceof Error ? error.message : String(error) });
 				return;
 			}
 		}
 	})().catch(error => {
-		logger.warn("Queued Engine Start wake failed", { commandId: command.commandId,
+		logger.warn("Queued Engine command wake failed", { commandId: command.commandId,
 			error: error instanceof Error ? error.message : String(error) });
 	});
 	running.set(command.commandId, pending);
@@ -907,7 +907,7 @@ export async function runEngineCommand(
 	} catch (error) {
 		if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) {
 			await options.runtime.store.releaseCommand(command.commandId, identity.canonicalHash, options.runtime.engineGeneration);
-			if (error instanceof EngineRoutingQueuedError) replayQueuedStart(options, command);
+			if (error instanceof EngineRoutingQueuedError) replayQueuedCommand(options, command);
 			throw error;
 		}
 		// A Start can fail while materializing credentials after its atomic applied Attempt admission.

@@ -215,5 +215,6 @@ export interface RoutingReceipt {
 	lease_id: string | null;
 	queue_id: string | null;
 	candidate: CandidateIdentity | null;
+	/** Resulting acquire/transfer revision, current renew/release revision; queues retain the last held value. */
 	lease_revision: number | null;
 }

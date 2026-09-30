@@ -213,6 +213,10 @@ interface Transition {
 
 /** One routing op per mutation: revision bump, receipt on the Attempt start command, typed owner operation. */
 async function commitTransition(t: Transition): Promise<RoutingReceipt> {
+	const command = await t.tx.get<RocksCommand>("command", t.commandId);
+	if (!command) throw new EngineTargetError("stale_target", "Routing command is not admitted");
+	const queueOnly = t.action === "enqueue" || t.action === "cancel" || t.action === "dequeue";
+	const leaseRevision = queueOnly ? command.routing?.lease_revision ?? null : t.leaseRevision;
 	const next = t.census.revision + 1;
 	await t.tx.put("metadata", routingStateId(t.principalId, t.deviceId), {
 		subtype: "routing_state",
@@ -227,11 +231,9 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 		lease_id: t.lease,
 		queue_id: t.queue,
 		candidate: t.candidate,
-		lease_revision: t.leaseRevision,
+		lease_revision: leaseRevision,
 	};
 	const receipt = { ...unsigned, receipt_hash: sha256(storageCanonicalJson(unsigned)) } satisfies RoutingReceipt;
-	const command = await t.tx.get<RocksCommand>("command", t.commandId);
-	if (!command) throw new EngineTargetError("stale_target", "Routing command is not admitted");
 	await t.tx.put("command", t.commandId, { ...command, routing: receipt, updated_at: Date.now() });
 	t.tx.routingAdmission = {
 		action: t.action,
@@ -246,7 +248,7 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 		candidate: t.candidate,
 		receipt_id: receipt.receipt_id,
 		receipt_hash: receipt.receipt_hash,
-		lease_revision: t.leaseRevision,
+		lease_revision: leaseRevision,
 		...(t.from ? { from_candidate: t.from } : {}),
 	};
 	return receipt;
@@ -351,7 +353,13 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 		const lease = leaseId(request.attemptId);
 		const heartbeat = Date.now();
 		const start = await tx.get<RocksCommand>("command", request.commandId);
-		const leaseRevision = request.frozen ? (start?.routing?.lease_revision ?? 0) + 1 : 1;
+		const previous = start?.routing;
+		if (request.frozen && (!previous || previous.attempt_id !== request.attemptId ||
+			!["release", "enqueue", "cancel", "dequeue"].includes(previous.action) ||
+			previous.lease_revision === null || !Number.isSafeInteger(previous.lease_revision) ||
+			previous.lease_revision < 1 || previous.lease_revision >= Number.MAX_SAFE_INTEGER))
+			throw new EngineTargetError("stale_target", "Resume lost its exact released lease revision");
+		const leaseRevision = request.frozen ? previous!.lease_revision! + 1 : 1;
 		await tx.create("metadata", lease, {
 			schema: "grimoire.slot_lease.v1",
 			subtype: "slot_lease",
@@ -499,10 +507,16 @@ export async function stageRelease(
 ): Promise<boolean> {
 	const key = leaseId(attemptId);
 	const lease = await tx.get<RocksSlotLease>("metadata", key);
-	if (!lease) return false;
 	const attempt = await tx.get<RocksAttempt>("attempt", attemptId);
 	const commandId = attempt?.command_id ?? start?.commandId;
 	const command = commandId ? await tx.get<RocksCommand>("command", commandId) : undefined;
+	if (!lease) {
+		if (!commandId || !command?.identity.agentInstanceRef || !command.identity.principalId) return false;
+		return stageQueueCancel(tx, {
+			commandId, attemptId, agentInstanceRef: command.identity.agentInstanceRef,
+			principalId: command.identity.principalId, deviceId: command.identity.deviceId,
+		}, "cancelled", "attempt_no_longer_waiting");
+	}
 	if (!commandId || !command?.identity.agentInstanceRef)
 		throw new EngineTargetError("admission_state_unknown", "Leased Attempt has no admitted start command");
 	const current = await census(tx, lease.principal_id, lease.device_id);

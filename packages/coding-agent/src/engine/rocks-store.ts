@@ -31,7 +31,7 @@ import type {
 	ExecutorRouteState,
 	RoutingLimits,
 } from "./contracts";
-import { EngineBindingPendingError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
+import { EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import type { BillingPoolProposal } from "./provider-execution";
 import {
 	completeRestoreRebind,
@@ -184,7 +184,7 @@ export interface RocksTransitionOptions {
 	cause?: string;
 	terminalResult?: Record<string, unknown>;
 	actualCost?: ExecutorChoice["actual_cost"];
-	intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number };
+	intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number; commandId?: string };
 	startIntent?: {
 		expectedRevision?: number;
 		explicitContinue?: boolean;
@@ -1261,6 +1261,8 @@ export class RocksEngineMutations {
 		}
 	}
 	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
+		if (command.operation === "resume" && command.engineGeneration < processorGeneration)
+			await this.cancelResumeQueues(command.commandId, command.canonicalHash, processorGeneration);
 		return this.mutation(command.agentInstanceId, async tx => {
 			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
 				throw new EngineTargetError("stale_target", "Command processor generation changed");
@@ -1578,6 +1580,7 @@ export class RocksEngineMutations {
 			!(await this.records.get("attempt", row.identity.attemptId, true)).value);
 	}
 	async settleCommand(id: string, hash: string, receipt: EngineCommandReceipt): Promise<void> {
+		if (receipt.outcome === "rejected") await this.cancelResumeQueues(id, hash);
 		await this.mutation(`command:${id}`, tx => this.settle(tx, id, receipt, hash, true));
 	}
 	/** Terminal receipt for a command whose admission keeps failing; the row and receipt commit together. */
@@ -1586,6 +1589,7 @@ export class RocksEngineMutations {
 		receipt: EngineCommandReceipt & { outcome: "rejected" },
 		processorGeneration: number,
 	): Promise<void> {
+		if (command.operation === "resume") await this.cancelResumeQueues(command.commandId, command.canonicalHash, processorGeneration);
 		await this.mutation(command.agentInstanceId, async tx => {
 			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
 				throw new EngineTargetError("stale_target", "Command processor generation changed");
@@ -1960,7 +1964,7 @@ export class RocksEngineMutations {
 		for (const event of events)
 			if (event.kind === "input_requested" && event.payload)
 				await retainInputParts(this.records, binding, event.payload);
-		return this.mutation(
+		const result = await this.mutation(
 			binding.agentInstanceId,
 			async tx => {
 				const engine = await tx.get<{ generation: number }>("metadata", "engine");
@@ -1992,6 +1996,41 @@ export class RocksEngineMutations {
 					if ((input?.value.revision ?? old?.input_revision) !== options.intentGuard.inputRevision)
 						throw new EngineTargetError("stale_target", "Pending input revision changed");
 				}
+				if (options.routingResume) {
+					const current = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
+					await this.checkIntent(tx, binding.agentInstanceId, options.intentGuard?.expectedRevision, true);
+					if (!current || current.manual_hold !== 0 || !this.sameFence(current, binding) ||
+						(options.intentGuard?.commandId !== undefined && current.intent_command_id !== options.intentGuard.commandId) ||
+						!sameSemanticBinding(current.binding_snapshot, options.routingResume.bindingSnapshot) ||
+						options.routingResume.commandId !== old?.command_id || options.routingResume.attemptId !== binding.attemptId)
+						throw new EngineTargetError("stale_target", "Resume intent or admitted binding changed");
+					if (options.intentGuard?.commandId) {
+						const control = await tx.get<RocksCommand>("command", options.intentGuard.commandId);
+						if (control && (control.operation !== "resume" || control.state !== "received"))
+							throw new EngineTargetError("stale_target", "Resume command is no longer pending");
+					}
+					if (!old?.execution || old.state !== "paused" || state === "paused" ||
+						candidateRef(currentIdentity(old.execution.executor_choice)) !==
+							candidateRef(options.routingResume.candidates[0]))
+						throw new EngineTargetError("stale_target", "Resume must keep the admitted current frozen route");
+					const held = await tx.get<RocksSlotLease>("metadata", leaseId(binding.attemptId));
+					if (held) {
+						if (held.engine_generation !== binding.engineGeneration ||
+							held.expires_at <= Date.now() ||
+							held.attempt_id !== binding.attemptId ||
+							held.dispatch_hash !== options.routingResume.dispatchHash ||
+							held.binding_snapshot_hash !== `sha256:${createHash("sha256").update(storageCanonicalJson(options.routingResume.bindingSnapshot)).digest("hex")}` ||
+							held.resources.account_ref !== options.routingResume.candidates[0]?.account_ref)
+							throw new EngineTargetError("stale_target", "Pre-acquired Resume lease changed");
+					} else {
+						const acquired = await stageAdmission(tx, options.routingResume);
+						if (acquired.status === "queued") return { queueId: acquired.queueId };
+						if (candidateRef(acquired.frozen[0]) !== candidateRef(options.routingResume.candidates[0]))
+							throw new EngineTargetError("stale_target", "Resume changed its frozen route");
+					}
+				}
+				if (state === "cancel_requested" && !(await tx.get("metadata", leaseId(binding.attemptId))))
+					await stageRelease(tx, binding.attemptId);
 				if (terminal.has(state)) {
 					const effects = await tx.get<{ count: number }>(
 						"metadata",
@@ -2091,27 +2130,6 @@ export class RocksEngineMutations {
 						candidateRef(row.execution!.executor_choice.selected) !== candidateRef(admitted.frozen[0]))
 						throw new EngineTargetError("admission_state_unknown", "Attempt execution differs from admitted route");
 				}
-				if (options.routingResume) {
-					if (!old?.execution || old.state !== "paused" || state === "paused" ||
-						candidateRef(currentIdentity(old.execution.executor_choice)) !==
-							candidateRef(options.routingResume.candidates[0]))
-						throw new EngineTargetError("stale_target", "Resume must keep the admitted current frozen route");
-					const held = await tx.get<RocksSlotLease>("metadata", leaseId(binding.attemptId));
-					if (held) {
-						if (held.engine_generation !== binding.engineGeneration ||
-							held.expires_at <= Date.now() ||
-							held.attempt_id !== binding.attemptId ||
-							held.dispatch_hash !== options.routingResume.dispatchHash ||
-							held.binding_snapshot_hash !== `sha256:${createHash("sha256").update(storageCanonicalJson(options.routingResume.bindingSnapshot)).digest("hex")}` ||
-							held.resources.account_ref !== options.routingResume.candidates[0]?.account_ref)
-							throw new EngineTargetError("stale_target", "Pre-acquired Resume lease changed");
-					} else {
-						const acquired = await stageAdmission(tx, options.routingResume);
-						if (acquired.status !== "admitted" ||
-							candidateRef(acquired.frozen[0]) !== candidateRef(options.routingResume.candidates[0]))
-							throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
-					}
-				}
 				await tx.put("attempt", binding.attemptId, row);
 				// §6: an actual pause or a terminal state releases the routing lease exactly once, atomically.
 				if ((state === "paused" || terminal.has(state)) && old?.state !== state)
@@ -2174,6 +2192,8 @@ export class RocksEngineMutations {
 			},
 			this.checkpointDependencies(options.transcriptCheckpoint),
 		);
+		if ("queueId" in result) throw new EngineRoutingQueuedError(result.queueId);
+		return result;
 	}
 
 	async branchAgents(tx: RuntimeTransaction, id: string): Promise<string[]> {
@@ -2189,20 +2209,6 @@ export class RocksEngineMutations {
 		}
 		return agentIds;
 	}
-	/** Paused branch members whose only removable hold belongs to this Resume root. */
-	async branchResumeTargets(id: string): Promise<string[]> {
-		const tx = new RuntimeTransaction(this.records, true);
-		const targets: string[] = [];
-		for (const agent of await this.branchAgents(tx, id)) {
-			const binding = await tx.get<RocksBinding>("binding", agent);
-			if (!binding || (await tx.get<RocksAttempt>("attempt", binding.attempt_id))?.state !== "paused") continue;
-			if ((await this.holds(tx, agent)).every(hold =>
-				hold.kind === "pause" && hold.sourceAgentInstanceId === id))
-				targets.push(agent);
-		}
-		return targets;
-	}
-
 	async changeIntent(
 		tx: RuntimeTransaction,
 		id: string,
@@ -2226,8 +2232,10 @@ export class RocksEngineMutations {
 			});
 		const agentIds = await this.branchAgents(tx, id);
 		const events: EngineEvent[] = [];
+		const parents = new Map<string, string | null>();
 		for (const agent of agentIds) {
 			const row = (await tx.get<RocksIdentity>("identity", agent))!;
+			parents.set(agent, row.parent_agent_instance_id ?? null);
 			await tx.put("identity", agent, { ...row, intent_revision: row.intent_revision + 1 });
 			const holds = await this.holds(tx, agent);
 			const binding = await tx.get<RocksBinding>("binding", agent);
@@ -2247,7 +2255,7 @@ export class RocksEngineMutations {
 				}),
 			);
 		}
-		return { agentIds, events, intentRevision: root.intent_revision + 1 };
+		return { agentIds, events, intentRevision: root.intent_revision + 1, parents };
 	}
 	async branchIntent(
 		id: string,
@@ -2255,7 +2263,6 @@ export class RocksEngineMutations {
 		action: "pause" | "resume" | "stop" | "continue",
 		expected?: number,
 		startFence?: EnginePendingStartTarget,
-		routingResume?: AdmissionRequest[],
 	) {
 		return this.mutation(id, async tx => {
 			if (startFence) {
@@ -2263,48 +2270,24 @@ export class RocksEngineMutations {
 				if (!start) throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
 				expected = await this.cancelRevision(tx, startFence, start);
 			}
-			if (action === "resume" && expected !== undefined) {
+			if (action === "resume") {
 				const root = await tx.get<RocksIdentity>("identity", id);
 				const binding = await tx.get<RocksBinding>("binding", id);
-				if (root?.intent_revision === expected + 1 && binding?.intent_command_id === commandId) {
+				if (root && binding?.intent_command_id === commandId &&
+					(expected === undefined || root.intent_revision === expected + 1)) {
 					const agentIds: string[] = [];
+					let superseded = false;
+					const parents = new Map<string, string | null>();
 					for (const agent of await this.branchAgents(tx, id)) {
-						if ((await tx.get<RocksBinding>("binding", agent))?.intent_command_id === commandId)
-							agentIds.push(agent);
+						parents.set(agent, (await tx.get<RocksIdentity>("identity", agent))?.parent_agent_instance_id ?? null);
+						const member = await tx.get<RocksBinding>("binding", agent);
+						if (member?.intent_command_id === commandId) agentIds.push(agent);
+						else if (member) superseded = true;
 					}
-					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision };
+					return { agentIds, events: [] as EngineEvent[], intentRevision: root.intent_revision, superseded, parents };
 				}
 			}
-			const changed = await this.changeIntent(tx, id, commandId, action, expected);
-			if (action === "resume") {
-				const routes = new Map((routingResume ?? []).map(route => [route.attemptId, route]));
-				for (const agent of changed.agentIds) {
-					const binding = await tx.get<RocksBinding>("binding", agent);
-					const attempt = binding && await tx.get<RocksAttempt>("attempt", binding.attempt_id);
-					const route = attempt && routes.get(attempt.attempt_id);
-					if (attempt?.state !== "paused" || (await this.holds(tx, agent)).length) {
-						if (route) throw new EngineTargetError("stale_target", "Resume route has no paused unheld Attempt");
-						continue;
-					}
-					if (!route || !attempt.execution || !binding ||
-						route.attemptId !== attempt.attempt_id || route.commandId !== attempt.command_id ||
-						route.engineGeneration !== binding.engine_generation ||
-						route.engineGeneration !== attempt.engine_generation ||
-						route.engineGeneration !== (await tx.get<{ generation: number }>("metadata", "engine"))?.generation ||
-						!sameSemanticBinding(route.bindingSnapshot, attempt.binding_snapshot) ||
-						binding.binding_snapshot && !sameSemanticBinding(route.bindingSnapshot, binding.binding_snapshot) ||
-						candidateRef(currentIdentity(attempt.execution.executor_choice)) !== candidateRef(route.candidates[0]))
-						throw new EngineTargetError("stale_target", "Paused branch lacks its current frozen Resume route");
-					const admitted = await stageAdmission(tx, route);
-					if (admitted.status !== "admitted" ||
-						candidateRef(admitted.frozen[0]) !== candidateRef(route.candidates[0]))
-						throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
-					routes.delete(attempt.attempt_id);
-				}
-				if (routes.size) throw new EngineTargetError("stale_target", "Resume route is outside the branch");
-			} else if (routingResume?.length)
-				throw new EngineTargetError("invalid_request", "Routing reacquire requires Resume");
-			return changed;
+			return { ...await this.changeIntent(tx, id, commandId, action, expected), superseded: false };
 		});
 	}
 
@@ -2887,6 +2870,36 @@ export class RocksEngineMutations {
 			return outcome;
 		});
 	}
+	/** Queue cancellation is one routing mutation and never releases an actively held lease. */
+	async cancelPausedRouting(attemptId: string, intentCommandId?: string, processorGeneration?: number): Promise<void> {
+		await this.mutation("routing", async tx => {
+			const attempt = await tx.get<RocksAttempt>("attempt", attemptId);
+			if (!attempt) return;
+			const generation = processorGeneration ?? attempt.engine_generation;
+			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== generation)
+				throw new EngineTargetError("stale_target", "Queue cleanup processor generation changed");
+			const binding = await tx.get<RocksBinding>("binding", attempt.agent_instance_id);
+			if (intentCommandId !== undefined && binding?.intent_command_id !== intentCommandId) return;
+			if (await tx.get("metadata", leaseId(attemptId))) return;
+			await stageRelease(tx, attemptId);
+		});
+	}
+
+	/** Clean before final refusal; a crash leaves the command received so recovery repeats this bounded cleanup. */
+	async cancelResumeQueues(commandId: string, canonicalHash?: string, processorGeneration?: number): Promise<void> {
+		const command = (await this.records.get("command", commandId)).value as unknown as RocksCommand | undefined;
+		if (!command || command.operation !== "resume" || command.state !== "received") return;
+		if (canonicalHash !== undefined && command.canonical_hash !== canonicalHash)
+			throw new EngineCommandConflictError(commandId);
+		const tx = new RuntimeTransaction(this.records, true);
+		for (const agent of await this.branchAgents(tx, command.agent_instance_id)) {
+			const binding = await tx.get<RocksBinding>("binding", agent);
+			if (binding?.intent_command_id === commandId)
+				await this.cancelPausedRouting(binding.attempt_id, commandId,
+					processorGeneration ?? command.processor_generation ?? command.engine_generation);
+		}
+	}
+
 	async cancelRoutingQueue(
 		request: Pick<AdmissionRequest, "principalId" | "deviceId" | "commandId" | "agentInstanceRef" | "attemptId">,
 		status: "cancelled" | "refused",
@@ -3512,8 +3525,9 @@ export class RocksEngineMutations {
 				if (!command) break;
 				commandAfter = [command.received_at, command.command_id];
 				if (command.engine_generation >= generation) continue;
+				if (command.operation === "resume") await this.cancelResumeQueues(command.command_id, command.canonical_hash, generation);
 				const messageAcceptance = await this.acceptedResumeMessage(command).catch(() => "unknown" as const);
-				if (!onlyDurable) await ensureHold();
+				if (!onlyDurable || command.operation === "resume") await ensureHold();
 				await this.mutation(id, async tx => {
 					const current = await tx.get<RocksCommand>("command", command.command_id);
 					if (current?.state === "received" && current.engine_generation < generation)

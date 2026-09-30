@@ -13,6 +13,7 @@ import { defineCapability, loadCapability, registerProvider } from "../src/capab
 import { runEngineCommand } from "../src/engine/control-query";
 import type { EngineCommandEnvelope } from "../src/engine/nats-adapter";
 import type { EngineOrdinaryEvent } from "../src/engine/contracts";
+import type { EngineStartResult } from "../src/engine/contracts";
 import { type EngineBindingGate, type EngineBindingResult, type EngineStartRequest, type EngineEvent, EngineTargetError } from "../src/engine/contracts";
 import { dispatchEngineCommand, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
@@ -620,11 +621,13 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		expect((await runtime.sessionHistoryPage(target.agentInstanceId, ref, undefined, 100, target.attemptId)).entries).toEqual(page.entries);
 	}, 60_000);
 
-	for (const action of ["pause", "stop"] as const) it(`keeps nested task waits quiescent under parent ${action} while an independent root completes`, async () => {
+	for (const action of ["pause", "stop", "fifo"] as const) it(`keeps nested task waits quiescent under parent ${action} while an independent root completes`, async () => {
 		const leafEntered = Promise.withResolvers<void>();
 		const releaseLeaf = Promise.withResolvers<void>();
 		const siblingEntered = Promise.withResolvers<void>();
 		const releaseSibling = Promise.withResolvers<void>();
+		const leafResumed = Promise.withResolvers<void>();
+		const releaseResumedLeaf = Promise.withResolvers<void>();
 		const waitsReady = Promise.withResolvers<void>();
 		const waiting = new Set<string>();
 		const results: Array<{ agent: string; attemptId?: string; state: string; payload: Record<string, unknown> }> = [];
@@ -639,10 +642,21 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					arguments: { target: { task_ref: taskRef, work_step_id: null }, assignment: name === "root" ? "middle" : "leaf" } }] };
 			}
 			if (input.includes("nested-leaf-work")) {
+				if (action === "fifo" && context.messages.some(message => message.role === "toolResult")) {
+					leafResumed.resolve();
+					await releaseResumedLeaf.promise;
+					return { content: ["leaf-exact-result"] };
+				}
 				leafEntered.resolve();
 				const abort = () => releaseLeaf.resolve();
 				options?.signal?.addEventListener("abort", abort, { once: true });
-				try { await releaseLeaf.promise; options?.signal?.throwIfAborted(); return { content: ["leaf-exact-result"] }; }
+				try {
+					await releaseLeaf.promise;
+					options?.signal?.throwIfAborted();
+					return action === "fifo"
+						? { content: [{ type: "toolCall" as const, id: "leaf-read", name: "read", arguments: { path: "leaf-proof.txt" } }] }
+						: { content: ["leaf-exact-result"] };
+				}
 				finally { options?.signal?.removeEventListener("abort", abort); }
 			}
 			if (!input.includes("nested-sibling-work")) throw new Error("Unexpected nested fixture input");
@@ -651,11 +665,14 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			return { content: ["independent-sibling-result"] };
 		} });
 		const env = await setup(mock.model, (session, input, identity) => session.prompt(input, identity));
+		fs.writeFileSync(path.join(env.cwd, "leaf-proof.txt"), "leaf result");
 		const rootExecution = admittedExecution(mock.model, env.registry, { spawn: { allowed: "auto", max_depth: 2, max_children: 1, on_exceed: "deny" },
 			continuation: { toolNames: ["task"], restrictToolNames: true } });
 		const middleExecution = admittedExecution(mock.model, env.registry, { spawn: { allowed: "auto", max_depth: 1, max_children: 1, on_exceed: "deny" },
 			continuation: { toolNames: ["task"], restrictToolNames: true } });
-		const leafExecution = admittedExecution(mock.model, env.registry, { continuation: { toolNames: [], restrictToolNames: true } });
+		const leafExecution = admittedExecution(mock.model, env.registry, {
+			continuation: { toolNames: action === "fifo" ? ["read"] : [], restrictToolNames: true },
+		});
 		env.executions.push(rootExecution, middleExecution, leafExecution);
 		let runtime: EngineRuntime;
 		const requestFor = (name: string, selected: AdmittedExecutionFixture, parent?: { agentInstanceId: string; agentInstanceRef: string; attemptId: string }) =>
@@ -704,13 +721,47 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			expect(results).toEqual([]);
 			const sibling = await admitStart(runtime, leafExecution, requestFor("sibling", leafExecution));
 			await withTimeout(siblingEntered.promise, 5_000, "Independent root did not enter");
-			if (action === "pause") {
+			if (action !== "stop") {
 				const paused = Promise.all([nextEvent("paused", root.attemptId), nextEvent("paused", middle.attemptId)]);
 				await runtime.pause({ ...root, commandId: "nested-parent-pause", initiator: { kind: "human" } });
 				await withTimeout(paused, 5_000, "Nested waits blocked parent quiescence");
 				expect(waiting.size).toBe(2);
 				expect(results).toEqual([]);
 			} else await runtime.cancel({ ...root, commandId: "nested-parent-stop" });
+			if (action === "fifo") {
+				await runtime.resume({ ...leaf, commandId: "leaf-remove-own-hold", initiator: { kind: "human" },
+					expectedIntentRevision: (await runtime.store.intent(leaf.agentInstanceId)).intentRevision });
+				for (const name of ["blocker-one", "blocker-two"])
+					await admitStart(runtime, leafExecution, { ...requestFor(name, leafExecution), input: "nested-sibling-work" });
+				const command: EngineCommandEnvelope = {
+					schema: "grimoire.engine.command.v1", op: "resume", commandId: "nested-fifo-resume",
+					deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine", engineGeneration: runtime.engineGeneration,
+					agentInstanceId: root.agentInstanceId, agentInstanceRef: root.bindingSnapshot!.agentInstanceRef,
+					bindingSnapshot: root.bindingSnapshot, runtimeBindingId: root.bindingId, bindingGeneration: root.bindingGeneration,
+					executionId: root.executionId, attemptId: root.attemptId, authorityGeneration: root.authorityGeneration,
+					principalId: "owner", issuedAt: Date.now(),
+					payload: { originReceiptId: "origin:nested-fifo-resume",
+						expectedIntentRevision: (await runtime.store.intent(root.agentInstanceId)).intentRevision },
+				};
+				rootExecution.captureCommand(command);
+				await expect(runEngineCommand({ runtime, deviceId: command.deviceId, engineId: command.engineId }, command))
+					.rejects.toMatchObject({ code: "routing_queued" });
+				await withTimeout(leafResumed.promise, 5_000, "Leaf did not reacquire ahead of its waiting ancestors");
+				expect((await runtime.store.getAttempt(leaf.attemptId))?.state).toBe("running");
+				expect((await runtime.store.getAttempt(middle.attemptId))?.state).toBe("paused");
+				expect((await runtime.store.getAttempt(root.attemptId))?.state).toBe("paused");
+				expect((await runtime.store.records.get("command", root.commandId)).value).toMatchObject({
+					routing: { action: "release", lease_revision: 1 },
+				});
+				expect((await runtime.store.records.get("command", middle.commandId)).value).toMatchObject({
+					routing: { action: "enqueue", lease_revision: 1 },
+				});
+				releaseResumedLeaf.resolve();
+				await withTimeout(runtime.store.waitAttemptResult(root.agentInstanceId, root.commandId, root.attemptId),
+					10_000, "Leaves-first Resume did not finish while unrelated slots remained occupied");
+				expect((await runEngineCommand({ runtime, deviceId: command.deviceId, engineId: command.engineId }, command)).outcome)
+					.toBe("applied");
+			}
 			releaseSibling.resolve();
 			expect(await withTimeout(runtime.store.waitAttemptResult(sibling.agentInstanceId, sibling.commandId, sibling.attemptId),
 				5_000, "Held branch blocked independent root")).toMatchObject({ state: "completed", payload: { assistantFinal: "independent-sibling-result" } });
@@ -726,14 +777,14 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			await withTimeout(runtime.drain(), 10_000, "Nested waits did not finish");
 			for (const [name, target] of [["root", root], ["middle", middle], ["leaf", leaf]] as const) {
 				const result = await runtime.store.waitAttemptResult(target.agentInstanceId, target.commandId, target.attemptId);
-				expect(result.state).toBe(action === "pause" ? "completed" : "cancelled");
-				if (action === "pause") expect(result.payload.assistantFinal).toBe(name === "leaf" ? "leaf-exact-result" : `${name}-result-after-child`);
+				expect(result.state).toBe(action !== "stop" ? "completed" : "cancelled");
+				if (action !== "stop") expect(result.payload.assistantFinal).toBe(name === "leaf" ? "leaf-exact-result" : `${name}-result-after-child`);
 				else expect((await runtime.store.intent(target.agentInstanceId)).manualHold).toBe(true);
 			}
 			expect(waiting.size).toBe(0);
 			expect((await runtime.store.pendingEvents()).filter(event => event.agentInstanceId === sibling.agentInstanceId &&
 				["pause_requested", "paused", "cancelled"].includes(event.kind))).toEqual([]);
-		} finally { releaseLeaf.resolve(); releaseSibling.resolve(); await runtime.dispose(); }
+		} finally { releaseLeaf.resolve(); releaseResumedLeaf.resolve(); releaseSibling.resolve(); await runtime.dispose(); }
 	}, 60_000);
 
 	for (const outcome of ["answered", "auth_failed", "retry_failed"] as const) for (const restart of [false, true]) {
@@ -928,6 +979,114 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect((await runEngineCommand(options, command)).outcome).toBe("applied");
 				expect(mock.calls).toHaveLength(3);
 			} finally { await runtime.dispose(); }
+		}, 60_000,
+	);
+
+	it.each(["admit", "stop", "pause", "restart"] as const)(
+		"keeps capacity-queued Resume pending with its exact receipt and lease high-watermark: %s", async outcome => {
+			const entered = Promise.withResolvers<void>();
+			const releaseInitial = Promise.withResolvers<void>();
+			const occupied = Promise.withResolvers<void>();
+			const releaseOccupant = Promise.withResolvers<void>();
+			const mock = createMockModel({ handler: async (context, options) => {
+				const input = JSON.stringify(context.messages.findLast(message => message.role === "user")?.content);
+				if (input.includes("initial")) { entered.resolve(); await releaseInitial.promise; }
+				if (input.includes("occupant")) {
+					occupied.resolve();
+					const abort = () => releaseOccupant.resolve();
+					options?.signal?.addEventListener("abort", abort, { once: true });
+					try { await releaseOccupant.promise; options?.signal?.throwIfAborted(); }
+					finally { options?.signal?.removeEventListener("abort", abort); }
+				}
+				return { content: ["finished"] };
+			} });
+			const env = await setup(mock, (session, input, identity) => session.prompt(input, identity));
+			const execution = admittedExecution(mock, env.registry, { scopeAgents: 1 });
+			env.executions.push(execution);
+			let runtime = env.runtime;
+			const events: EngineEvent[] = [];
+			runtime.subscribe(event => { events.push(event); });
+			const control = (target: EngineStartResult, op: "resume" | "cancel" | "pause", commandId: string, revision: number) =>
+				execution.captureCommand({
+					schema: "grimoire.engine.command.v1", op, commandId,
+					deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+					engineGeneration: runtime.engineGeneration, agentInstanceId: target.agentInstanceId,
+					agentInstanceRef: target.bindingSnapshot!.agentInstanceRef, bindingSnapshot: target.bindingSnapshot,
+					runtimeBindingId: target.bindingId, bindingGeneration: target.bindingGeneration,
+					executionId: target.executionId, attemptId: target.attemptId,
+					authorityGeneration: target.authorityGeneration, principalId: "owner", issuedAt: Date.now(),
+					payload: { originReceiptId: `origin:${commandId}`, expectedIntentRevision: revision },
+				});
+			try {
+				const target = await env.start("fifo-initial", {}, runtime, execution);
+				await withTimeout(entered.promise, 5_000, "Initial provider did not enter");
+				const paused = Promise.withResolvers<void>();
+				runtime.subscribe(event => { if (event.kind === "paused" && event.attemptId === target.attemptId) paused.resolve(); });
+				const hold = await runtime.pause({ ...target, commandId: "fifo-pause", initiator: { kind: "human" } });
+				releaseInitial.resolve();
+				await withTimeout(paused.promise, 5_000, "Initial Attempt did not pause");
+				const occupant = await env.start("fifo-occupant", {}, runtime, execution);
+				await withTimeout(occupied.promise, 5_000, "Competing provider did not hold capacity");
+				const resume = control(target, "resume", "fifo-resume", hold.intentRevision);
+				const transport = { runtime, deviceId: resume.deviceId, engineId: resume.engineId };
+				await expect(runEngineCommand(transport, resume)).rejects.toMatchObject({ code: "routing_queued" });
+				const start = (await runtime.store.records.get("command", target.commandId)).value as unknown as RocksCommand;
+				expect(start.routing).toMatchObject({ action: "enqueue", attempt_id: target.attemptId, lease_revision: 1 });
+				expect((await runtime.store.records.get("command", resume.commandId)).value).toMatchObject({ state: "received", receipt: null });
+				expect((await runtime.store.getAttempt(target.attemptId))?.state).toBe("paused");
+				expect((await runtime.store.records.get("metadata", `slot-lease:${target.attemptId}`)).value).toBeNull();
+				expect(mock.calls).toHaveLength(2);
+				const queueId = start.routing!.queue_id!;
+				if (outcome === "admit") {
+					const laterRequest = startRequest(execution, {
+						commandId: "fifo-later", agentInstanceId: "fifo-later", agentInstanceRef: `${execution.taskRef}/agents/fifo-later`,
+						executionId: "fifo-later-execution", attemptId: "fifo-later-attempt",
+					}, { cwd: env.cwd, principalId: "owner", input: "later" });
+					const later = startEnvelope(runtime, execution, laterRequest);
+					await expect(runEngineCommand(transport, later)).rejects.toMatchObject({ code: "routing_queued" });
+					releaseOccupant.resolve();
+					await withTimeout(Promise.all([
+						runtime.store.waitAttemptResult(target.agentInstanceId, target.commandId, target.attemptId),
+						runtime.store.waitAttemptResult(later.agentInstanceId, later.commandId, later.attemptId),
+					]), 10_000, "FIFO Resume and following Start did not finish");
+					expect((await runEngineCommand(transport, resume)).outcome).toBe("applied");
+					expect((await runtime.store.records.get("command", target.commandId)).value).toMatchObject({
+						routing: { action: "release", lease_revision: 2 },
+					});
+					expect(events.filter(event => event.kind === "resumed" && event.attemptId === target.attemptId)).toHaveLength(1);
+					expect(events.findIndex(event => event.kind === "resumed" && event.attemptId === target.attemptId))
+						.toBeLessThan(events.findIndex(event => event.kind === "model_started" && event.attemptId === later.attemptId));
+					expect(mock.calls).toHaveLength(3);
+				} else if (outcome === "stop" || outcome === "pause") {
+					const newer = control(target, outcome === "stop" ? "cancel" : "pause", `fifo-${outcome}`,
+						(await runtime.store.intent(target.agentInstanceId)).intentRevision);
+					expect((await withTimeout(runEngineCommand(transport, newer), 5_000, "New control was blocked by queued Resume")).outcome).toBe("applied");
+					if (outcome === "pause") {
+						expect((await runtime.store.getAttempt(target.attemptId))?.state).toBe("paused");
+						expect((await runtime.store.intent(target.agentInstanceId)).manualHold).toBe(true);
+					}
+					const refused = await runEngineCommand(transport, resume).then(() => false,
+						error => error instanceof EngineTargetError && ["stale_target", "invalid_request"].includes(error.code));
+					expect(refused).toBe(true);
+					expect((await runtime.store.records.get("command", resume.commandId)).value).toMatchObject({
+						state: "settled", receipt: { outcome: "rejected" },
+					});
+				} else {
+					await runtime.dispose();
+					runtime = await open(env.options);
+					expect((await runtime.store.records.get("command", resume.commandId)).value).toMatchObject({
+						state: "settled", receipt: { outcome: "rejected" },
+					});
+					expect((await runtime.store.getAttempt(target.attemptId))?.state).not.toBe("running");
+				}
+				expect((await runtime.store.records.get("metadata", queueId)).value).toMatchObject({
+					status: outcome === "admit" ? "accepted" : "cancelled",
+				});
+				releaseOccupant.resolve();
+				if (outcome !== "restart")
+					await withTimeout(runtime.store.waitAttemptResult(occupant.agentInstanceId, occupant.commandId, occupant.attemptId),
+						5_000, "Competing Attempt did not finish");
+			} finally { releaseInitial.resolve(); releaseOccupant.resolve(); await runtime.dispose(); }
 		}, 60_000,
 	);
 });

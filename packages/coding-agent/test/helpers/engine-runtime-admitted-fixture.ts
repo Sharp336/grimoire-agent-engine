@@ -337,7 +337,7 @@ export function startRequest(
 }
 
 /** Capture the exact transport envelope; duplicates retain their original generation and timestamp. */
-export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest,
+export function startEnvelope(runtime: Pick<EngineRuntime, "engineGeneration">, execution: AdmittedExecutionFixture, request: EngineStartRequest,
 	transport = { deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine" }): EngineCommandEnvelope {
 	const { commandId, agentInstanceId, agentInstanceRef, bindingSnapshot, parentAgentInstanceId, parentAgentInstanceRef,
 		executionId, attemptId, authorityGeneration, principalId, ...payload } = request;
