@@ -338,13 +338,16 @@ export function startRequest(
 
 /** Capture the exact transport envelope; duplicates retain their original generation and timestamp. */
 export function startEnvelope(runtime: Pick<EngineRuntime, "engineGeneration">, execution: AdmittedExecutionFixture, request: EngineStartRequest,
-	transport = { deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine" }): EngineCommandEnvelope {
+	transport: Pick<EngineCommandEnvelope, "deviceId" | "engineId" | "browserTarget" | "browserPayloadHash"> =
+		{ deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine" }): EngineCommandEnvelope {
 	const { commandId, agentInstanceId, agentInstanceRef, bindingSnapshot, parentAgentInstanceId, parentAgentInstanceRef,
 		executionId, attemptId, authorityGeneration, principalId, ...payload } = request;
 	const prior = execution.receipts.get(request.originReceiptId);
 	const command: EngineCommandEnvelope = {
 		schema: "grimoire.engine.command.v1", op: "start", commandId,
 		deviceId: transport.deviceId, engineId: transport.engineId,
+		...(transport.browserTarget ? { browserTarget: transport.browserTarget } : {}),
+		...(transport.browserPayloadHash ? { browserPayloadHash: transport.browserPayloadHash } : {}),
 		engineGeneration: prior?.engineGeneration ?? runtime.engineGeneration,
 		issuedAt: prior?.issuedAt ?? Date.now(), agentInstanceId, agentInstanceRef, bindingSnapshot,
 		parentAgentInstanceId, parentAgentInstanceRef, executionId, attemptId, authorityGeneration, principalId, payload,
