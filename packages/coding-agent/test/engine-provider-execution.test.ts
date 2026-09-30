@@ -1,4 +1,14 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "../src/config/model-registry";
+import { EngineExecutionResolver, type ResolvedEngineExecution } from "../src/engine/execution-resolver";
+import { ProviderAdmissionClient, withProviderObservationContext } from "../src/engine/provider-admission";
+import { candidateIdentity } from "../src/engine/routing-admission";
+import { AuthStorage } from "../src/session/auth-storage";
+import { admittedExecution } from "./helpers/engine-runtime-admitted-fixture";
 import {
 	ProviderExecutionClient,
 	ProviderExecutionError,
@@ -26,6 +36,91 @@ const identity: ProviderExecutionIdentity = {
 };
 
 describe("ProviderExecutionClient", () => {
+	it.each(["nested_material", "credential_then_admission", "independent_requests"] as const)(
+		"shares one billing reconciliation across the physical request: %s",
+		async scenario => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "engine-billing-budget-"));
+			const auth = await AuthStorage.create(path.join(root, "fixture.sqlite"));
+			let resolved: ResolvedEngineExecution | undefined;
+			try {
+				const model = buildModel({
+					id: "gpt-5.6-terra", name: "Billing fixture", provider: "fixture",
+					api: "openai-completions", baseUrl: "https://provider.invalid/v1",
+					reasoning: false, input: ["text"], contextWindow: 128_000, maxTokens: 1_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				});
+				const config = admittedExecution(model, new ModelRegistry(auth, path.join(root, "models.yml"))).config;
+				const route = config.routes.routes[0]!;
+				route.execution.credential = {
+					method: "api_key", local_ref: null, hosted_ref: "gctx:eeeeeeeeeeeeeeee", generation: 1,
+				};
+				const proposal = (ordinal: number) => ({
+					from: candidateIdentity(route),
+					to: { ...candidateIdentity(route), billing_pool_id: `pool-${ordinal}` },
+					from_execution_digest: identity.executionDigest,
+					reason: "billing_pool_exhausted",
+				});
+				let materialCalls = 0;
+				let admissionCalls = 0;
+				let providerCalls = 0;
+				const transitions: string[] = [];
+				const material = new ProviderExecutionClient("http://127.0.0.1/execution", "fixture", async (_url, init) => {
+					const request = JSON.parse(String(init?.body));
+					if (!request.descriptorOnly) {
+						materialCalls++;
+						if (scenario === "nested_material" || scenario === "credential_then_admission" && materialCalls === 1)
+							return Response.json({ schema: "grimoire.provider_execution.result.v1",
+								allowed: false, status: "billing_pool_changed", billing: proposal(materialCalls) });
+					}
+					return Response.json({
+						...request, schema: "grimoire.provider_execution.result.v1", allowed: true, status: "ready",
+						secrets_returned: false, provider_credentials_returned: false,
+						mode: "owner_local", providerRuntimeId: "fixture", api: route.execution.api,
+						baseUrl: route.execution.base_url,
+						...(request.descriptorOnly ? {} : { credential: "fixture-secret", executionPin: "c".repeat(64) }),
+					});
+				});
+				const admission = new ProviderAdmissionClient("http://127.0.0.1/admission", "fixture", async (_url, init) => {
+					const request = JSON.parse(String(init?.body));
+					if (request.phase === "before") {
+						admissionCalls++;
+						if (scenario === "credential_then_admission" || scenario === "independent_requests" && admissionCalls % 2 === 1)
+							return Response.json({ allowed: false, status: "billing_pool_changed",
+								billing: proposal(scenario === "credential_then_admission" ? 2 : Math.ceil(admissionCalls / 2)) });
+					}
+					return Response.json({ allowed: true });
+				});
+				resolved = await new EngineExecutionResolver(root, path.join(root, "local.sqlite"), admission, material)
+					.resolve(config, config.routes.routes, identity, root);
+				resolved.setBillingPoolChanged(async change => { transitions.push(change.to.billing_pool_id); });
+				const selected = resolved.options.model!;
+				const fetch = resolved.options.providerRequestHook!.wrapFetch(selected, async () => {
+					providerCalls++;
+					return new Response("provider response");
+				});
+				await withProviderObservationContext({ effectId: "billing-effect", modelCallId: "billing-model" }, async () => {
+					if (scenario === "credential_then_admission")
+						await resolved!.options.modelRegistry!.getApiKey(selected);
+					if (scenario === "independent_requests") {
+						await (await fetch(`${selected.baseUrl}/chat/completions`)).text();
+						await (await fetch(`${selected.baseUrl}/chat/completions`)).text();
+					} else {
+						await expect(fetch(`${selected.baseUrl}/chat/completions`))
+							.rejects.toMatchObject({ code: "billing_pool_changed", retryable: false });
+					}
+				});
+				expect(transitions).toEqual(scenario === "independent_requests" ? ["pool-1", "pool-2"] : ["pool-1"]);
+				expect(providerCalls).toBe(scenario === "independent_requests" ? 2 : 0);
+				expect(materialCalls).toBe(2);
+				expect(admissionCalls).toBe(scenario === "independent_requests" ? 4 : 1);
+			} finally {
+				resolved?.dispose();
+				auth.close();
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it.each([
 		{
 			mode: "hosted_broker",

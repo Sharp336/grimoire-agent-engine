@@ -93,11 +93,37 @@ interface ProviderObservationContext {
 	physicalRequestOrdinal: number;
 	readonly pending: Set<Promise<unknown>>;
 	readonly audit?: LatencyAudit;
+	pendingBillingRequest?: { reconciled: boolean };
 }
 
 type ProviderObservationOutcome = "success" | "rate_limited" | "timeout" | "provider_error" | "transport_error";
 
 const providerObservationContext = new AsyncLocalStorage<ProviderObservationContext>();
+const providerBillingRequest = new AsyncLocalStorage<{ reconciled: boolean }>();
+
+/** Credential lookup may run before fetch; the next physical request adopts that same budget. */
+export function withProviderBillingRequest<T>(work: () => Promise<T>): Promise<T> {
+	if (providerBillingRequest.getStore()) return work();
+	const observation = providerObservationContext.getStore();
+	const budget = observation?.pendingBillingRequest ?? { reconciled: false };
+	if (observation) observation.pendingBillingRequest = undefined;
+	return providerBillingRequest.run(budget, work);
+}
+
+export async function reconcileProviderBilling(
+	proposal: BillingPoolProposal | undefined,
+	reconcile: ((proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>) | undefined,
+	signal?: AbortSignal,
+): Promise<void> {
+	const observation = providerObservationContext.getStore();
+	const budget = providerBillingRequest.getStore() ??
+		(observation ? observation.pendingBillingRequest ??= { reconciled: false } : undefined);
+	if (!budget || budget.reconciled || !proposal || !reconcile)
+		throw new ProviderAdmissionError("billing_pool_changed", "Billing pool transition could not be reconciled");
+	// Claim before awaiting the native mutation: nested/concurrent gates cannot spend it again.
+	budget.reconciled = true;
+	await reconcile(proposal, signal);
+}
 
 export async function withProviderObservationContext<T>(
 	identity: { effectId: string; modelCallId: string },
@@ -188,7 +214,7 @@ export class ProviderAdmissionClient {
 		model: Model,
 		fetch: Fetch,
 	): Fetch {
-		return async (input, init) => {
+		return (input, init) => withProviderBillingRequest(async () => {
 			const apiKeyRoute = apiKeyRoutes.find(route => matchesApiKeyRoute(model, route));
 			const selected = apiKeyRoute ?? (identity && model.provider === identity.providerId ? identity : undefined);
 			if (!selected) throw new ProviderAdmissionError(
@@ -221,12 +247,8 @@ export class ProviderAdmissionClient {
 					? report ? { usageReport: withoutRaw(report) } : { usageStatus: "unavailable" }
 					: {}),
 			});
-			let reconciled = false;
 			const reask = async (proposal: BillingPoolProposal | undefined): Promise<void> => {
-				if (reconciled || !proposal || !onBillingPoolChanged)
-					throw new ProviderAdmissionError("billing_pool_changed", "Billing pool transition could not be reconciled");
-				reconciled = true;
-				await onBillingPoolChanged(proposal, signal);
+				await reconcileProviderBilling(proposal, onBillingPoolChanged, signal);
 				markProviderLatency("quota_before_start");
 				const decision = await this.#post(before(), signal);
 				markProviderLatency("quota_before_done");
@@ -257,7 +279,7 @@ export class ProviderAdmissionClient {
 					void this.#post({ phase: "after", ...identity, modelId: model.id }, undefined).catch(() => {});
 				}
 			}
-		};
+		});
 	}
 
 	async #observedFetch(

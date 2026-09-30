@@ -15,6 +15,7 @@ import { resolveThinkingLevelForModel } from "../thinking";
 import type { EngineExecutionConfiguration, EngineExecutionRoute } from "./contracts";
 import { resolveCanonicalModelLimits, resolveExecutableModelLimits } from "./model-limits";
 import { candidateIdentity } from "./routing-admission";
+import { reconcileProviderBilling, withProviderBillingRequest } from "./provider-admission";
 import type {
 	ProviderAdmissionClient,
 	ProviderAdmissionIdentity,
@@ -143,7 +144,7 @@ export class EngineExecutionResolver {
 			} catch (error) {
 				if (!(error instanceof ProviderExecutionError) || !error.billing || !billingPoolChanged) throw error;
 				// Current pool gate proposed one same-route transition: record it, then ask once more.
-				await billingPoolChanged(error.billing, materialSignal);
+				await reconcileProviderBilling(error.billing, billingPoolChanged, materialSignal);
 				return await client.resolve(binding.identity, materialSignal, binding.executionPin);
 			}
 		};
@@ -289,7 +290,8 @@ export class EngineExecutionResolver {
 					providerRequestHook: {
 						wrapFetch: (runtimeModel, fetch) => {
 							const guarded = refreshFetch(runtimeModel, fetch);
-							return quotaHook ? quotaHook.wrapFetch(runtimeModel, guarded) : guarded;
+							const wrapped = quotaHook ? quotaHook.wrapFetch(runtimeModel, guarded) : guarded;
+							return (input, init) => withProviderBillingRequest(() => wrapped(input, init));
 						},
 					},
 					thinkingLevel,
