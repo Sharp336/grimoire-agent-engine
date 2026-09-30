@@ -1233,6 +1233,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (options.customTools?.length || options.preloadedCustomToolPaths?.length) {
 			throw new Error("Engine mode does not allow in-process custom tools");
 		}
+		// Omitted Engine instruction arrays mean none, not ambient discovery.
+		options = {
+			...options,
+			contextFiles: options.contextFiles ?? [],
+			skills: options.skills ?? [],
+			promptTemplates: options.promptTemplates ?? [],
+			slashCommands: options.slashCommands ?? [],
+			rules: options.rules ?? [],
+		};
 	}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];

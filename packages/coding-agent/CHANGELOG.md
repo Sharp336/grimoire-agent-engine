@@ -13,6 +13,7 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Managed Engine sessions treat omitted context files, skills, prompt templates, slash commands, and rules as empty arrays instead of discovering ambient instructions; explicit arrays and non-Engine discovery remain unchanged.
 - Approval decisions through authenticated ClientHost Control + Query now require the addressed ancestor's current binding, held lease and effective tool authority; direct unauthenticated CLI approval aliases remain removed. Missing local authority addresses the human without changing whether the request intrinsically requires a human.
 - Explicit hosted origin refusals become nonretryable Engine command rejections, while lost or transient transport remains blocked for retry. A paused branch Resume reacquires its frozen routes with its intent in one atomic storage mutation; approval input projections retain distinct request IDs and revisions through resolution and readdressing.
 - Engine restart keeps a deadline-paused Attempt paused when its only open work is approval-fenced tool effects; it reopens the same native session and executes only the original pending tool calls after a late decision reacquires its route. Active Attempts still end interrupted and publish cancelled approval resolutions. A premium child-launch challenge parks on the originating task effect and retries the exact preparation once with the human receipt.
