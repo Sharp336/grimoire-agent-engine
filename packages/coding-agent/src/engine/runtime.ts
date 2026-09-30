@@ -5868,21 +5868,24 @@ export class EngineRuntime {
 			return matches[0];
 		});
 		const choice = attempt.execution.executor_choice;
-		if (!frozen.length || !frozen.some(route =>
-			candidateRef(route) === candidateRef(currentIdentity(choice))))
+		const currentIndex = frozen.findIndex(route => candidateRef(route) === candidateRef(currentIdentity(choice)));
+		if (currentIndex < 0)
 			throw new EngineTargetError("stale_target", "Current route is outside the retained frozen choices");
+		// The immutable choice keeps its admitted baseline. Materialization resumes the current
+		// route and only its remaining fallbacks, never the already-exhausted prefix.
+		const remaining = frozen.slice(currentIndex);
 		const continuationDigest = await this.#continuationDigest(request);
 		if (continuationDigest !== current.continuationDigest)
 			throw new EngineTargetError("stale_target", "Retained native continuation changed");
-		const resolved = await this.#resolveExecution(config, frozen, {
+		const resolved = await this.#resolveExecution(config, remaining, {
 			expectedPrincipalId: request.principalId, agentInstanceRef: request.agentInstanceRef,
 			attemptId: request.attemptId, bindingRevision: request.bindingSnapshot.bindingRevision,
 			installationId: request.bindingSnapshot.installationId, dispatchRef: request.dispatchRef,
-			dispatchHash: request.dispatchHash, executionDigest: current.executionDigest,
+			dispatchHash: request.dispatchHash, executionDigest: choice.execution_digest,
 			originReceiptId: request.originReceiptId,
 		}, request.cwd);
 		const binding = await this.#openBinding(request, resolved, continuationDigest,
-			await this.#conversationIdentityDigest(request), current.executionDigest, choice, frozen, current,
+			await this.#conversationIdentityDigest(request), choice.execution_digest, choice, remaining, current,
 			current.bindingGeneration, undefined, undefined, undefined, undefined, undefined,
 			origin.approvalSettings ?? undefined, true);
 		await this.#repairExecutorRuleMessages(binding, choice, config);

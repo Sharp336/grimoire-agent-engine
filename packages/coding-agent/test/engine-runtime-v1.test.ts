@@ -230,7 +230,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			expect(await restarted.admitCommand(delivered, generation)).toEqual({ status: "replay", receipt: { outcome: "applied" } });
 			expect((await restarted.getApproval(request.id))?.request.decision_revision).toBe(1);
 			expect((await restarted.getEffect(request.effect_id))?.state).toBe("planned");
-			const resolved = (await restarted.pendingEventsForSink("hosted-binding")).filter(event =>
+			const resolved = (await restarted.pendingEventsForSink("hosted-binding")).events.filter(event =>
 				event.causationCommandId === delivered.commandId && event.kind === "tool_approval_resolved");
 			expect(resolved.map(event => event.payload)).toEqual([{
 				request_id: request.id, decision_revision: 1, outcome: "approved", decided_by: decision.decided_by,

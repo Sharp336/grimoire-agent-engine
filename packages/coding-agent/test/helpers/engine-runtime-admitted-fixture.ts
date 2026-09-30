@@ -28,7 +28,7 @@ export interface AdmittedExecutionFixture {
 	/** Approval decisions captured per decision command for the fixture approval verifier. */
 	decisions: Map<string, ApprovalDecision>;
 	setModelOverride(override: Record<string, unknown>): void;
-	captureCommand(command: EngineCommandEnvelope): void;
+	captureCommand(command: EngineCommandEnvelope): EngineCommandEnvelope;
 	optionsFor(runtimeOptions: {
 		deviceId?: string;
 		sessionDefaults?: EngineRuntimeOptions["sessionDefaults"];
@@ -79,6 +79,7 @@ export function admittedExecution(
 		continuationPolicy?: "exact" | "fresh";
 		fallbackModel?: Model | null;
 		scopeAgents?: number;
+		dispatch?: EngineExecutionConfiguration["dispatch"];
 		rules?: EngineExecutionConfiguration["instruction_sources"]["rules"];
 		stableDependencyDigest?: string;
 	} = {},
@@ -120,7 +121,7 @@ export function admittedExecution(
 	const spawn = options.spawn ?? spawnOff;
 	const scopeAgents = options.scopeAgents ?? 4;
 	const config: EngineExecutionConfiguration = {
-		dispatch: {
+		dispatch: options.dispatch ?? {
 			schema: "grimoire.dispatch.v2", execution_kind: "ordinary", special_ref: null,
 			dispatch_id: "engine-runtime-test-dispatch",
 			target: { task_ref: taskRef, work_step_id: null },
@@ -143,12 +144,14 @@ export function admittedExecution(
 		stableDependencyDigest: options.stableDependencyDigest ?? hash("engine-runtime-test-dependency"),
 		sessionDefaults: {},
 		instruction_sources: {
-			facts: { binding: "task", scope: [taskRef], os: null, runtime: "artel-engine", engine_version: null },
+			facts: { binding: options.dispatch?.execution_kind === "consultation" ? "consultation" :
+				options.dispatch?.execution_kind === "automation" ? "automation" : "task",
+				scope: options.dispatch?.target === null ? [] : [taskRef], os: null, runtime: "artel-engine", engine_version: null },
 			rules: options.rules ?? [], skills: [],
 		},
 		record_revisions: {},
 		routingLimits: {
-			scopes: [{ scope_ref: taskRef, agents: scopeAgents, by_tier: [], consultations: null }],
+			scopes: options.dispatch?.target === null ? [] : [{ scope_ref: taskRef, agents: scopeAgents, by_tier: [], consultations: scopeAgents }],
 			accounts: { "gctx:aaaaaaaaaaaaaaaa": scopeAgents },
 			providers: Object.fromEntries(routes.map(route => [route.provider_id, scopeAgents])),
 		},
@@ -159,13 +162,15 @@ export function admittedExecution(
 	const dispatchHash = hash(config.dispatch);
 	const receipts = new Map<string, EngineCommandEnvelope>();
 	const decisions = new Map<string, ApprovalDecision>();
-	const captureCommand = (command: EngineCommandEnvelope): void => {
+	const captureCommand = (value: EngineCommandEnvelope): EngineCommandEnvelope => {
+		const command = JSON.parse(JSON.stringify(value)) as EngineCommandEnvelope;
 		const receiptId = command.payload.originReceiptId;
 		if (typeof receiptId !== "string") throw new EngineTargetError("invalid_request", "Fixture command needs its origin receipt");
 		const retained = receipts.get(receiptId);
 		if (retained && storageCanonicalJson(retained) !== storageCanonicalJson(command))
 			throw new EngineTargetError("stale_target", "Fixture origin receipt is immutable");
 		receipts.set(receiptId, structuredClone(command));
+		return command;
 	};
 	let modelOverride: Record<string, unknown> = {};
 	const optionsFor = (runtimeOptions: {
@@ -304,8 +309,13 @@ export function startRequest(
 		executionConfiguration: execution.config,
 		dispatchRef: execution.dispatchRef,
 		dispatchHash: execution.dispatchHash,
-		executionKind: "ordinary",
-		specialRef: null,
+		executionKind: execution.config.dispatch.execution_kind,
+		specialRef: execution.config.dispatch.special_ref ? {
+			definitionRef: execution.config.dispatch.special_ref.definition_ref,
+			revision: execution.config.dispatch.special_ref.definition_revision,
+			occurrenceOrCallId: "occurrence_id" in execution.config.dispatch.special_ref
+				? execution.config.dispatch.special_ref.occurrence_id : execution.config.dispatch.special_ref.call_id,
+		} : null,
 		originReceiptId,
 		agentInstanceId: identity.agentInstanceId,
 		agentInstanceRef: identity.agentInstanceRef,
@@ -329,8 +339,7 @@ export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecuti
 		issuedAt: prior?.issuedAt ?? Date.now(), agentInstanceId, agentInstanceRef, bindingSnapshot,
 		parentAgentInstanceId, parentAgentInstanceRef, executionId, attemptId, authorityGeneration, principalId, payload,
 	};
-	execution.captureCommand(command);
-	return command;
+	return execution.captureCommand(command);
 }
 
 /** The same native admission followed by Start that the Engine command transports perform. */
