@@ -187,11 +187,10 @@ describe("agentPauseGate", () => {
 		await parked.promise;
 		abortController.abort("user interrupt");
 
-		// The run must terminate as aborted promptly (not stay parked until
-		// resume). The provider request itself carries the aborted signal, so
-		// whether the transport is entered at all is an implementation detail.
+		// Aborting a paused run must finish without entering the provider.
 		try {
 			const messages = await result;
+			expect(mock.calls).toHaveLength(0);
 			const last = messages[messages.length - 1];
 			expect(last.role).toBe("assistant");
 			if (last.role === "assistant") {
@@ -201,6 +200,45 @@ describe("agentPauseGate", () => {
 		} finally {
 			agentPauseGate.waitUntilResumed = originalWait;
 		}
+	});
+
+	it("does not dispatch after aborting a preflight pause", async () => {
+		const gate = new AgentPauseGate();
+		const preparing = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [{ content: ["must not dispatch"] }] });
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
+		const result = agentLoop([createUserMessage("hi")], context, {
+			model: mock.model, convertToLlm: identityConverter, pauseGate: gate,
+			beforeModelCall: () => { gate.pause(); preparing.resolve(); },
+		}, controller.signal, mock.stream).result();
+		await preparing.promise;
+		await gate.waitUntilParked();
+		controller.abort("cancelled during preflight");
+		const messages = await result;
+		expect(mock.calls).toHaveLength(0);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted",
+			errorMessage: "cancelled during preflight" });
+		expect(gate.paused).toBe(true);
+	});
+
+	it("does not dispatch after aborting asynchronous credential resolution", async () => {
+		const entered = Promise.withResolvers<void>();
+		const credential = Promise.withResolvers<string>();
+		const controller = new AbortController();
+		const mock = createMockModel({ responses: [{ content: ["must not dispatch"] }] });
+		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
+		const result = agentLoop([createUserMessage("hi")], context, {
+			model: mock.model, convertToLlm: identityConverter,
+			getApiKey: async () => { entered.resolve(); return credential.promise; },
+		}, controller.signal, mock.stream).result();
+		await entered.promise;
+		controller.abort("cancelled during credentials");
+		credential.resolve("fixture-key");
+		const messages = await result;
+		expect(mock.calls).toHaveLength(0);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted",
+			errorMessage: "cancelled during credentials" });
 	});
 
 	it("re-parks a waiter when the gate is re-engaged in the same tick as resume", async () => {

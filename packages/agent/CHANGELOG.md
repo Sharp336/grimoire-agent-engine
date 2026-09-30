@@ -6,6 +6,10 @@
 
 - Embedded runtimes can supply an external agent loop while retaining native events and message state.
 
+### Fixed
+
+- Aborting a paused turn, provider preflight, or asynchronous credential lookup now finishes with an aborted result without dispatching another provider request, including when no preflight callback is installed.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

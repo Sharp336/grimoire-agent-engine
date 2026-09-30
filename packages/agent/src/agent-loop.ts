@@ -1139,6 +1139,16 @@ async function runLoopBody(
 				// An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				const resumedAtTurnBoundary = await waitWhilePaused(config, signal);
+				if (signal?.aborted) {
+					if (!turnOpen) stream.push({ type: "turn_start" });
+					emitInputMessages(stream, messagesToEmit);
+					messagesToEmit = [];
+					const message = emitAbortedAssistantMessage(null, false, new Set(), currentContext, config, stream, signal);
+					newMessages.push(message);
+					await emitTurnEnd(stream, currentContext, message, [], config, signal, { willContinue: false });
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
 				if (resumedAtTurnBoundary && !signal?.aborted) {
 					pendingMessages.push(...((await config.getSteeringMessages?.(signal)) || []));
 				}
@@ -1195,10 +1205,18 @@ async function runLoopBody(
 						preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
 						const audit = latencyPreparation.getStore();
 						if (config.beforeModelCall) audit?.mark("provider_preflight_start");
-						gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+						gateResult = signal?.aborted
+							? { stop: true, reason: abortReasonText(signal) }
+							: (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
 						if (config.beforeModelCall) audit?.mark("provider_preflight_done");
-						if (config.beforeModelCall && signal?.aborted) gateResult = { stop: true };
-						if (gateResult?.stop || !(await waitWhilePaused(config, signal)) || signal?.aborted) break;
+						if (signal?.aborted) gateResult = { stop: true, reason: abortReasonText(signal) };
+						if (gateResult?.stop) break;
+						const resumed = await waitWhilePaused(config, signal);
+						if (signal?.aborted) {
+							gateResult = { stop: true, reason: abortReasonText(signal) };
+							break;
+						}
+						if (!resumed) break;
 
 						const resumedSteering = (await config.getSteeringMessages?.(signal)) || [];
 						if (resumedSteering.length === 0) break;
@@ -1230,6 +1248,10 @@ async function runLoopBody(
 							turnOpen = true;
 							throw error;
 						}
+					}
+					if (!turnOpen && signal?.aborted) {
+						stream.push({ type: "turn_start" });
+						turnOpen = true;
 					}
 					emitInputMessages(stream, turnMessages);
 					if (turnOpen) {
@@ -1771,6 +1793,11 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			if (finalRequestSignal?.aborted) {
+				const message = emitAbortedAssistantMessage(null, false, new Set(), context, config, stream, finalRequestSignal);
+				await finishChat(message);
+				return message;
+			}
 			audit?.mark("provider_stream_dispatch");
 			let response = await streamFunction(model, llmContext, {
 				...config,

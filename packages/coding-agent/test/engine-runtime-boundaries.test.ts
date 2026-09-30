@@ -1135,7 +1135,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 						.toBeLessThan(events.findIndex(event => event.kind === "model_started" && event.attemptId === later.attemptId));
 					expect(mock.calls).toHaveLength(outcome === "late-child" ? 4 : 3);
 				} else if (outcome === "stop" || outcome === "pause") {
-					const newer = control(target, outcome === "stop" ? "cancel" : "pause", `fifo-${outcome}`,
+					const newer = control(target, outcome === "stop" ? "cancel" : "pause", `fifo-new-${outcome}`,
 						(await runtime.store.intent(target.agentInstanceId)).intentRevision);
 					expect((await withTimeout(runEngineCommand(transport, newer), 5_000, "New control was blocked by queued Resume")).outcome).toBe("applied");
 					if (outcome === "pause") {
