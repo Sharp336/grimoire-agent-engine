@@ -3515,7 +3515,7 @@ export class EngineRuntime {
 		return executionHash({
 			agentInstanceId: request.agentInstanceId,
 			agentInstanceRef: request.agentInstanceRef,
-			parentAgentInstanceId: request.parentAgentInstanceId,
+			parentAgentInstanceId: request.parentAgentInstanceId ?? null,
 			authorityGeneration: request.authorityGeneration,
 			canonicalCwd:
 				canonicalCwdOverride === undefined
