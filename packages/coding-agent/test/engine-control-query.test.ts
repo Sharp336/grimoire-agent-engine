@@ -24,8 +24,7 @@ import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/sto
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
-import { admittedExecutionFixture, choiceFrom, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
-import { type AdmissionRequest } from "../src/engine/routing-admission";
+import { admittedExecutionFixture, admittedFixtureStart, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	bindTestsToStorageWorker();
@@ -647,15 +646,10 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite"), deviceId: "control-tools" });
 		const agentInstanceRef = "grimoire://tasks/grimoire/control-tools/agents/agent";
-		await runtime.store.registerAgent({
+		const execution = admittedExecutionFixture("grimoire://tasks/grimoire/control-tools");
+		const target = await admittedFixtureStart(runtime.store, {
 			agentInstanceId: "control-tools",
-			agentInstanceRef,
-			principalId: "owner",
-			authorityGeneration: 1,
-		});
-		const target = {
-			agentInstanceId: "control-tools",
-			bindingSnapshot: semanticBinding(agentInstanceRef),
+			bindingSnapshot: semanticBinding(agentInstanceRef, execution.taskRef),
 			attemptId: "tools-attempt",
 			executionId: "tools-execution",
 			bindingId: "tools-binding",
@@ -667,40 +661,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			engineGeneration: runtime.engineGeneration,
 			authorityGeneration: 1,
 			bindingGeneration: 1,
-		};
-		const execution = admittedExecutionFixture(target.bindingSnapshot.taskRef!);
-		const candidate = execution.config.routes.routes[0]!;
-		const admission: AdmissionRequest = {
-			principalId: "owner", deviceId: "device", engineGeneration: runtime.engineGeneration,
-			commandId: target.commandId, agentInstanceRef, attemptId: target.attemptId,
-			dispatchId: execution.config.dispatch.dispatch_id,
-			dispatchRef: target.dispatchRef, dispatchHash: execution.dispatchHash,
-			originReceiptId: `origin:${target.commandId}`, authContextId: "fixture-auth", bindingSnapshot: target.bindingSnapshot,
-			executionKind: execution.config.dispatch.execution_kind,
-			rosterRevision: execution.config.roster_revision, expectedRevisions: execution.config.record_revisions,
-			limits: execution.config.routingLimits,
-			candidates: [candidate], callerAttemptId: null, frozen: false,
-		};
-		// The routing lease pins to its admitted Start command: admit before previewing and committing.
-		await runtime.store.admitCommand(engineCommandIdentity({
-			schema: "grimoire.engine.command.v1", op: "start", commandId: target.commandId, deviceId: "device", engineId: "engine",
-			engineGeneration: runtime.engineGeneration, agentInstanceId: target.agentInstanceId, agentInstanceRef,
-			bindingSnapshot: target.bindingSnapshot, executionId: target.executionId, attemptId: target.attemptId,
-			authorityGeneration: 1, principalId: "owner", issuedAt: 1, payload: {},
-		}), runtime.engineGeneration);
-		const preview = await runtime.store.previewRouting(admission);
-		if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
-		const choice = choiceFrom(execution, preview.status === "admitted" ? preview.frozen : [candidate], target);
-		await runtime.store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
-			requireNew: true, settleCommandId: target.commandId, routingAdmission: { request: admission, preview },
-			execution: { execution_schema: 2, execution_digest: target.executionDigest, continuation_digest: target.continuationDigest,
-				dispatch_ref: target.dispatchRef, dispatch_hash: target.dispatchHash, executor_choice: choice,
-				lease_id: `slot-lease:${target.attemptId}`, queue_id: null },
-		});
+		}, agentInstanceRef, "owner", execution, "control-tools");
 		const server = await startEngineControlQueryServer({
 			runtime,
 			runtimeDir: tempDir,
-			deviceId: "device",
+			deviceId: "control-tools",
 			engineId: "engine",
 		});
 		try {

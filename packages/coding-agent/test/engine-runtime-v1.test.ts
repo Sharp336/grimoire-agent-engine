@@ -13,9 +13,8 @@ import {
 import type { StoragePayload } from "../src/session/storage-protocol";
 import {
 	active,
+	admittedFixtureStart,
 	admittedExecutionFixture,
-	binding,
-	choiceFrom,
 	command,
 	eventsRequest,
 	identity,
@@ -118,45 +117,17 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			const snapshot = { ...semanticBinding(agentInstanceRef), bindingRevision: 1, installationId };
 			store.verifyInstallation(installationId, principalId);
 			await store.checkSemanticStart(agentInstanceId, snapshot, principalId);
-			const target = { ...binding("approval"), agentInstanceId, bindingSnapshot: snapshot };
-			const start: EngineCommandEnvelope = {
-				schema: "grimoire.engine.command.v1", op: "start", commandId: target.commandId,
-				deviceId: "device", engineId: "engine", engineGeneration: 1, principalId,
-				agentInstanceId, agentInstanceRef, bindingSnapshot: snapshot, runtimeBindingId: target.bindingId,
-				bindingGeneration: 1, authorityGeneration: 1, executionId: target.executionId, attemptId: target.attemptId,
-				issuedAt: 1, payload: { expectedIntentRevision: 0 },
-			};
-			await store.admitCommand(engineCommandIdentity(start), 1);
 			const execution = admittedExecutionFixture(snapshot.taskRef!);
-			const route = execution.config.routes.routes[0]!;
-			const admission = {
-				principalId, deviceId: "device", engineGeneration: 1,
-				commandId: target.commandId, agentInstanceRef, attemptId: target.attemptId,
-				dispatchId: execution.config.dispatch.dispatch_id,
-				dispatchRef: target.dispatchRef, dispatchHash: execution.dispatchHash,
-				originReceiptId: `origin:${target.commandId}`, authContextId: "approval-delivery-auth",
-				bindingSnapshot: snapshot, executionKind: execution.config.dispatch.execution_kind,
-				rosterRevision: execution.config.roster_revision, expectedRevisions: execution.config.record_revisions,
-				limits: execution.config.routingLimits,
-				candidates: [route], callerAttemptId: null, frozen: false,
-			};
-			const preview = await store.previewRouting(admission);
-			if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
-			await store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
-				requireNew: true, settleCommandId: start.commandId,
-				routingAdmission: { request: admission, preview },
-				execution: {
-					execution_schema: 2, execution_digest: target.executionDigest, continuation_digest: target.continuationDigest,
-					dispatch_ref: target.dispatchRef, dispatch_hash: execution.dispatchHash,
-					executor_choice: choiceFrom(execution, preview.status === "admitted" ? preview.frozen : [route], target),
-					lease_id: `slot-lease:${target.attemptId}`, queue_id: null,
-				},
-			});
+			const target = await admittedFixtureStart(store,
+				{ ...binding("approval"), agentInstanceId, bindingSnapshot: snapshot },
+				agentInstanceRef, principalId, execution);
+			const start = execution.receipts.get(`origin:${target.commandId}`);
+			if (!start) throw new Error("Admitted approval Start lost its exact origin");
 			const hash = `sha256:${"a".repeat(64)}`;
 			const request: ApprovalRequest = {
 				schema: "grimoire.approval_request.v1", id: "approval-effect", effect_id: "approval-effect",
 				principal_id: principalId, requester_agent_ref: agentInstanceRef, requester_attempt_id: target.attemptId,
-				requester_binding_revision: 1, dispatch_hash: hash, kind: "tool", name: "bash",
+				requester_binding_revision: 1, dispatch_hash: target.dispatchHash, kind: "tool", name: "bash",
 				subject: { tool_name: "bash", call_hash: hash, ceiling_hash: hash },
 				requires_human: true, reason: "fixture decision", created_at: "2026-09-30T00:00:00Z",
 				addressed_to: { kind: "human", principal_id: principalId }, addressed_at: "2026-09-30T00:00:00Z",
@@ -177,7 +148,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				schema: "grimoire.approval_decision.v1", request_id: request.id, command_id: "approval-command",
 				expected_address_revision: 1, expected_decision_revision: 0, decision: "approve", reason: null,
 				origin_receipt_id: "origin-fixture", decided_by: { kind: "human", principal_id: principalId },
-				authority: { ceiling_hash: hash, subject_hash: hash, dispatch_hash: hash },
+				authority: { ceiling_hash: hash, subject_hash: hash, dispatch_hash: target.dispatchHash },
 				decided_at: "2026-09-30T00:01:00Z",
 			};
 			const envelope: EngineCommandEnvelope = { ...start, op: "resolve_approval", commandId: decision.command_id,
@@ -278,11 +249,13 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			operationId: "operation-one", proposalHash, gateRevision: 0, censusMutationRevision: 0 };
 		const prepared = await store.bindingPrepare(gate);
 		await expect(store.bindingPrepare({ ...gate, operationId: "another-operation" })).rejects.toMatchObject({ code: "stale_target" });
-		const pending = { ...command("pending-owned"), agentInstanceRef, agentInstanceId, principalId,
-			bindingSnapshot: snapshot, browserPayloadHash: undefined };
+		const ownedAgent = {
+			...identity("root"), agentInstanceRef, agentInstanceId, principalId,
+			bindingSnapshot: snapshot,
+		};
+		const pending = command("pending-owned", ownedAgent);
 		expect(await store.admitCommand(pending, 1)).toEqual({ status: "binding_pending" });
-		const secondPending = { ...command("pending-owned-two"), agentInstanceRef, agentInstanceId, principalId,
-			bindingSnapshot: snapshot, browserPayloadHash: undefined };
+		const secondPending = command("pending-owned-two", ownedAgent);
 		expect(await store.admitCommand(secondPending, 1)).toEqual({ status: "binding_pending" });
 		const pendingRows = await store.records.getMany([
 			{ kind: "command", id: pending.commandId }, { kind: "command", id: secondPending.commandId },
@@ -1279,10 +1252,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 	});
 	it("cancels an exact Start before ordinary delivery and preserves its fence across reopen", async () => {
 		let store = await createStore();
-		const start = {
-			...command("start-late"),
-			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
-		};
+		const start = command("start-late");
 		await store.registerAgent(identity("root"));
 		const target = {
 			...identity("root"),
@@ -1308,10 +1278,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 	});
 	it("pins a pending cancellation to the source principal and immutable Start CAS", async () => {
 		const store = await createStore();
-		const start = {
-			...command("pending-exact"),
-			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
-		};
+		const start = command("pending-exact");
 		await store.admitCommand(start, 1);
 		const target = {
 			...identity("root"),
@@ -1334,12 +1301,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 	it("uses the factual applied Start revision and rejects an intervening intent mutation", async () => {
 		const store = await createStore();
 		const target = binding("root");
-		const start = {
-			...command(target.commandId),
-			attemptId: target.attemptId,
-			executionId: target.executionId,
-			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
-		};
+		const start = command(target.commandId, identity("root"), 1, target);
 		await store.admitCommand(start, 1);
 		await store.commitAttemptTransition({ ...target, intentRevision: 7 }, "running", [{ kind: "running" }], {
 			startIntent: { expectedRevision: 0 },

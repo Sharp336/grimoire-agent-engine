@@ -1,18 +1,18 @@
-import {
-	type EngineBindingSnapshot,
-	type EngineCommandEnvelope,
-	EngineTargetError,
-	type EngineSemanticBindingSnapshot,
-} from "../../src/engine/contracts";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { type EngineBindingSnapshot, EngineTargetError, type EngineSemanticBindingSnapshot,
+	type ExecutorChoice, type Candidate, type EngineExecutionConfiguration } from "../../src/engine/contracts";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { engineCommandIdentity } from "../../src/engine/nats-adapter";
+import { candidateIdentity, frozenCandidate, l1For, type AdmissionRequest } from "../../src/engine/routing-admission";
 import { RocksEngineStore } from "../../src/engine/rocks-runtime-store";
 import { engineAgentId, engineAgentInstanceId } from "../../src/engine/route";
 import { type RuntimeScope, runtimeRemainingWork } from "../../src/engine/runtime-protocol";
 import type { EngineCommandIdentity } from "../../src/engine/store";
-import { readStorageBinding, StorageClient } from "../../src/session/storage-client";
+import { readStorageBinding, StorageClient, storageCanonicalJson } from "../../src/session/storage-client";
 import { createInMemoryAuthStorage } from "./agent-session-setup";
-import { admittedExecution, startRequest, type AdmittedExecutionFixture } from "./engine-runtime-admitted-fixture";
+import { admittedExecution, startEnvelope, startRequest, type AdmittedExecutionFixture } from "./engine-runtime-admitted-fixture";
 import { bindTestsToStorageWorker } from "./storage-worker-fixture";
 
 export function semanticBinding(
@@ -62,7 +62,7 @@ export function binding(name: string): EngineBindingSnapshot {
 	const agent = identity(name);
 	return {
 		agentInstanceId: agent.agentInstanceId,
-		bindingSnapshot: semanticBinding(agent.agentInstanceId, "grimoire://tasks/grimoire/runtime-test"),
+		bindingSnapshot: agent.bindingSnapshot,
 		bindingId: `binding-${name}`,
 		commandId: `start-${name}`,
 		executionId: `execution-${name}`,
@@ -80,21 +80,19 @@ export function binding(name: string): EngineBindingSnapshot {
 	};
 }
 
-export function command(name: string, op = "start"): EngineCommandIdentity {
-	return {
-		...identity("root"),
-		commandId: name,
-		operation: op,
-		deviceId: "device",
-		engineId: "engine",
-		engineGeneration: 1,
-		attemptId: name,
-		executionId: name,
-		payloadHash: `sha256:${"a".repeat(64)}`,
-		canonicalHash: `sha256:${name}`,
-		browserPayloadHash: `sha256:${"b".repeat(64)}`,
-		serializedCommand: JSON.stringify({ text: name }),
-	};
+export function command(name: string,
+	agent = identity("root"), generation = 1,
+	target?: Pick<EngineBindingSnapshot, "executionId" | "attemptId">): EngineCommandIdentity {
+	const execution = admittedExecutionFixture(agent.bindingSnapshot.taskRef!);
+	const request = startRequest(execution, {
+		commandId: name, agentInstanceId: agent.agentInstanceId,
+		agentInstanceRef: agent.agentInstanceRef,
+		executionId: target?.executionId ?? name, attemptId: target?.attemptId ?? name,
+	}, { cwd: process.cwd(), principalId: agent.principalId, input: name,
+		bindingSnapshot: agent.bindingSnapshot, expectedIntentRevision: 0 });
+	const envelope = startEnvelope({ engineGeneration: generation }, execution, request,
+		{ deviceId: "device", engineId: "engine" });
+	return engineCommandIdentity(envelope);
 }
 
 export function eventsRequest(
@@ -132,126 +130,136 @@ export function admittedExecutionFixture(taskRef = "grimoire://tasks/grimoire/ru
 	return admittedExecution(model, new ModelRegistry(createInMemoryAuthStorage()), { taskRef });
 }
 
-/**
- * Register `name` and commit its running Attempt from `binding(name)` through the real native admission
- * path: the shared fixture's typed Start request and immutable envelope, the routing lease from
- * stageAdmission, and the execution provenance the lease requires. Effects and approvals then stage
- * through the store's own guarded APIs.
- */
-export async function active(store: RocksEngineStore, name = "root"): Promise<EngineBindingSnapshot> {
-	const agent = identity(name);
-	await store.registerAgent(agent);
-	const target = binding(name);
-	const execution = admittedExecutionFixture(target.bindingSnapshot!.taskRef!);
-	// The exact typed Start the Engine transport would admit: immutable envelope captured once.
+/** Admit the exact frozen typed Start, routing lease, and Attempt as one native transition. */
+export async function admittedFixtureStart(
+	store: RocksEngineStore,
+	initial: EngineBindingSnapshot,
+	agentInstanceRef: string,
+	principalId: string,
+	execution: AdmittedExecutionFixture,
+	deviceId = "device",
+): Promise<EngineBindingSnapshot> {
+	const cwd = process.cwd();
+	const bindingSnapshot = initial.bindingSnapshot ??
+		semanticBinding(agentInstanceRef, execution.taskRef);
+	await store.registerAgent({
+		agentInstanceId: initial.agentInstanceId, agentInstanceRef,
+		principalId, authorityGeneration: initial.authorityGeneration,
+	});
 	const request = startRequest(execution, {
-		commandId: target.commandId,
-		agentInstanceId: target.agentInstanceId,
-		agentInstanceRef: agent.agentInstanceRef,
-		executionId: target.executionId,
-		attemptId: target.attemptId,
-	}, { cwd: "/", principalId: agent.principalId, input: "runtime v1 fixture" });
-	const { commandId, agentInstanceId: _id, agentInstanceRef: _ref, bindingSnapshot, executionId, attemptId,
-		authorityGeneration, principalId, ...payload } = request;
-	const envelope: EngineCommandEnvelope = {
-		schema: "grimoire.engine.command.v1", op: "start", commandId,
-		deviceId: "device", engineId: "engine",
-		engineGeneration: target.engineGeneration, agentInstanceId: target.agentInstanceId,
-		agentInstanceRef: agent.agentInstanceRef, bindingSnapshot,
-		executionId, attemptId, authorityGeneration, principalId,
-		issuedAt: 1, payload,
-	};
-	const start = engineCommandIdentityFromEnvelope(envelope, target);
-	await store.admitCommand(start, target.engineGeneration);
-	const route = execution.config.routes.routes[0]!;
-	const admission = {
-		principalId: agent.principalId,
-		deviceId: start.deviceId,
-		engineGeneration: target.engineGeneration,
-		commandId: target.commandId,
-		agentInstanceRef: agent.agentInstanceRef,
-		attemptId: target.attemptId,
+		commandId: initial.commandId, agentInstanceId: initial.agentInstanceId,
+		agentInstanceRef, executionId: initial.executionId, attemptId: initial.attemptId,
+	}, {
+		cwd, principalId, input: "runtime v1 fixture",
+		bindingSnapshot, expectedIntentRevision: 0,
+	});
+	const envelope = startEnvelope({ engineGeneration: initial.engineGeneration }, execution, request,
+		{ deviceId, engineId: "engine" });
+	const start = engineCommandIdentity(envelope);
+	const result = await store.admitCommand(start, initial.engineGeneration);
+	if (result.status !== "claimed") throw new Error("Fixture Start was not claimed by native owner");
+	const admission: AdmissionRequest = {
+		principalId, deviceId, engineGeneration: initial.engineGeneration,
+		commandId: initial.commandId, agentInstanceRef, attemptId: initial.attemptId,
 		dispatchId: execution.config.dispatch.dispatch_id,
-		dispatchRef: target.dispatchRef,
-		dispatchHash: execution.dispatchHash,
-		originReceiptId: `origin:${target.commandId}`,
-		authContextId: "runtime-v1-fixture-auth",
-		bindingSnapshot: target.bindingSnapshot!,
-		executionKind: execution.config.dispatch.execution_kind,
+		dispatchRef: execution.dispatchRef, dispatchHash: execution.dispatchHash,
+		originReceiptId: request.originReceiptId, authContextId: "runtime-v1-fixture-auth",
+		bindingSnapshot: request.bindingSnapshot, executionKind: execution.config.dispatch.execution_kind,
 		rosterRevision: execution.config.roster_revision,
 		expectedRevisions: execution.config.record_revisions,
-		limits: execution.config.routingLimits,
-		candidates: [route],
-		callerAttemptId: null,
-		frozen: false,
+		limits: execution.config.routingLimits, candidates: execution.config.routes.routes,
+		callerAttemptId: null, frozen: false,
 	};
 	const preview = await store.previewRouting(admission);
 	if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
+	const choice = choiceFrom(execution, preview.frozen, preview.filtered);
+	const target: EngineBindingSnapshot = {
+		...initial, bindingSnapshot: request.bindingSnapshot,
+		dispatchRef: execution.dispatchRef, dispatchHash: execution.dispatchHash,
+		executionDigest: choice.execution_digest,
+		continuationDigest: await continuationDigest(execution.config, agentInstanceRef, cwd,
+			initial.authorityGeneration),
+	};
 	await store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
-		requireNew: true,
-		settleCommandId: start.commandId,
-		settleCommandReceipt: { outcome: "applied" },
+		requireNew: true, settleCommandId: start.commandId,
 		routingAdmission: { request: admission, preview },
 		execution: {
-			execution_schema: 2,
-			execution_digest: execution.config.stableDependencyDigest,
-			continuation_digest: execution.config.continuationConfiguration ? hashOf(execution.config.continuationConfiguration) : target.continuationDigest,
-			dispatch_ref: target.dispatchRef,
-			dispatch_hash: execution.dispatchHash,
-			executor_choice: choiceFrom(execution, preview.status === "admitted" ? preview.frozen : [route], target),
-			lease_id: `slot-lease:${target.attemptId}`,
-			queue_id: null,
+			execution_schema: 2, execution_digest: target.executionDigest,
+			continuation_digest: target.continuationDigest,
+			dispatch_ref: target.dispatchRef, dispatch_hash: target.dispatchHash,
+			executor_choice: choice, lease_id: `slot-lease:${target.attemptId}`, queue_id: null,
 		},
 	});
 	return target;
 }
 
-/** The executor choice the admitted frozen roster settles on: selected and candidates are the store's own admission output. */
+export async function active(store: RocksEngineStore, name = "root"): Promise<EngineBindingSnapshot> {
+	const agent = identity(name);
+	return admittedFixtureStart(store, binding(name), agent.agentInstanceRef, agent.principalId,
+		admittedExecutionFixture(agent.bindingSnapshot.taskRef!));
+}
+
+/** The executor choice the admitted frozen roster settles on, with the Engine's exact execution digest. */
 export function choiceFrom(
 	execution: AdmittedExecutionFixture,
-	frozen: readonly Parameters<RocksEngineStore["previewRouting"]>[0]["candidates"],
-	target: EngineBindingSnapshot,
-) {
-	const selected = frozen[0];
-	if (!selected) throw new EngineTargetError("invalid_request", "Admitted roster selected no route");
+	frozen: readonly Candidate[],
+	filtered: Record<string, number>,
+): ExecutorChoice {
+	const route = frozen[0];
+	if (!route) throw new EngineTargetError("invalid_request", "Admitted roster selected no route");
+	const config = execution.config;
+	const requirement = config.dispatch.requirement;
+	const admitted = config.routes.routes.find(candidate =>
+		candidate.route_ref === route.route_ref && candidate.account_ref === route.account_ref &&
+		candidate.model_id === route.model_id && candidate.billing_pool_id === route.billing_pool_id);
+	if (!admitted) throw new EngineTargetError("stale_target", "Frozen route is outside the admitted roster");
+	const selected: ExecutorChoice["selected"] = {
+		...candidateIdentity(route),
+		basis: requirement.pin ? "pin" : admitted.order_match ? "order" : "rank",
+		order_match: admitted.order_match,
+	};
+	const candidates = frozen.map(frozenCandidate);
+	const executionDigest = hashOf({
+		schema: "artel.execution.v2", dispatchHash: execution.dispatchHash,
+		executionConfiguration: config, record_revisions: config.record_revisions,
+		scope_revision: config.scope_revision, candidates, selected,
+	});
 	return {
-		schema: "grimoire.executor_choice.v1" as const,
+		schema: "grimoire.executor_choice.v1",
 		dispatch_hash: execution.dispatchHash,
-		preset_ref: null,
-		effective_requirement: execution.config.dispatch.requirement,
-		scope_revision: execution.config.scope_revision,
-		candidates: [...frozen],
-		filtered_counts: {},
-		selected: { ...selected, basis: "rank" as const, order_match: null },
-		execution_digest: target.executionDigest,
-		shadow_cost_estimate: null,
-		rules: [],
-		skills: [],
+		preset_ref: config.dispatch.preset?.ref ?? null,
+		effective_requirement: requirement,
+		scope_revision: config.scope_revision,
+		candidates,
+		filtered_counts: filtered,
+		selected,
+		execution_digest: executionDigest,
+		shadow_cost_estimate: route.shadow_cost,
+		rules: l1For(config.instruction_sources, candidateIdentity(route))
+			.map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash })),
+		skills: config.instruction_sources.skills,
 		transitions: [],
 		actual_cost: null,
 		grants_used: [],
 	};
 }
 
-function hashOf(value: unknown): string {
-	return `sha256:${Bun.SHA256.hash(JSON.stringify(value), "hex")}`;
+function hashOf(value: unknown): `sha256:${string}` {
+	return `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
 }
 
-/** The admitted Start command identity the routing lease and attempt settlement are pinned to. */
-function engineCommandIdentityFromEnvelope(
-	envelope: EngineCommandEnvelope,
-	target: EngineBindingSnapshot,
-): EngineCommandIdentity {
-	const { schema: _s, op, commandId, deviceId, engineId, engineGeneration, agentInstanceId, agentInstanceRef,
-		bindingSnapshot, executionId, attemptId, authorityGeneration, principalId, issuedAt: _t, payload } = envelope;
-	const serialized = JSON.stringify({ ...envelope, payload: { ...payload, expectedIntentRevision: 0 } });
-	return {
-		commandId, operation: op, deviceId, engineId, engineGeneration, agentInstanceId, agentInstanceRef,
-		bindingSnapshot, executionId, attemptId, authorityGeneration, principalId,
-		payloadHash: `sha256:${Bun.SHA256.hash(JSON.stringify(payload), "hex")}`,
-		canonicalHash: `sha256:${Bun.SHA256.hash(serialized, "hex")}`,
-		serializedCommand: serialized,
-	};
+async function continuationDigest(config: EngineExecutionConfiguration,
+	agentInstanceRef: string, cwd: string, authorityGeneration = 1): Promise<`sha256:${string}`> {
+	const resolved = await fs.realpath(cwd).catch(() => path.resolve(cwd));
+	const canonicalCwd = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+	return hashOf({
+		schema: "artel.continuation.v2", agentInstanceRef,
+		parentAgentInstanceRef: null, authorityGeneration, canonicalCwd,
+		continuationPolicy: config.continuationPolicy,
+		continuationConfiguration: config.continuationConfiguration,
+		stableDependencyDigest: config.stableDependencyDigest,
+		sessionDefaults: config.sessionDefaults,
+	});
 }
 
 /**
