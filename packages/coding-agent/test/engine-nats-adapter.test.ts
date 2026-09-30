@@ -29,6 +29,13 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import {
+	admitStart,
+	admittedExecution,
+	approvalDecisionFor,
+	startRequest,
+	type AdmittedExecutionFixture,
+} from "./helpers/engine-runtime-admitted-fixture";
 
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
@@ -44,7 +51,14 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 	it("acknowledges oversized retained receipts through NATS and native IPC without starting another Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			...execution.optionsFor({ deviceId: "device-1" }),
+		});
 		const client = await connect({ servers: broker.url });
 		const command = startCommand(runtime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
 		command.agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/agent";
@@ -53,7 +67,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		command.browserPayloadHash = `sha256:${"a".repeat(64)}`;
 		command.browserTarget = { agentInstanceRef: command.agentInstanceRef };
 		const identity = engineCommandIdentity(command);
-		let profiles = 0;
+		let resolverCalls = 0;
+		execution.setModelOverride({});
 		const errors: Error[] = [];
 		const options = {
 			runtime,
@@ -63,10 +78,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => {
-				profiles++;
-				return { spawns: "", profileDigest: "legacy" };
-			},
 			onError: (error: Error) => errors.push(error),
 		};
 		let server: EngineControlQueryServer | undefined;
@@ -105,7 +116,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter!.engineRoute}`);
 				return info.delivered.consumer_seq > 0 && info.num_ack_pending === 0;
 			});
-			expect(profiles).toBe(0);
+			expect(resolverCalls).toBe(0);
 			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
 			expect(errors).toEqual([]);
 		} finally {
@@ -122,7 +133,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-stop-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const databasePath = path.join(tempDir, "engine.sqlite");
-		let runtime = await EngineRuntime.create({ databasePath });
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const typedOptions = execution.optionsFor({ deviceId: "stop-device" });
+		let runtime = await EngineRuntime.create({ databasePath, ...typedOptions });
 		const client = await connect({ servers: broker.url });
 		const options = {
 			deviceId: "stop-device",
@@ -130,7 +146,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "stop-profile" }),
 		};
 		const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
 		const entered = Promise.withResolvers<void>(),
@@ -188,7 +203,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(200);
 			runtime.store.pendingEventsForSink = pending;
 			await runtime.dispose();
-			runtime = await EngineRuntime.create({ databasePath });
+			runtime = await EngineRuntime.create({ databasePath, ...typedOptions });
 			// The retained final event meets a real broker rejection during cold recovery.
 			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: 200, discard: DiscardPolicy.New });
 			adapter = await NatsEngineAdapter.connect({ ...options, runtime, onError: () => deliveryFailed.resolve() });
@@ -238,25 +253,25 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				};
 			},
 		});
+		const execution = admittedExecution(mock.model, models);
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
-			sessionDefaults: {
+			...execution.optionsFor({ deviceId: "queue-device", sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
 				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
 				model: mock.model,
 				modelRegistry: models,
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-			},
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+			} }),
 		});
-		const profile = { spawns: "", profileDigest: "queue-profile", enableMCP: false, enableLsp: false };
 		const errors: Error[] = [];
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
@@ -265,7 +280,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => profile,
 			onError: error => errors.push(error),
 		});
 		const client = await connect({ servers: broker.url });
@@ -273,21 +287,13 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const releaseDelivery = Promise.withResolvers<void>();
 		try {
 			const agentInstanceRef = "grimoire://tasks/grimoire/queue-boundary/agents/paused";
-			const started = await runtime.start(
-				{
-					commandId: "queue-start",
-					agentInstanceRef,
-					bindingSnapshot: semanticBinding(agentInstanceRef),
-					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
-					principalId: "queue-owner",
-					executionId: "queue-execution",
-					attemptId: "queue-attempt",
-					authorityGeneration: 1,
-					cwd,
-					input: "work",
-				},
-				profile,
-			);
+			const started = await admitStart(runtime, execution, startRequest(execution, {
+				commandId: "queue-start",
+				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+				agentInstanceRef,
+				executionId: "queue-execution",
+				attemptId: "queue-attempt",
+			}, { cwd, principalId: "queue-owner", input: "work" }));
 			await providerEntered.promise;
 			const hold = await runtime.pause({ ...started, commandId: "queue-pause", initiator: { kind: "human" } });
 			providerBoundary.resolve();
@@ -374,25 +380,25 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				{ content: ["corrected"] },
 			],
 		});
+		const execution = admittedExecution(mock.model, models);
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
-			sessionDefaults: {
+			...execution.optionsFor({ deviceId: "resume-device", sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
 				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
 				model: mock.model,
 				modelRegistry: models,
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-			},
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+			} }),
 		});
-		const profile = { spawns: "", profileDigest: "resume-profile", enableMCP: false, enableLsp: false };
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "resume-device",
@@ -400,23 +406,17 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => profile,
 		});
 		const client = await connect({ servers: broker.url });
 		try {
 			const agentInstanceRef = "grimoire://tasks/grimoire/resume-boundary/agents/paused";
-			const started = await runtime.start({
+			const started = await admitStart(runtime, execution, startRequest(execution, {
 				commandId: "nats-resume-start",
-				agentInstanceRef,
-				bindingSnapshot: semanticBinding(agentInstanceRef),
 				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
-				principalId: "owner",
+				agentInstanceRef,
 				executionId: "nats-resume-execution",
 				attemptId: "nats-resume-attempt",
-				authorityGeneration: 1,
-				cwd,
-				input: "initial work",
-			}, profile);
+			}, { cwd, principalId: "owner", input: "initial work" }));
 			await entered.promise;
 			const hold = await runtime.pause({
 				...started,
@@ -535,6 +535,10 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				return { content: ["Approved file read completed"] };
 			},
 		});
+		const execution = admittedExecution(toolModel.model, modelRegistry, {
+			continuation: { toolPolicies: { read: "permit" } },
+			scopeAgents: 8,
+		});
 		const runtime: EngineRuntime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async (session, input, identity) => {
@@ -549,7 +553,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				}
 				return true;
 			},
-			sessionDefaults: {
+			...execution.optionsFor({ deviceId: "device-1", sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
 				settings: await Settings.loadReadOnly({
@@ -566,12 +570,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				enableLsp: false,
 				modelRegistry,
 				model: toolModel.model,
-			},
+			} }),
 		});
 		const errors: Error[] = [];
 		const reportFailure = new Error("Conflict reporter failed");
 		let failConflictReport = false;
-		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -579,8 +582,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: command =>
-				command.agentInstanceId === "agent-permit" ? { ...profile, toolPolicies: { read: "permit" } } : profile,
 			onError: error => {
 				errors.push(error);
 				if (failConflictReport && error instanceof EngineCommandConflictError) {
@@ -620,7 +621,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			);
 			await client.flush();
 
-			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
+			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd, execution);
 			commandA.agentInstanceRef = "grimoire://tasks/grimoire/nats-test/agents/agent-a";
 			commandA.bindingSnapshot = semanticBinding(commandA.agentInstanceRef);
 			commandA.payload.clientMessageId = "client-message-a";
@@ -629,7 +630,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				displayName: "Runtime Gardener",
 				delegationHint: "Engine broker integration",
 			};
-			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd);
+			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd, execution);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
 					msgID: commandA.commandId,
@@ -745,34 +746,40 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				delegationHint: "Engine broker integration",
 			});
 
-			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
+			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd, execution);
 			await js.publish(adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {
 				msgID: permitStart.commandId,
 			});
 			await waitFor(() => permitEvents.some(event => event.type === "tool.approval_requested"));
 			expect(permitExecuted).toBeFalse();
 			const approval = permitEvents.find(event => event.type === "tool.approval_requested")!;
+			const approvalId = String((approval.payload as Record<string, unknown> & { id?: string }).id ??
+				(appivalPayloadId(approval)));
+			const permitTarget = runtime.getBinding("agent-permit")!;
+			const decision = approvalDecisionFor(execution, { ...permitTarget, principalId: "owner" },
+				"command-resolve-permit", approvalId, "approve");
 			const resolveApproval: EngineCommandEnvelope = {
 				schema: "grimoire.engine.command.v1",
 				commandId: "command-resolve-permit",
-				op: "resolve_tool_approval",
+				op: "resolve_approval",
 				deviceId: "device-1",
 				engineId: "engine-1",
 				engineGeneration: Number(approval.engineGeneration),
 				agentInstanceId: "agent-permit",
+				agentInstanceRef: permitTarget.bindingSnapshot?.agentInstanceRef,
 				runtimeBindingId: String(approval.runtimeBindingId),
 				bindingGeneration: Number(approval.bindingGeneration),
 				executionId: String(approval.executionId),
 				attemptId: String(approval.attemptId),
 				authorityGeneration: Number(approval.authorityGeneration),
+				principalId: "owner",
 				issuedAt: Date.now(),
-				payload: {
-					approvalId: String((approval.payload as Record<string, unknown>).approvalId),
-					decision: "approve",
-				},
+				payload: { approvalDecision: decision, expectedInputRevision: 0 },
 			};
+			resolveApproval.payload.originReceiptId = decision.origin_receipt_id;
+			execution.captureCommand(resolveApproval);
 			await js.publish(
-				adapter.commandSubject("agent-permit", "resolve_tool_approval"),
+				adapter.commandSubject("agent-permit", "resolve_approval"),
 				JSON.stringify(resolveApproval),
 				{ msgID: resolveApproval.commandId },
 			);
@@ -814,7 +821,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(JSON.stringify(rootB.session.messages)).not.toContain("broker round trip");
 			expect(JSON.stringify(rootB.session.messages)).not.toContain("engine:inbox_changed");
 			hubQueueId = (await runtime.listInbox(initialBindingB))[0]!.queueId;
-			const hubStart = startCommand(runtime.engineGeneration, "agent-b", "native-hub", cwd);
+			const hubStart = startCommand(runtime.engineGeneration, "agent-b", "native-hub", cwd, execution);
 			hubStart.payload.input = "NATIVE HUB";
 			await js.publish(adapter.commandSubject("agent-b", "start"), JSON.stringify(hubStart), {
 				msgID: hubStart.commandId,
@@ -971,7 +978,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const deliveredAfterDuplicate = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
 				.delivered.consumer_seq;
 			const oldGenerationA = {
-				...startCommand(runtime.engineGeneration - 1, "agent-a", "old-generation", cwd),
+				...startCommand(runtime.engineGeneration - 1, "agent-a", "old-generation", cwd, execution),
 				commandId: "command-a-old-generation",
 			};
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(oldGenerationA), {
@@ -998,7 +1005,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 			expect(dispatchCount).toBe(4);
 
-			const invalidHistoryBranch = startCommand(runtime.engineGeneration, "agent-a", "invalid-history", cwd);
+			const invalidHistoryBranch = startCommand(runtime.engineGeneration, "agent-a", "invalid-history", cwd, execution);
 			invalidHistoryBranch.payload.historyEdit = {
 				mode: "branch",
 				source: runtime.getBinding("agent-b"),
@@ -1042,7 +1049,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(dispatchCount).toBe(4);
 
 			const futureGenerationA = {
-				...startCommand(runtime.engineGeneration + 1, "agent-a", "stale", cwd),
+				...startCommand(runtime.engineGeneration + 1, "agent-a", "stale", cwd, execution),
 				commandId: "command-a-stale",
 			};
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(futureGenerationA), {
@@ -1088,7 +1095,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const mailboxName = `agent_${adapter.messageSubject("agent-a", "agent-c").split(".")[6]}`;
 			await waitFor(async () => (await manager.streams.info(AGENT_MESSAGE_STREAM)).state.messages === 1);
 
-			const commandC = startCommand(runtime.engineGeneration, "agent-c", "c", cwd);
+			const commandC = startCommand(runtime.engineGeneration, "agent-c", "c", cwd, execution);
 			await js.publish(adapter.commandSubject("agent-c", "start"), JSON.stringify(commandC), {
 				msgID: commandC.commandId,
 			});
@@ -1125,51 +1132,29 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const cwd = path.join(tempDir, "workspace");
 		const agentDir = path.join(tempDir, "agent");
 		fs.mkdirSync(cwd);
-		const pendingProfile = Promise.withResolvers<{
-			spawns: string;
-			profileDigest: string;
-			enableMCP: false;
-			enableLsp: false;
-		}>();
-		void pendingProfile.promise.catch(() => {});
-		const reuseProfile = Promise.withResolvers<{
-			spawns: string;
-			profileDigest: string;
-			enableMCP: false;
-			enableLsp: false;
-		}>();
-		void reuseProfile.promise.catch(() => {});
-		const livePrompt = Promise.withResolvers<boolean>();
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const liveExecution = admittedExecution(mock.model, modelRegistry);
+		const retainedExecution = admittedExecution(mock.model, modelRegistry);
+		const reuseExecution = admittedExecution(mock.model, modelRegistry);
+		let pendingReject: ((error: Error) => void) | undefined;
+		let reuseReject: ((error: Error) => void) | undefined;
 		let pendingResolverEntered = false;
 		let reuseResolverEntered = false;
-		const runtime = await EngineRuntime.create({
-			databasePath: path.join(tempDir, "engine.sqlite"),
-			dispatchPrompt: async session =>
-				session.getAgentId() === engineAgentId("agent-live") ? await livePrompt.promise : true,
-			sessionDefaults: {
-				cwd,
-				agentDir,
-				settings: await Settings.loadReadOnly({ cwd, agentDir }),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				modelRegistry,
-			},
-		});
-		const errors: Error[] = [];
-		const adapter = await NatsEngineAdapter.connect({
-			runtime,
-			deviceId: "device-1",
-			engineId: "engine-1",
-			servers: broker.url,
-			authorizeCommand: () => {},
-			authorizeMessage: () => {},
-			resolveLaunchProfile: command => {
-				if (command.agentInstanceId === "agent-failed") {
+		let pendingGateResolve: (() => void) | undefined;
+		let reuseGateResolve: (() => void) | undefined;
+		const pendingGate = new Promise<void>(resolve => { pendingGateResolve = resolve; });
+		const reuseGate = new Promise<void>(resolve => { reuseGateResolve = resolve; });
+		const pendingFail = new Promise<void>((_resolve, reject) => { pendingReject = reject; });
+		const reuseFail = new Promise<void>((_resolve, reject) => { reuseReject = reject; });
+		const plainExecution = admittedExecution(mock.model, modelRegistry);
+		// agent-failed / agent-unsafe-error / retained-rejected resolve through a refusing typed resolver.
+		const refusingBase = plainExecution.optionsFor({ deviceId: "device-1" });
+		const refusingResolve = refusingBase.resolveExecution!;
+		const refusedExecution = admittedExecution(mock.model, modelRegistry);
+		refusedExecution.optionsFor = () => ({
+			...refusedExecution.optionsFor({ deviceId: "device-1" }),
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				if (attempt.attemptId === "attempt-failed") {
 					const databaseError = new Error(
 						"Failed to open auth database at 'C:/Users/private/.omp/agent/agent.db': database is locked",
 					);
@@ -1181,28 +1166,49 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						),
 					});
 				}
-				if (command.agentInstanceId === "agent-unsafe-error") {
+				if (attempt.attemptId === "attempt-unsafe-error")
 					throw new Error("custom startup failed with raw prompt SUPER_SECRET_PROMPT");
-				}
-				if (command.agentInstanceId === "agent-live") {
-					return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
-				}
-				if (command.agentInstanceId === "agent-retained") {
-					if (command.commandId === "command-retained-first") {
-						return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
-					}
+				if (attempt.attemptId === "attempt-retained-rejected")
 					throw new Error("replacement profile is unavailable");
+				if (attempt.attemptId === "attempt-pending") {
+					pendingResolverEntered = true;
+					await Promise.race([pendingGate, pendingFail]);
+					return refusingResolve(config, frozen, attempt, resolverCwd, signal);
 				}
-				if (command.agentInstanceId === "agent-reuse") {
-					if (command.commandId === "command-reuse-first") {
-						return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
-					}
+				if (attempt.attemptId === "attempt-reuse-pending") {
 					reuseResolverEntered = true;
-					return reuseProfile.promise;
+					await Promise.race([reuseGate, reuseFail]);
+					return refusingResolve(config, frozen, attempt, resolverCwd, signal);
 				}
-				pendingResolverEntered = true;
-				return pendingProfile.promise;
+				return refusingResolve(config, frozen, attempt, resolverCwd, signal);
 			},
+		});
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async session =>
+				session.getAgentId() === engineAgentId("agent-live") ? await livePrompt.promise : true,
+			...liveExecution.optionsFor({ deviceId: "device-1", sessionDefaults: {
+				cwd,
+				agentDir,
+				settings: await Settings.loadReadOnly({ cwd, agentDir }),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+			} }),
+		});
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
 			onError: error => errors.push(error),
 		});
 		const client = await connect({ servers: broker.url });
@@ -1241,7 +1247,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				},
 			});
 
-			const failed = startCommand(runtime.engineGeneration, "agent-failed", "failed", cwd);
+			const failed = startCommand(runtime.engineGeneration, "agent-failed", "failed", cwd, refusedExecution);
 			await js.publish(adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
 				msgID: failed.commandId,
 			});
@@ -1273,7 +1279,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				payload: { code: "launch_failed", sessionState: "absent" },
 			});
 
-			const retainedFirst = startCommand(runtime.engineGeneration, "agent-retained", "retained-first", cwd);
+			const retainedFirst = startCommand(runtime.engineGeneration, "agent-retained", "retained-first", cwd, retainedExecution);
 			await js.publish(
 				adapter.commandSubject(retainedFirst.agentInstanceId, "start"),
 				JSON.stringify(retainedFirst),
@@ -1283,7 +1289,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const retainedHistory = (agentInstanceId: string) =>
 				runtime.sessionHistoryPage(agentInstanceId, "grimoire://tasks/grimoire/nats/agents/retained");
 			const retainedSessionId = (await retainedHistory(retainedFirst.agentInstanceId)).sessionId;
-			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd);
+			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd, refusedExecution);
 			await js.publish(
 				adapter.commandSubject(retainedRejected.agentInstanceId, "start"),
 				JSON.stringify(retainedRejected),
@@ -1298,7 +1304,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect((retainedRejectedEvent?.payload as Record<string, unknown> | undefined)?.sessionState).toBeUndefined();
 			expect((await retainedHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
 
-			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd);
+			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd, refusedExecution);
 			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
 				msgID: unsafe.commandId,
 			});
@@ -1311,7 +1317,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(publicUnsafeFailure).toContain("Error (diagnostic ");
 			expect(publicUnsafeFailure).not.toContain("SUPER_SECRET_PROMPT");
 
-			const pending = startCommand(runtime.engineGeneration, "agent-pending", "pending", cwd);
+			const pending = startCommand(runtime.engineGeneration, "agent-pending", "pending", cwd, refusedExecution);
 			await js.publish(adapter.commandSubject(pending.agentInstanceId, "start"), JSON.stringify(pending), {
 				msgID: pending.commandId,
 			});
@@ -1341,7 +1347,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						(event.payload as Record<string, unknown>).code === "cancelled",
 				),
 			);
-			pendingProfile.reject(new Error("late profile resolution must not revive the Attempt"));
+			pendingReject?.(new Error("late profile resolution must not revive the Attempt"));
 			await waitFor(async () => {
 				const admission = await runtime.store.admitCommand(engineCommandIdentity(cancel), runtime.engineGeneration);
 				return admission.status === "replay";
@@ -1356,12 +1362,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 			expect(await runtime.store.getAttempt(pending.attemptId!)).toBeUndefined();
 
-			const reuseFirst = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-first", cwd);
+			const reuseFirst = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-first", cwd, reuseExecution);
 			await js.publish(adapter.commandSubject(reuseFirst.agentInstanceId, "start"), JSON.stringify(reuseFirst), {
 				msgID: reuseFirst.commandId,
 			});
 			await waitFor(async () => (await runtime.store.getAttempt(reuseFirst.attemptId!))?.state === "completed");
-			const reusePending = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-pending", cwd);
+			const reusePending = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-pending", cwd, refusedExecution);
 			await js.publish(adapter.commandSubject(reusePending.agentInstanceId, "start"), JSON.stringify(reusePending), {
 				msgID: reusePending.commandId,
 			});
@@ -1390,10 +1396,10 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				intentRevision: 1,
 				intentCommandId: reuseCancel.commandId,
 			});
-			reuseProfile.reject(new Error("late reused profile must not revive the Attempt"));
+			reuseReject?.(new Error("late reused profile must not revive the Attempt"));
 			expect(await runtime.store.getAttempt(reusePending.attemptId!)).toBeUndefined();
 
-			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd);
+			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd, liveExecution);
 			await js.publish(adapter.commandSubject(live.agentInstanceId, "start"), JSON.stringify(live), {
 				msgID: live.commandId,
 			});
@@ -1431,7 +1437,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			retainedSubscription.unsubscribe();
 		} finally {
 			livePrompt.resolve(true);
-			reuseProfile.reject(new Error("test cleanup"));
+			reuseReject?.(new Error("test cleanup"));
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();
@@ -1447,21 +1453,36 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const databasePath = path.join(tempDir, "engine.sqlite");
 		const cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd);
-		const firstRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
-		const oldStart = startCommand(firstRuntime.engineGeneration, "agent-upgrade", "upgrade", cwd);
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const typedOptions = execution.optionsFor({ deviceId: "device-1" });
+		let resolverCalls = 0;
+		const countingExecution: typeof execution = {
+			...execution,
+			optionsFor: (runtimeOptions) => {
+				const base = execution.optionsFor(runtimeOptions);
+				return { ...base, resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+					resolverCalls++;
+					return base.resolveExecution(config, frozen, attempt, resolverCwd, signal);
+				} };
+			},
+		};
+		const firstRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true, ...typedOptions });
+		const oldStart = startCommand(firstRuntime.engineGeneration, "agent-upgrade", "upgrade", cwd, countingExecution);
 		expect(
 			await firstRuntime.store.admitCommand(engineCommandIdentity(oldStart), firstRuntime.engineGeneration),
 		).toEqual({ status: "claimed" });
 		await firstRuntime.dispose();
 
-		const secondRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
+		const secondRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true, ...typedOptions });
 		expect(secondRuntime.engineGeneration).toBe(oldStart.engineGeneration + 1);
 		expect(
 			(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).events.filter(
 				event => event.causationCommandId === oldStart.commandId && event.kind === "rejected",
 			),
 		).toMatchObject([{ payload: { code: "interrupted", requiresExplicitContinue: true } }]);
-		let resolverCalls = 0;
 		const errors: Error[] = [];
 		const adapter = await NatsEngineAdapter.connect({
 			runtime: secondRuntime,
@@ -1470,10 +1491,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => {
-				resolverCalls++;
-				return { spawns: "", profileDigest: "leaf-profile-v1" };
-			},
 			onError: error => errors.push(error),
 		});
 		const client = await connect({ servers: broker.url });
@@ -1563,7 +1580,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
 			commandAttempts: 2,
 		});
 		const client = await connect({ servers: broker.url });
@@ -1649,7 +1665,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
 			onError: () => {},
 			commandAttempts: 3,
 		});
@@ -1725,7 +1740,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "leaf-profile-v1" }),
 			commandAttempts: 2,
 		});
 		const client = await connect({ servers: broker.url });
@@ -1778,7 +1792,18 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			admissions++;
 			throw new Error("ENOENT: admission fixture storage is offline");
 		});
-		let resolverCalls = 0;
+		const resolverCalls = { count: 0 };
+		const countingExecution = {
+			...execution,
+			optionsFor: (runtimeOptions: Parameters<typeof execution.optionsFor>[0]) => {
+				const base = execution.optionsFor(runtimeOptions);
+				return { ...base, resolveExecution: async (config: unknown, frozen: readonly unknown[], attempt: unknown, resolverCwd: string, signal?: AbortSignal) => {
+					resolverCalls.count++;
+					return (base.resolveExecution as NonNullable<typeof base.resolveExecution>)(
+						config as never, frozen as never, attempt as never, resolverCwd, signal);
+				} } as typeof base;
+			},
+		};
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -1786,10 +1811,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => {
-				resolverCalls++;
-				return { spawns: "", profileDigest: "leaf-profile-v1" };
-			},
 			commandAttempts: 2,
 		});
 		const client = await connect({ servers: broker.url });
@@ -1801,7 +1822,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
 				return info.num_pending === 0 && info.num_ack_pending === 0;
 			};
-			const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd);
+			const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd, execution);
 			await js.publish(adapter.commandSubject(start.agentInstanceId, "start"), JSON.stringify(start), {
 				msgID: "delivery-1",
 			});
@@ -1826,7 +1851,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				async () => (await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer)).delivered.stream_seq >= 2,
 			);
 			await waitFor(settled);
-			expect(resolverCalls).toBe(0);
+			expect(resolverCalls.count).toBe(0);
 			expect(await runtime.store.getAttempt(start.attemptId!)).toBeUndefined();
 			expect(await admit(engineCommandIdentity(start), runtime.engineGeneration)).toEqual(receipt);
 		} finally {
@@ -1845,8 +1870,10 @@ function startCommand(
 	agentInstanceId: string,
 	suffix: string,
 	cwd: string,
+	execution?: AdmittedExecutionFixture,
 ): EngineCommandEnvelope {
-	return {
+	const agentInstanceRef = `grimoire://tasks/grimoire/nats-test/agents/${agentInstanceId}`;
+	const command: EngineCommandEnvelope = {
 		schema: "grimoire.engine.command.v1",
 		commandId: `command-${suffix}`,
 		op: "start",
@@ -1854,14 +1881,25 @@ function startCommand(
 		engineId: "engine-1",
 		engineGeneration,
 		agentInstanceId,
-		agentInstanceRef: `grimoire://tasks/grimoire/nats-test/agents/${agentInstanceId}`,
-		bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/nats-test/agents/${agentInstanceId}`),
+		agentInstanceRef,
+		bindingSnapshot: semanticBinding(agentInstanceRef),
 		executionId: `execution-${suffix}`,
 		attemptId: `attempt-${suffix}`,
 		authorityGeneration: 1,
+		principalId: "owner",
 		issuedAt: Date.now(),
-		payload: { cwd, input: suffix.toUpperCase(), profileDigest: "leaf-profile-v1" },
+		payload: execution ? {
+			cwd, input: suffix.toUpperCase(),
+			executionConfiguration: execution.config,
+			dispatchRef: execution.dispatchRef,
+			dispatchHash: execution.dispatchHash,
+			executionKind: "ordinary",
+			specialRef: null,
+			originReceiptId: "origin:command-" + suffix,
+		} : { cwd, input: suffix.toUpperCase() },
 	};
+	if (execution) execution.captureCommand(command);
+	return command;
 }
 
 async function startNatsServer(root: string) {
