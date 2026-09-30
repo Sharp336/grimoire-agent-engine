@@ -3499,6 +3499,7 @@ export function createInitialResponsesAssistantMessage(api: Api, provider: strin
 		provider,
 		model: modelId,
 		usage: {
+			unavailable: true,
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -3693,7 +3694,7 @@ export function populateResponsesUsageFromResponse(
 		| null
 		| undefined,
 ): void {
-	if (!usage) return;
+	if (!usage || typeof usage.input_tokens !== "number" || typeof usage.output_tokens !== "number") return;
 	const details = usage.input_tokens_details;
 	const outputDetails = usage.output_tokens_details;
 	const reportedInputTokens = usage.input_tokens ?? 0;

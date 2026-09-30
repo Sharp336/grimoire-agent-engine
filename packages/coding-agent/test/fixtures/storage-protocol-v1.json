@@ -5234,7 +5234,12 @@
         "principal_id": { "type": "string", "minLength": 1 },
         "device_id": { "type": "string", "minLength": 1 },
         "account_ref": { "type": "string", "minLength": 1 },
-        "module_path": { "type": ["string", "null"] },
+        "module_path": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        },
         "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "updated_at": { "type": "string", "minLength": 1 }
       }

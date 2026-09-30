@@ -302,7 +302,12 @@
         "principalId": { "type": "string", "minLength": 1 },
         "accountRef": { "type": "string", "minLength": 1 },
         "expectedRevision": { "type": "integer", "minimum": 0 },
-        "modulePath": { "type": ["string", "null"] }
+        "modulePath": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "usageProbeBindingResult": {
@@ -311,7 +316,12 @@
       "required": ["accountRef", "modulePath", "revision"],
       "properties": {
         "accountRef": { "type": "string", "minLength": 1 },
-        "modulePath": { "type": ["string", "null"] },
+        "modulePath": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ]
+        },
         "revision": { "type": "integer", "minimum": 0 }
       }
     },
@@ -323,7 +333,12 @@
         "accountRef": { "type": "string", "minLength": 1 },
         "kind": { "enum": ["builtin", "module"] },
         "account": { "type": "object" },
-        "credential": { "type": ["object", "null"] }
+        "credential": {
+          "oneOf": [
+            { "type": "object" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "usageProbeRunResult": {
@@ -7895,21 +7910,33 @@
               ]
             },
             "provider": {
-              "type": [
-                "string",
-                "null"
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "family": {
-              "type": [
-                "string",
-                "null"
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "model": {
-              "type": [
-                "string",
-                "null"
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },

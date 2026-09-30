@@ -4,12 +4,13 @@ import * as path from "node:path";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
-import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation } from "../session/storage-protocol";
+import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
 	CandidateIdentity,
 	ChoiceTransition,
+	ExecutorChoice,
 	EngineAttemptState,
 	EngineExecutionConfiguration,
 	EngineBindingGate,
@@ -28,6 +29,7 @@ import type {
 	RoutingLimits,
 } from "./contracts";
 import { EngineBindingPendingError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
+import type { BillingPoolProposal } from "./provider-execution";
 import {
 	completeRestoreRebind,
 	type RestoreWorkspaceDescriptor,
@@ -176,6 +178,7 @@ function toolEffectPayload(effect: RocksEffect): Record<string, unknown> {
 export interface RocksTransitionOptions {
 	cause?: string;
 	terminalResult?: Record<string, unknown>;
+	actualCost?: ExecutorChoice["actual_cost"];
 	intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number };
 	startIntent?: {
 		expectedRevision?: number;
@@ -712,6 +715,32 @@ export class RocksEngineMutations {
 	async getSnapshotEpoch(): Promise<string> {
 		return String((await this.records.get("metadata", "engine")).value?.snapshot_epoch ?? "");
 	}
+	#usageProbeKey(principalId: string, deviceId: string, accountRef: string): string {
+		return `usage-probe-binding:${createHash("sha256").update(`${principalId}\0${deviceId}\0${accountRef}`).digest("hex")}`;
+	}
+	async getUsageProbeBinding(principalId: string, deviceId: string, accountRef: string) {
+		const row = (await this.records.get("metadata", this.#usageProbeKey(principalId, deviceId, accountRef), true))
+			.value as StorageUsageProbeBinding | null;
+		if (row && (row.principal_id !== principalId || row.device_id !== deviceId || row.account_ref !== accountRef))
+			throw new EngineTargetError("stale_target", "Usage binding owner differs");
+		return { accountRef, modulePath: row?.module_path ?? null, revision: row?.revision ?? 0 };
+	}
+	async setUsageProbeBinding(principalId: string, deviceId: string, accountRef: string, expectedRevision: number, modulePath: string | null) {
+		const key = this.#usageProbeKey(principalId, deviceId, accountRef);
+		return this.mutation(key, async tx => {
+			const current = await tx.get<StorageUsageProbeBinding>("metadata", key);
+			if ((current?.revision ?? 0) !== expectedRevision ||
+				(current && (current.principal_id !== principalId || current.device_id !== deviceId || current.account_ref !== accountRef)))
+				throw new EngineTargetError("stale_target", "Usage binding revision changed");
+			const revision = expectedRevision + 1;
+			await tx.put("metadata", key, {
+				subtype: "usage_probe_binding", principal_id: principalId, device_id: deviceId,
+				account_ref: accountRef, module_path: modulePath, revision, updated_at: new Date().toISOString(),
+			});
+			return { accountRef, modulePath, revision };
+		});
+	}
+
 	async getBinding(id: string): Promise<EngineBindingSnapshot | undefined> {
 		const row = (await this.records.get("binding", id)).value as unknown as RocksBinding | null;
 		return row ? bindingSnapshot(row) : undefined;
@@ -2029,6 +2058,10 @@ export class RocksEngineMutations {
 					...old,
 				};
 				Object.assign(row, { state, cause: options.cause ?? null, updated_at: Date.now() });
+				if (options.actualCost !== undefined && row.execution)
+					row.execution = { ...row.execution, executor_choice: {
+						...row.execution.executor_choice, actual_cost: options.actualCost,
+					} };
 				if (
 					(state === "completed" || state === "failed" || state === "cancelled" || state === "interrupted") &&
 					row.retry_outcome === "waiting"
@@ -2709,7 +2742,7 @@ export class RocksEngineMutations {
 					(requirement.pin.route_ref !== null && route.route_ref !== requirement.pin.route_ref))) ||
 				(!sameRoute && (requirement.fallback_mode === "none" ||
 					(requirement.fallback_mode === "same_model" && route.model_id !== choice.selected.model_id))) ||
-				(sameRoute && !route.billing_pools.some(pool => pool.pool_id === to.billing_pool_id)))
+				(!route.billing_pools.some(pool => pool.pool_id === to.billing_pool_id)))
 				throw new EngineTargetError("stale_target", "Executor route violates its frozen admission policy");
 			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
 			if (!lease) throw new EngineTargetError("stale_target", "Executor route change requires a held lease");
@@ -2735,7 +2768,7 @@ export class RocksEngineMutations {
 				dispatchHash: row.execution.dispatch_hash,
 				selected: transition.to,
 				pending: null,
-				fallback: true,
+				fallback: candidateRef(to) !== candidateRef(choice.selected),
 				phase: "loading",
 				eventSeq: 0,
 			};
@@ -2753,6 +2786,84 @@ export class RocksEngineMutations {
 				executor_route_state: JSON.stringify(state),
 			});
 			return this.append(tx, target, { kind: "executor_route_changed", payload: transition });
+		});
+	}
+	/** A billing change is one Attempt-row mutation; the held lease and its revision are never rewritten. */
+	async commitBillingPoolTransition(
+		target: EngineBindingSnapshot,
+		proposal: BillingPoolProposal,
+		toExecutionDigest: string,
+	): Promise<{ status: "applied" | "replayed" | "stale"; choice: ExecutorChoice; current: CandidateIdentity; executionDigest: string; event?: EngineEvent }> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!row?.execution || !this.sameFence(row, target) || row.state !== "running")
+				throw new EngineTargetError("stale_target", "Billing transition requires a running admitted Attempt");
+			await this.assertFence(tx, target);
+			const choice = row.execution.executor_choice;
+			const current = currentIdentity(choice);
+			const last = choice.transitions.at(-1);
+			if (last && last.reason === proposal.reason &&
+				last.from_execution_digest === proposal.from_execution_digest &&
+				last.to_execution_digest === choice.execution_digest &&
+				storageCanonicalJson(last.from) === storageCanonicalJson(proposal.from) &&
+				storageCanonicalJson(last.to) === storageCanonicalJson(proposal.to))
+				return { status: "replayed" as const, choice, current, executionDigest: choice.execution_digest };
+			if (choice.execution_digest !== proposal.from_execution_digest ||
+				storageCanonicalJson(current) !== storageCanonicalJson(proposal.from))
+				return { status: "stale" as const, choice, current, executionDigest: choice.execution_digest };
+			const to = proposal.to;
+			if ((proposal.reason !== "billing_pool_exhausted" && proposal.reason !== "billing_pool_observed") ||
+				candidateRef(current) !== candidateRef(to) || current.model_id !== to.model_id ||
+				current.account_ref !== to.account_ref ||
+				!choice.candidates.some(candidate => candidateRef(candidate) === candidateRef(to)))
+				throw new EngineTargetError("stale_target", "Billing proposal differs from the admitted route unit");
+			const command = await tx.get<RocksCommand>("command", row.command_id);
+			const wire: unknown = command?.identity.serializedCommand
+				? JSON.parse(command.identity.serializedCommand) : undefined;
+			if (!wire || typeof wire !== "object" || !("payload" in wire) ||
+				!wire.payload || typeof wire.payload !== "object" || !("executionConfiguration" in wire.payload))
+				throw new EngineTargetError("stale_target", "Frozen Start execution configuration is missing");
+			validateRuntimeValue("engineExecutionConfiguration", wire.payload.executionConfiguration);
+			const config = wire.payload.executionConfiguration as EngineExecutionConfiguration;
+			const route = config.routes.routes.find(candidate => candidateRef(candidate) === candidateRef(to));
+			if (!route || route.model_id !== to.model_id ||
+				!route.billing_pools.some(pool => pool.pool_id === to.billing_pool_id))
+				throw new EngineTargetError("stale_target", "Billing pool is not in the frozen route");
+			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+			if (!lease || row.execution.lease_id !== leaseId(target.attemptId) ||
+				lease.attempt_id !== target.attemptId || lease.engine_generation !== target.engineGeneration ||
+				lease.expires_at <= Date.now() || lease.resources.account_ref !== current.account_ref)
+				throw new EngineTargetError("stale_target", "Billing transition requires the same held lease");
+			const seq = choice.transitions.length + 1;
+			const transition: ChoiceTransition = {
+				seq,
+				event_id: `${target.attemptId}:route:${seq}`,
+				from: current,
+				to: candidateIdentity(to),
+				reason: proposal.reason,
+				at: new Date().toISOString(),
+				lease_revision: lease.lease_revision,
+				from_execution_digest: choice.execution_digest,
+				to_execution_digest: toExecutionDigest,
+			};
+			const state: ExecutorRouteState = {
+				dispatchHash: row.execution.dispatch_hash,
+				selected: transition.to,
+				pending: null,
+				fallback: candidateRef(to) !== candidateRef(choice.selected),
+				phase: "loading",
+				eventSeq: 0,
+			};
+			const updatedChoice: ExecutorChoice = { ...choice, execution_digest: toExecutionDigest,
+				transitions: [...choice.transitions, transition] };
+			await tx.put("attempt", target.attemptId, {
+				...row,
+				execution: { ...row.execution, executor_choice: updatedChoice },
+				executor_route_state: JSON.stringify(state),
+			});
+			const event = await this.append(tx, target, { kind: "executor_route_changed", payload: transition });
+			return { status: "applied" as const, choice: updatedChoice, current: transition.to,
+				executionDigest: toExecutionDigest, event };
 		});
 	}
 	/** No physical write until commitAttemptTransition stages this same selection and the Attempt together. */

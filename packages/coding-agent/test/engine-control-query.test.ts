@@ -60,6 +60,48 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		tempDir = undefined;
 	});
 
+	it("persists owner-device usage binding CAS across Engine restart", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-usage-binding-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const params = { principalId: "owner", accountRef: "gctx:23456789abcdefgh" };
+		const modulePath = path.join(tempDir, "probe.exe");
+		fs.writeFileSync(modulePath, "");
+		for (const pass of [0, 1]) {
+			const runtime = await EngineRuntime.create({ databasePath });
+			const server = await startEngineControlQueryServer({
+				runtimeDir: tempDir, runtime, deviceId: "device-one", engineId: "engine-one",
+				resolveLaunchProfile: async () => { throw new Error("Probe binding must not launch an Agent"); },
+			});
+			const client = new EngineControlQueryClient(tempDir);
+			try {
+				expect(await client.request("usage_probe_binding.get", params)).toEqual({
+					accountRef: params.accountRef, modulePath: pass ? modulePath : null, revision: pass,
+				});
+				if (!pass) {
+					expect(await client.request("usage_probe_binding.set", {
+						...params, expectedRevision: 0, modulePath,
+					})).toEqual({ accountRef: params.accountRef, modulePath, revision: 1 });
+					expect(await client.request("usage_probe_binding.set", {
+						...params, expectedRevision: 0, modulePath: null,
+					}).then(() => null, (error: unknown) => error)).toMatchObject({ code: "stale_target" });
+					expect(await client.request("usage_probe_binding.set", {
+						...params, expectedRevision: 1, modulePath: path.join(tempDir, "missing.exe"),
+					}).then(() => null, (error: unknown) => error)).toMatchObject({ code: "invalid_request" });
+					expect(await client.request("usage_probe.run", {
+						...params, kind: "module", bindingRevision: 0,
+						account: { provider_id: "openai-codex", external_id: null, pools: [], quota_windows: [] },
+						credential: null,
+					})).toEqual({ status: "probe_unconfigured", observations: [] });
+					expect(await client.request("usage_probe_binding.get", { ...params, principalId: "other" }))
+						.toEqual({ accountRef: params.accountRef, modulePath: null, revision: 0 });
+				}
+			} finally {
+				await server.close();
+				await runtime.dispose();
+			}
+		}
+	});
+
 	it("stages and removes message-owned attachment chunks through the authenticated native transport", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-upload-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });

@@ -1824,7 +1824,7 @@ const streamAnthropicOnce = (
 			api: model.api as Api,
 			provider: model.provider,
 			model: model.id,
-			usage: createEmptyUsage(),
+			usage: { ...createEmptyUsage(), unavailable: true },
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
@@ -2076,6 +2076,7 @@ const streamAnthropicOnce = (
 				output.usage.output = wireUsage.output_tokens ?? 0;
 				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
 				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
+				delete output.usage.unavailable;
 				applyAnthropicUsageExtras(output.usage, wireUsage);
 				output.usage.totalTokens =
 					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
@@ -2234,6 +2235,7 @@ const streamAnthropicOnce = (
 					await notifyProviderResponse(options, response, model, requestId);
 					let sawEvent = false;
 					let sawMessageStart = false;
+					let sawStartUsage = false;
 					let sawTerminalEnvelope = false;
 					let sawMessageStop = false;
 					// Set when a duplicate message_start splices a second envelope onto
@@ -2310,6 +2312,7 @@ const streamAnthropicOnce = (
 							const startMessage = event.message;
 							if (startMessage?.id) output.responseId = startMessage.id;
 							const startUsage = startMessage?.usage;
+							sawStartUsage = typeof startUsage?.input_tokens === "number";
 							if (startUsage) {
 								applyAnthropicUsageExtras(output.usage, startUsage);
 								output.usage.input = startUsage.input_tokens || 0;
@@ -2639,6 +2642,8 @@ const streamAnthropicOnce = (
 								if (deltaUsage.cache_creation_input_tokens != null) {
 									output.usage.cacheWrite = deltaUsage.cache_creation_input_tokens;
 								}
+								if (sawStartUsage && typeof deltaUsage.output_tokens === "number")
+									delete output.usage.unavailable;
 								applyAnthropicUsageExtras(output.usage, deltaUsage);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;

@@ -112,6 +112,7 @@ import {
 } from "./contracts";
 import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
+import type { BillingPoolProposal } from "./provider-execution";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
 import { readNativeHeader } from "./rocks-runtime-history";
@@ -320,6 +321,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	executorRouteState?: ExecutorRouteState;
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
+	/** Final provider usage per native assistant response; null means accounting was unavailable. */
+	measuredUsage: Map<string, { input: number; output: number; cached: number } | null>;
 	lastAssistantMessageId?: string;
 	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
@@ -723,7 +726,8 @@ export class EngineRuntime {
 		const config = binding.execution.config;
 		const current = currentIdentity(binding.execution.choice);
 		const candidate = binding.execution.frozen.find(route =>
-			candidateRef(route) === candidateRef(current));
+			candidateRef(route) === candidateRef(current) &&
+			route.billing_pools.some(pool => pool.pool_id === current.billing_pool_id));
 		if (!candidate || (config.dispatch.requirement.require_trusted_provider && !candidate.execution.trusted))
 			throw new EngineTargetError("stale_target", "Current executor is outside the admitted frozen choices");
 		const request: AdmissionRequest = {
@@ -734,7 +738,8 @@ export class EngineRuntime {
 			authContextId: origin.authContextId, bindingSnapshot: binding.bindingSnapshot,
 			executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
 			rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
-			candidates: [candidate], callerAttemptId: null, frozen: true,
+			candidates: [{ ...candidate, billing_pool_id: current.billing_pool_id,
+				billing_pool_basis: current.billing_pool_basis }], callerAttemptId: null, frozen: true,
 		};
 		if (preview) {
 			const outcome = await this.store.previewRouting(request);
@@ -3002,10 +3007,12 @@ export class EngineRuntime {
 									candidate.model_id !== parent.execution.choice.selected.model_id) ||
 								(requirement.require_trusted_provider && !candidate.execution.trusted))
 								return false;
-							await parent.execution.verifyCandidate(index, parent.execution.choice.execution_digest, signal);
+							const billing = await parent.execution.verifyCandidate(index, parent.execution.choice.execution_digest, signal);
+							if (!candidate.billing_pools.some(pool => pool.pool_id === billing.billing_pool_id)) return false;
 							const updated = {
 								...parent.execution.choice.selected,
 								...candidateIdentity(candidate),
+								...billing,
 								order_match: candidate.order_match,
 							};
 							const digest = executionHash({
@@ -3024,12 +3031,13 @@ export class EngineRuntime {
 								candidateIdentity(candidate),
 							);
 							const changed = await this.store.commitExecutorRoute(
-								this.#snapshot(parent), candidateIdentity(candidate), "route_fallback",
+								this.#snapshot(parent), candidateIdentity(updated), "route_fallback",
 								digest, parent.execution.config.routingLimits,
 								delta.map(rule => ({ ref: rule.ref, revision: rule.revision, content_hash: rule.content_hash })),
 							);
 							if (!changed) return false;
 							parent.execution.activateCandidate(index, digest);
+							parent.executionDigest = digest;
 							parent.execution.choice = {
 								...parent.execution.choice,
 								execution_digest: digest,
@@ -3209,10 +3217,12 @@ export class EngineRuntime {
 				childLaunches: new Set(),
 				modelCallSequence: 0,
 				assistantMessageSequence: 0,
+				measuredUsage: new Map(),
 				activeModelCalls: new Set(),
 				directUploads: new Map(),
 			};
 			liveBinding = binding;
+			resolved.setBillingPoolChanged((proposal, signal) => this.#reconcileBillingPool(binding, proposal, signal));
 			this.#bindMessagePersistence(binding);
 			created.session.setAssistantMessagePersistence((message, event) =>
 				this.#recordAssistantDelta(binding, message.timestamp, event),
@@ -4425,6 +4435,35 @@ export class EngineRuntime {
 		binding.pauseProgress = Promise.withResolvers<void>();
 	}
 
+	async #reconcileBillingPool(binding: LiveBinding, proposal: BillingPoolProposal, signal?: AbortSignal): Promise<void> {
+		signal?.throwIfAborted();
+		if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptState !== "running")
+			throw new EngineTargetError("stale_target", "Billing transition requires the current running Attempt");
+		const choice = binding.execution.choice;
+		const current = binding.execution.frozen.find(route =>
+			candidateRef(route) === candidateRef(currentIdentity(choice)));
+		if (!current) throw new EngineTargetError("stale_target", "Billing route is outside the frozen choices");
+		const selected = { ...choice.selected, ...candidateIdentity(proposal.to), order_match: current.order_match };
+		const digest = executionHash({
+			schema: "artel.execution.v2",
+			dispatchHash: binding.dispatchHash,
+			executionConfiguration: binding.execution.config,
+			record_revisions: binding.execution.config.record_revisions,
+			scope_revision: binding.execution.config.scope_revision,
+			candidates: choice.candidates,
+			selected,
+		});
+		const result = await this.store.commitBillingPoolTransition(this.#snapshot(binding), proposal, digest);
+		if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptState !== "running")
+			throw new EngineTargetError("stale_target", "Billing transition lost the admitted Attempt");
+		const index = binding.execution.frozen.findIndex(route => candidateRef(route) === candidateRef(result.current));
+		if (index < 0) throw new EngineTargetError("stale_target", "Current billing route is outside the frozen choices");
+		binding.execution.choice = result.choice;
+		binding.executionDigest = result.executionDigest;
+		binding.execution.activateCandidate(index, result.executionDigest);
+		if (result.event) this.#notifyEvents([result.event]);
+	}
+
 	async #admitEffect<T>(binding: LiveBinding, work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
 		for (;;) {
 			signal?.throwIfAborted();
@@ -4810,6 +4849,7 @@ export class EngineRuntime {
 							cause,
 							expectedStates: [expectedState],
 							transcriptCheckpoint,
+							actualCost: this.#actualCost(binding),
 							...(state === "completed"
 								? { terminalResult: this.#completionPayload(binding, attemptMessageStart, true) }
 								: {}),
@@ -5131,6 +5171,34 @@ export class EngineRuntime {
 		});
 	}
 
+	#actualCost(binding: LiveBinding): ExecutorChoice["actual_cost"] {
+		if (binding.measuredUsage.size === 0) return null;
+		let input = 0;
+		let output = 0;
+		let cached = 0;
+		let complete = true;
+		for (const usage of binding.measuredUsage.values()) {
+			if (!usage) {
+				complete = false;
+				break;
+			}
+			input += usage.input;
+			output += usage.output;
+			cached += usage.cached;
+		}
+		if (!Number.isSafeInteger(input) || !Number.isSafeInteger(output) || !Number.isSafeInteger(cached))
+			complete = false;
+		return {
+			input_tokens: complete ? input : null,
+			output_tokens: complete ? output : null,
+			cached_input_tokens: complete ? cached : null,
+			currency: "USD",
+			amount: null,
+			source: complete ? "provider_response" : "provider_usage_unavailable",
+			observed_at: new Date().toISOString(),
+		};
+	}
+
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
 		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, message.timestamp);
 		if (state.attemptId !== binding.attemptId || state.settled) return;
@@ -5183,6 +5251,13 @@ export class EngineRuntime {
 		state.text = fullText.slice(0, MAX_ASSISTANT_FINAL_CHARS);
 		state.textTruncated = fullText.length > MAX_ASSISTANT_FINAL_CHARS;
 		state.settled = true;
+		const usage = message.usage;
+		const counts = [usage.input, usage.output, usage.cacheRead, usage.cacheWrite];
+		binding.measuredUsage.set(state.assistantMessageId,
+			usage.unavailable || counts.some(value => !Number.isSafeInteger(value) || value < 0)
+				? null
+				: { input: usage.input + usage.cacheRead + usage.cacheWrite,
+					output: usage.output, cached: usage.cacheRead });
 		binding.lastAssistantMessageId = state.assistantMessageId;
 		binding.session.rememberMessageIdentity(message, {
 			assistantMessageId: state.assistantMessageId,
@@ -5238,13 +5313,13 @@ export class EngineRuntime {
 			candidate.provider === provider && candidate.modelId === modelId);
 		if (!route) return;
 		const previous = binding.executorRouteState;
-		const selected = candidateIdentity(binding.execution.choice.transitions.at(-1)?.to ??
-			binding.execution.choice.selected);
+		const selected = currentIdentity(binding.execution.choice);
+		const projected = candidateRef(route) === candidateRef(selected) ? selected : candidateIdentity(route);
 		const state: ExecutorRouteState = {
 			dispatchHash: binding.dispatchHash,
-			selected: phase === "active" ? candidateIdentity(route) : selected,
-			pending: phase === "loading" ? candidateIdentity(route) : null,
-			fallback: candidateRef(route) !== candidateRef(binding.execution.choice.selected),
+			selected: phase === "active" ? projected : selected,
+			pending: phase === "loading" ? projected : null,
+			fallback: candidateRef(projected) !== candidateRef(binding.execution.choice.selected),
 			phase,
 			eventSeq: previous?.eventSeq ?? 0,
 		};

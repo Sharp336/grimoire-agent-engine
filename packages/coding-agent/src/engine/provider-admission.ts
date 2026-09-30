@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-utils/latency-audit";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
-import type { ProviderExecutionIdentity } from "./provider-execution";
+import { ProviderExecutionError, parseBillingPoolProposal, type BillingPoolProposal, type ProviderExecutionIdentity } from "./provider-execution";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -84,6 +84,7 @@ interface ProviderAdmissionDecision {
 	executionPin?: string;
 	status?: string;
 	reason?: string;
+	billing?: unknown;
 }
 
 interface ProviderObservationContext {
@@ -168,9 +169,12 @@ export class ProviderAdmissionClient {
 		authStorage: AuthStorage,
 		baseUrl: string,
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[] = [],
+		localAccountId?: string,
+		onBillingPoolChanged?: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>,
 	): ProviderRequestHook {
 		return {
-			wrapFetch: (model, fetch) => this.#wrapFetch(identity, authStorage, baseUrl, apiKeyRoutes, model, fetch),
+			wrapFetch: (model, fetch) =>
+				this.#wrapFetch(identity, authStorage, baseUrl, apiKeyRoutes, localAccountId, onBillingPoolChanged, model, fetch),
 		};
 	}
 
@@ -179,71 +183,79 @@ export class ProviderAdmissionClient {
 		authStorage: AuthStorage,
 		baseUrl: string,
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[],
+		localAccountId: string | undefined,
+		onBillingPoolChanged: ((proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>) | undefined,
 		model: Model,
 		fetch: Fetch,
 	): Fetch {
 		return async (input, init) => {
 			const apiKeyRoute = apiKeyRoutes.find(route => matchesApiKeyRoute(model, route));
-			if (!identity || model.provider !== identity.providerId) {
-				if (apiKeyRoute) return await this.#observedFetch(apiKeyRoute, model, fetch, input, init);
-				throw new ProviderAdmissionError(
-					"provider_identity_mismatch",
-					"The provider request does not match the admitted account",
-				);
-			}
+			const selected = apiKeyRoute ?? (identity && model.provider === identity.providerId ? identity : undefined);
+			if (!selected) throw new ProviderAdmissionError(
+				"provider_identity_mismatch", "The provider request does not match the admitted account");
 			const signal = init?.signal ?? undefined;
-			const admissionSignal = signal
-				? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
-				: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
-			let reports: UsageReport[] | null;
-			markProviderLatency("usage_refresh_start");
-			try {
-				await raceWithSignal(
-					authStorage.invalidateUsageCache(identity.providerId, admissionSignal),
-					admissionSignal,
-				);
-				reports = await raceWithSignal(
-					authStorage.fetchUsageReports({
+			let report: UsageReport | undefined;
+			if (selected === identity && localAccountId) {
+				const admissionSignal = signal
+					? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
+					: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
+				markProviderLatency("usage_refresh_start");
+				try {
+					await raceWithSignal(authStorage.invalidateUsageCache(identity.providerId, admissionSignal), admissionSignal);
+					const reports = await raceWithSignal(authStorage.fetchUsageReports({
 						baseUrlResolver: provider => (provider === identity.providerId ? baseUrl : undefined),
 						signal: admissionSignal,
-					}),
-					admissionSignal,
-				);
-			} catch (error) {
-				if (signal?.aborted) throw error;
-				throw new ProviderAdmissionError(
-					"provider_usage_unavailable",
-					"Fresh usage for the selected provider account is unavailable",
-				);
+					}), admissionSignal);
+					report = selectExactUsageReport(reports, identity, localAccountId);
+				} catch (error) {
+					if (signal?.aborted) throw error;
+					// Usage endpoint availability is telemetry, not a denial of an admitted effect.
+				}
+				markProviderLatency("usage_refresh_done");
 			}
-			const report = selectExactUsageReport(reports, identity);
-			markProviderLatency("usage_refresh_done");
-			if (!report) {
-				throw new ProviderAdmissionError(
-					"provider_usage_unavailable",
-					"Fresh usage for the selected provider account is unavailable",
-				);
-			}
-			const request = {
+			const before = () => ({
 				phase: "before",
-				...identity,
+				...selected,
 				modelId: model.id,
-				usageReport: withoutRaw(report),
+				...(selected === identity
+					? report ? { usageReport: withoutRaw(report) } : { usageStatus: "unavailable" }
+					: {}),
+			});
+			let reconciled = false;
+			const reask = async (proposal: BillingPoolProposal | undefined): Promise<void> => {
+				if (reconciled || !proposal || !onBillingPoolChanged)
+					throw new ProviderAdmissionError("billing_pool_changed", "Billing pool transition could not be reconciled");
+				reconciled = true;
+				await onBillingPoolChanged(proposal, signal);
+				markProviderLatency("quota_before_start");
+				const decision = await this.#post(before(), signal);
+				markProviderLatency("quota_before_done");
+				if (!decision.allowed)
+					throw new ProviderAdmissionError(decision.status || "provider_admission_denied",
+						decision.reason || "Provider quota admission was denied");
 			};
 			markProviderLatency("quota_before_start");
-			const decision = await this.#post(request, signal);
+			const decision = await this.#post(before(), signal);
 			markProviderLatency("quota_before_done");
 			if (!decision.allowed) {
-				throw new ProviderAdmissionError(
-					decision.status || "provider_admission_denied",
-					decision.reason || "Provider quota admission was denied",
-				);
+				if (decision.status === "billing_pool_changed") await reask(parseBillingPoolProposal(decision.billing));
+				else throw new ProviderAdmissionError(decision.status || "provider_admission_denied",
+					decision.reason || "Provider quota admission was denied");
 			}
 			try {
-				return await this.#observedFetch(identity, model, fetch, input, init);
+				try {
+					return await this.#observedFetch(selected, model, fetch, input, init);
+				} catch (error) {
+					if (!(error instanceof ProviderExecutionError) || error.code !== "billing_pool_changed")
+						throw error;
+					await reask(error.billing);
+					return await this.#observedFetch(selected, model, fetch, input, init);
+				}
 			} finally {
-				await authStorage.invalidateUsageCache(identity.providerId).catch(() => {});
-				void this.#post({ phase: "after", ...identity, modelId: model.id }, undefined).catch(() => {});
+				if (selected === identity) {
+					await authStorage.invalidateUsageCache(identity.providerId).catch(() => {});
+					void this.#post({ phase: "after", ...identity, modelId: model.id }, undefined).catch(() => {});
+				}
 			}
 		};
 	}
@@ -291,7 +303,10 @@ export class ProviderAdmissionClient {
 			attachLatencyResponse(observed, auditRequest);
 			return observed;
 		} catch (error) {
-			auditRequest?.audit.mark("request_wrapper_error", auditRequest.fields);
+			if (error instanceof ProviderExecutionError || error instanceof ProviderAdmissionError) {
+				if (context.physicalRequestOrdinal === ordinal) context.physicalRequestOrdinal--;
+				throw error;
+			}
 			if (init?.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			const status = httpStatusFromError(error);
 			this.#queueObservation(identity, model, context, ordinal, startedAt, {
@@ -515,11 +530,12 @@ async function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: nu
 function selectExactUsageReport(
 	reports: UsageReport[] | null,
 	identity: ProviderAdmissionIdentity,
+	localAccountId: string,
 ): UsageReport | undefined {
 	return reports?.find(report => {
 		if (report.provider !== identity.providerId) return false;
 		const metadata = report.metadata;
-		return typeof metadata?.accountId === "string" && metadata.accountId === identity.accountBindingId;
+		return typeof metadata?.accountId === "string" && metadata.accountId === localAccountId;
 	});
 }
 
