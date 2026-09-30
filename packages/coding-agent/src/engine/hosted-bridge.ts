@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import {
 	AckPolicy,
 	type ConsumerMessages,
@@ -59,6 +60,7 @@ export interface HostedGrimoireRpcOptions {
 export class HostedGrimoireRpc implements GrimoireRpc {
 	readonly #options: HostedGrimoireRpcOptions;
 	readonly #endpoint: string;
+	readonly #internalEndpoint: string;
 	#requestId = 0;
 
 	constructor(options: HostedGrimoireRpcOptions) {
@@ -80,20 +82,36 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 			endpoint.pathname = `${endpoint.pathname.replace(/\/$/, "")}/mcp`;
 		}
 		this.#endpoint = endpoint.toString();
+		const internal = new URL(endpoint);
+		internal.pathname = internal.pathname.replace(/\/mcp(?:\/[a-z0-9_-]+)?\/?$/i, "/internal/client/engine");
+		this.#internalEndpoint = internal.toString();
 	}
 
+	
 	async call(
 		tool: string,
 		arguments_: Record<string, unknown>,
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
-		const response = await fetch(this.#endpoint, {
+		const internal = tool === "grimoire_agent_engine_dispatch" || tool === "grimoire_agent_engine_bridge"
+			|| tool === "grimoire_agent_engine_child_launch" || tool === "grimoire_job_get" || tool === "grimoire_job_cancel";
+		const id = ++this.#requestId;
+		const envelope = internal
+			? { schema: "grimoire.client_internal_request.v1", operation: "engine_tool", request_id: String(id),
+				arguments: { name: tool, arguments: arguments_ } }
+			: { jsonrpc: "2.0", id, method: "tools/call", params: { name: tool, arguments: arguments_ } };
+		const attestation = internal
+			? `hmac-sha256:${createHmac("sha256", this.#options.token)
+				.update("grimoire-client-internal-request-v1\0").update(storageCanonicalJson(envelope)).digest("hex")}`
+			: undefined;
+		const response = await fetch(internal ? this.#internalEndpoint : this.#endpoint, {
 			method: "POST",
 			redirect: "error",
 			headers: {
 				Accept: "application/json, text/event-stream",
 				Authorization: `Bearer ${this.#options.token}`,
 				"Content-Type": "application/json",
+				...(attestation ? { "X-Grimoire-Client-Internal-Attestation": attestation } : {}),
 				"X-Grimoire-Client": this.#options.clientId,
 				"X-Grimoire-Client-Name": "grimoire-agent-engine",
 				"X-Grimoire-Client-Version": this.#options.clientVersion ?? "0.4.0",
@@ -106,12 +124,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 					? { "X-Grimoire-Client-Source-Signature": this.#options.sourceSignature }
 					: {}),
 			},
-			body: JSON.stringify({
-				jsonrpc: "2.0",
-				id: ++this.#requestId,
-				method: "tools/call",
-				params: { name: tool, arguments: arguments_ },
-			}),
+			body: JSON.stringify(envelope),
 			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 		});
 		if (!response.ok) throw new Error(`Grimoire Host returned HTTP ${response.status}`);
@@ -438,7 +451,7 @@ export class HostedEngineBridge {
 		let generation = 0;
 		let ownedRoute = false;
 		const belongs = (claim: BridgeClaim) =>
-			ENGINE_CONTROL_OPS.has(claim.work.command?.op ?? "") === (lane === "control");
+			Object.hasOwn(ENGINE_CONTROL_OPS, claim.work.command?.op ?? "") === (lane === "control");
 		while (this.#accepting && !this.#stopping) {
 			ownedRoute = !ownedRoute;
 			const installationId = ownedRoute ? this.#options.eventStore?.verifiedInstallationId : undefined;

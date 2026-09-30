@@ -1,5 +1,7 @@
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import type {
+	ApprovalDecision,
+	ApprovalRequest,
 	EngineAttemptState,
 	EngineBindingSnapshot,
 	EngineEvent,
@@ -32,7 +34,6 @@ export interface EngineAttemptRow {
 	retry_scheduled_at: number | null;
 	retry_outcome: EngineRetryOutcome | null;
 	retry_error: string | null;
-	profile_route_state: string | null;
 }
 
 export interface EngineAttemptRecord extends EngineAttemptRow {
@@ -187,11 +188,16 @@ export interface EngineEffectRow {
 	outcome: "completed" | "failed" | "cancelled" | "denied" | "unknown" | null;
 }
 
+/** Strict §5.1 request/decision; the outcome enum stays indexed as `state`/`decision`. */
 export interface EngineApprovalRow {
 	approval_id: string;
 	effect_id: string;
 	state: "pending" | "resolved";
-	decision: "approve" | "deny" | "cancelled" | null;
+	decision: "approve" | "approve_always" | "deny" | "cancelled" | null;
+	updated_at: number;
+	request: ApprovalRequest;
+	decision_record: ApprovalDecision | null;
+	timed_out_attempt_ids: string[];
 }
 
 export type EngineCommandAdmission =

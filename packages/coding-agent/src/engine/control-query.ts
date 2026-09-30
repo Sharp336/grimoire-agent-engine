@@ -269,7 +269,7 @@ function serveSocket(
 			try {
 				const parsed = JSON.parse(frame.toString("utf8"));
 				method = typeof parsed.method === "string" ? parsed.method : "";
-				control = parsed.method === "command" && ENGINE_CONTROL_OPS.has(parsed.params?.command?.op);
+				control = parsed.method === "command" && Object.hasOwn(ENGINE_CONTROL_OPS, parsed.params?.command?.op);
 			} catch {}
 			const lane = control ? "control" : "ordinary";
 			if (admission[lane] >= (control ? runtimeLimits.controlRpc : runtimeLimits.pendingRpc)) {
@@ -712,7 +712,11 @@ export async function runEngineCommand(
 		const message = error instanceof Error ? error.message.slice(0, 2_048) : String(error).slice(0, 2_048);
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
 			outcome: "rejected",
-			detail: { code: error instanceof EngineTargetError ? error.code : "invalid_request", message },
+			detail: {
+				...(error instanceof EngineTargetError ? error.detail : undefined),
+				code: error instanceof EngineTargetError ? error.code : "invalid_request",
+				message,
+			},
 		});
 		throw error;
 	}
@@ -736,7 +740,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"compact",
 			"release",
 			"reconcile",
-			"resolve_tool_approval",
+			"resolve_approval",
 			"resolve_input",
 		],
 		queries: [
@@ -1234,7 +1238,7 @@ export function validateEngineCommand(value: unknown): EngineCommandEnvelope {
 			"compact",
 			"release",
 			"reconcile",
-			"resolve_tool_approval",
+			"resolve_approval",
 			"resolve_input",
 		].includes(op)
 	) {

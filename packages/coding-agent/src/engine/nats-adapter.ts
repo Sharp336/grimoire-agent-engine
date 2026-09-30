@@ -50,7 +50,7 @@ export type EngineCommandOp =
 	| "compact"
 	| "release"
 	| "reconcile"
-	| "resolve_tool_approval"
+	| "resolve_approval"
 	| "resolve_input"
 	| "enqueue"
 	| "queue_edit"
@@ -304,7 +304,7 @@ export class NatsEngineAdapter {
 			"release",
 			"reconcile",
 			"resolve_input",
-			"resolve_tool_approval",
+			"resolve_approval",
 			"enqueue",
 			"queue_edit",
 			"queue_remove",
@@ -314,7 +314,7 @@ export class NatsEngineAdapter {
 		];
 		for (const control of [false, true]) {
 			const durable = `engine_${this.engineRoute}${control ? "_control" : ""}`;
-			const filters = operations.filter(op => ENGINE_CONTROL_OPS.has(op) === control).map(op => prefix + op);
+			const filters = operations.filter(op => Object.hasOwn(ENGINE_CONTROL_OPS, op) === control).map(op => prefix + op);
 			const capacity = control ? runtimeLimits.controlPendingRecords : runtimeLimits.agentPendingRecords;
 			await this.#ensureConsumer(ENGINE_COMMAND_STREAM, durable, filters, capacity);
 			const consumer = await this.#jetstream.consumers.get(ENGINE_COMMAND_STREAM, durable);
@@ -584,7 +584,11 @@ export class NatsEngineAdapter {
 								code: "command_failed" as const,
 								message: publicFailureMessage(`Command failed after ${attempt} attempts`, error),
 							};
-			const detail = { code: failure.code, message: failure.message.slice(0, 2_048) };
+			const detail = {
+				...(error instanceof EngineTargetError ? error.detail : undefined),
+				code: failure.code,
+				message: failure.message.slice(0, 2_048),
+			};
 			let recorded = !identity;
 			try {
 				if (identity && !claimed) {
@@ -857,7 +861,6 @@ export class NatsEngineAdapter {
 export async function dispatchEngineCommand(options: {
 	runtime: EngineRuntime;
 	command: EngineCommandEnvelope;
-	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
 	legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
 }): Promise<unknown> {
@@ -878,12 +881,12 @@ export async function dispatchEngineCommand(options: {
 				"compact",
 				"release",
 				"resolve_input",
-				"resolve_tool_approval",
+				"resolve_approval",
 				"enqueue",
 			].includes(command.op)
 		)
 			requiredRecordInteger(command.payload, "expectedIntentRevision");
-		if (["resolve_input", "resolve_tool_approval"].includes(command.op))
+		if (["resolve_input", "resolve_approval"].includes(command.op))
 			requiredRecordInteger(command.payload, "expectedInputRevision");
 	}
 	const context = command.payload.context;
@@ -982,12 +985,7 @@ export async function dispatchEngineCommand(options: {
 						? optionalRecordString(command.payload, "input")
 						: requiredRecordString(command.payload, "input");
 			const cwd = requiredRecordString(command.payload, "cwd");
-			const profileDigest = requiredRecordString(command.payload, "profileDigest");
 			try {
-				const profile = await options.resolveLaunchProfile(command);
-				if (profile.profileDigest !== profileDigest) {
-					throw new EngineTargetError("invalid_request", "launch profile digest mismatch");
-				}
 				await options.provisionMailbox?.(command.agentInstanceId);
 				const started = await runtime.start(
 					{
@@ -1011,7 +1009,12 @@ export async function dispatchEngineCommand(options: {
 						authorityGeneration: command.authorityGeneration,
 						cwd,
 						clientMessageId: optionalRecordString(command.payload, "clientMessageId"),
-						profileSelectionRevision: optionalRecordInteger(command.payload, "profileSelectionRevision"),
+						executionConfiguration: command.payload.executionConfiguration as EngineStartRequest["executionConfiguration"],
+						dispatchRef: requiredRecordString(command.payload, "dispatchRef"),
+						dispatchHash: requiredRecordString(command.payload, "dispatchHash"),
+						executionKind: requiredRecordString(command.payload, "executionKind") as EngineStartRequest["executionKind"],
+						specialRef: (command.payload.specialRef ?? null) as EngineStartRequest["specialRef"],
+						originReceiptId: requiredRecordString(command.payload, "originReceiptId"),
 						...(queued
 							? {
 									queueId: requiredRecordString(command.payload, "queueId"),
@@ -1024,8 +1027,7 @@ export async function dispatchEngineCommand(options: {
 									...(restoreCheckpoint ? { restoreCheckpoint } : {}),
 								}),
 						expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
-					},
-					profile,
+					} as EngineStartRequest,
 				);
 				return {
 					phase: queued ? "consumed" : "applied",
@@ -1033,6 +1035,9 @@ export async function dispatchEngineCommand(options: {
 					intentRevision: started.intentRevision ?? 0,
 					...(started.historyEdit ? { historyEdit: started.historyEdit } : {}),
 					...(started.queueId ? { queueId: started.queueId, queueRevision: started.queueRevision } : {}),
+					executorChoice: started.executorChoice,
+					executionDigest: started.executionDigest,
+					continuationDigest: started.continuationDigest,
 				};
 			} catch (error) {
 				if (error instanceof EngineTargetError || error instanceof EngineBindingPendingError) throw error;
@@ -1122,19 +1127,15 @@ export async function dispatchEngineCommand(options: {
 				optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			);
 			return;
-		case "resolve_tool_approval": {
-			const decision = requiredRecordString(command.payload, "decision");
-			if (decision !== "approve" && decision !== "deny") {
-				throw new PoisonMessageError("decision must be approve or deny");
-			}
-			await runtime.resolveToolApproval({
+		case "resolve_approval": {
+			const approvalDecision = command.payload.approvalDecision;
+			validateRuntimeValue("approvalDecision", approvalDecision);
+			await runtime.resolveApproval({
 				...boundTarget(command),
 				commandId: command.commandId,
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 				expectedInputRevision: optionalRecordInteger(command.payload, "expectedInputRevision"),
-				approvalId: requiredRecordString(command.payload, "approvalId"),
-				decision,
-				reason: optionalRecordString(command.payload, "reason"),
+				approvalDecision: approvalDecision as EngineApprovalDecision["approvalDecision"],
 			});
 			return;
 		}
@@ -1391,7 +1392,7 @@ function isCommandOp(value: unknown): value is EngineCommandOp {
 		value === "compact" ||
 		value === "release" ||
 		value === "reconcile" ||
-		value === "resolve_tool_approval" ||
+		value === "resolve_approval" ||
 		value === "resolve_input" ||
 		["enqueue", "queue_edit", "queue_remove", "queue_reorder", "queue_annotate", "queue_defer"].includes(
 			String(value),

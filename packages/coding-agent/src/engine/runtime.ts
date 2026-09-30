@@ -63,10 +63,14 @@ import { readStorageBinding, StorageClient, StorageClientError } from "../sessio
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { StructuredSubagentOutput, YieldItem } from "../task/types";
 import { arrayValuedLabels, assembleYieldResult } from "../task/yield-assembly";
-import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
+import type { EngineChildLaunchResult, EngineInboxToolRequest } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import {
+	type ApprovalAddressee,
+	type ApprovalRequest,
+	type CandidateIdentity,
+	type EngineApprovalDecision,
 	type EngineAttemptState,
 	type EngineBindingGate,
 	type EngineBindingResult,
@@ -81,12 +85,11 @@ import {
 	type EngineInboxItem,
 	type EngineInboxMutation,
 	type EngineInboxSource,
+	type EngineExecutionConfiguration,
+	type EngineExecutionRoute,
 	type EngineInboxTarget,
-	type EngineLaunchProfile,
 	type EngineMessageAttachments,
 	type EnginePeerMessage,
-	type EngineProfileRouteState,
-	type EngineProfileRoutes,
 	type EngineReconcileRequest,
 	type EngineReconcileResult,
 	type EngineRejectedCommand,
@@ -98,11 +101,15 @@ import {
 	type EngineSteerRequest,
 	type EngineTarget,
 	EngineTargetError,
-	type EngineToolApprovalDecision,
 	type EngineToolPolicy,
+	type ExecutorChoice,
+	type ExecutorRouteState,
+	type SelectedExecutor,
 	validateCommandContext,
 	validateStartRequest,
+	type WorkTarget,
 } from "./contracts";
+import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
@@ -120,6 +127,7 @@ import {
 } from "./runtime-history";
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
+import { candidateIdentity, candidateRef, frozenCandidate, LEASE_HEARTBEAT_MS } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
@@ -257,7 +265,6 @@ function terminalYield(
 }
 
 interface LiveBinding extends EngineBindingSnapshot {
-	conversationIdentityDigest: string;
 	previousInboxSessionId?: string;
 	pendingInboxSourceSessionId?: string;
 	uncommittedForkSessionFile?: string;
@@ -269,7 +276,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	steerCommandIds: string[];
 	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
-	disposeProfile: () => void;
+	disposeExecution: () => void;
 	requireYieldTool: boolean;
 	outputSchema?: unknown;
 	pauseGate: AgentPauseGate;
@@ -289,11 +296,14 @@ interface LiveBinding extends EngineBindingSnapshot {
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunches: Set<string>;
 	modelCallSequence: number;
-	profileRoutes?: EngineProfileRoutes;
-	launchProfileRef?: string;
-	launchModel?: Model;
-	launchThinkingLevel?: ConfiguredThinkingLevel;
-	profileRouteState?: EngineProfileRouteState;
+	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
+	execution: {
+		config: EngineExecutionConfiguration;
+		frozen: EngineExecutionRoute[];
+		selectors: Array<string | undefined>;
+		choice: ExecutorChoice;
+	};
+	executorRouteState?: ExecutorRouteState;
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
 	lastAssistantMessageId?: string;
@@ -375,15 +385,6 @@ interface PreparedHistoryStart {
 	result: NonNullable<EngineStartResult["historyEdit"]>;
 }
 
-export interface EngineResolvedSessionProfile {
-	options: Partial<CreateAgentSessionOptions>;
-	childProfiles?: EngineChildProfile[];
-	sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
-	orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
-	profileRoutes?: EngineProfileRoutes;
-	dispose(): void;
-}
-
 export interface EngineRuntimeOptions {
 	databasePath: string;
 	/** Reduced only by isolated acceptance fixtures; production uses the bounded defaults. */
@@ -415,13 +416,24 @@ export interface EngineRuntimeOptions {
 		kind?: HistoryDispatchKind,
 		images?: ImageContent[],
 	) => Promise<boolean>;
-	resolveSessionProfile?: (
-		profile: EngineLaunchProfile,
+	/** Device-local routing slots are keyed by this device. */
+	deviceId: string;
+	/** Materializes the admitted frozen route units; standalone runtimes without it cannot start. */
+	resolveExecution?: (
+		config: EngineExecutionConfiguration,
+		frozen: readonly EngineExecutionRoute[],
+		attempt: ExecutionAttemptIdentity,
 		cwd: string,
 		signal?: AbortSignal,
-	) => Promise<EngineResolvedSessionProfile>;
-	/** Exact non-secret digest of every external dependency resolved for this launch. */
-	resolveSessionContinuation?: (profile: EngineLaunchProfile, cwd: string) => Promise<string>;
+	) => Promise<ResolvedEngineExecution>;
+	/** Resolves the exact server-private origin receipt; an opaque id alone is never trusted. */
+	verifyOriginReceipt?: (receipt: {
+		originReceiptId: string;
+		commandId: string;
+		agentInstanceRef: string;
+		attemptId: string;
+		principalId: string;
+	}) => Promise<void>;
 	launchChild?: (request: {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
@@ -429,12 +441,11 @@ export interface EngineRuntimeOptions {
 		parentBindingSnapshot: EngineSemanticBindingSnapshot;
 		principalId?: string;
 		authorityGeneration: number;
-		profileRef: string;
-		workStepId?: string;
+		/** Explicit child target; never copied from the parent's Step. */
+		target: WorkTarget;
 		assignment: string;
 		toolCallId: string;
 		cwd: string;
-		maxSpawnDepth: number;
 		signal?: AbortSignal;
 		enrollChild(agentInstanceRef: string, attemptId?: string): Promise<void>;
 	}) => Promise<EngineChildLaunchResult>;

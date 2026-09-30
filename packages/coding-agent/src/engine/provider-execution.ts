@@ -4,14 +4,22 @@ type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const REQUEST_TIMEOUT_MS = 10_000;
 const HOSTED_BROKER_API_PATH = "/runtime/provider-broker/v1";
 
+/** Exact admitted Attempt identity; ClientHost resolves credentials only against its retained immutable Start. */
 export interface ProviderExecutionIdentity {
 	expectedPrincipalId: string;
-	profileRef: string;
-	profileContentHash: string;
+	agentInstanceRef: string;
+	attemptId: string;
+	bindingRevision: number;
+	installationId: string | null;
+	dispatchRef: string;
+	dispatchHash: string;
+	executionDigest: string;
+	originReceiptId: string;
 	routeRef: string;
 	routeContentHash: string;
 	providerAccountRef: string;
 	providerAccountContentHash: string;
+	credentialGeneration: number;
 	providerId: string;
 	modelId: string;
 }
@@ -147,13 +155,13 @@ function publicProviderExecutionMessage(code: string): string {
 		case "provider_trust_required_for_full_agent":
 			return "ProviderAccount must be explicitly trusted before it can run a full Agent session";
 		case "principal_changed":
-			return "ProviderAccount access changed with the signed-in principal; retry from the refreshed profile catalog";
+			return "ProviderAccount access changed with the signed-in principal; retry from the refreshed route roster";
 		case "provider_execution_identity_stale":
 		case "provider_execution_identity_unavailable":
 		case "provider_execution_identity_mismatch":
-			return "ProviderAccount or route changed; retry from the refreshed profile catalog";
+			return "ProviderAccount or route changed; retry from the refreshed route roster";
 		case "provider_execution_pin_invalid":
-			return "AgentProfile execution authorization expired or changed; start a new Attempt";
+			return "Admitted execution authorization expired or changed; start a new Attempt";
 		case "provider_credential_binding_mismatch":
 		case "provider_credential_unavailable":
 			return "ProviderAccount local credential is unavailable; reconnect the account on this device";

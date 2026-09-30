@@ -6,6 +6,10 @@ import { SessionManager, type SessionDurabilityCheckpoint } from "../session/ses
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
 import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation } from "../session/storage-protocol";
 import type {
+	ApprovalDecision,
+	ApprovalRequest,
+	CandidateIdentity,
+	ChoiceTransition,
 	EngineAttemptState,
 	EngineBindingGate,
 	EngineBindingCheckpoint,
@@ -18,8 +22,9 @@ import type {
 	EngineInboxSource,
 	EngineInboxTarget,
 	EngineMessageAttachments,
-	EngineProfileRouteState,
 	EngineRetryState,
+	ExecutorRouteState,
+	RoutingLimits,
 } from "./contracts";
 import { EngineBindingPendingError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
 import {
@@ -49,6 +54,7 @@ import {
 	type RocksHold,
 	type RocksIdentity,
 	type RocksInbox,
+	type RocksSlotLease,
 } from "./rocks-runtime-rows";
 import {
 	attachmentIdentity,
@@ -58,6 +64,20 @@ import {
 } from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { engineAgentInstanceId } from "./route";
+import {
+	type AdmissionOutcome,
+	type AdmissionRequest,
+	candidateIdentity,
+	candidateRef,
+	currentIdentity,
+	leaseId,
+	stageAdmission,
+	staleLeaseAttempts,
+	stageQueueCancel,
+	stageRelease,
+	stageRenew,
+	stageTransfer,
+} from "./routing-admission";
 import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
@@ -171,7 +191,8 @@ export interface RocksTransitionOptions {
 	inboxSessionId?: string;
 	inboxMutation?: EngineInboxMutation;
 	inboxMutationCausationCommandId?: string;
-	conversationIdentityDigest?: string;
+	/** Admitted execution provenance written with the Attempt row at acceptance. */
+	execution?: RocksAttempt["execution"];
 	previousInboxSessionId?: string;
 	pendingInboxSourceSessionId?: string;
 	restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
@@ -902,9 +923,6 @@ export class RocksEngineMutations {
 	async getApproval(id: string): Promise<EngineApprovalRow | undefined> {
 		return ((await this.records.get("approval", id)).value as unknown as EngineApprovalRow) ?? undefined;
 	}
-	async getBindingConversationIdentity(id: string): Promise<string | undefined> {
-		return (await this.records.get("binding", id)).value?.conversation_identity_digest as string | undefined;
-	}
 	async getStartConversationIdentity(id: string): Promise<EngineCommandIdentity | undefined> {
 		return ((await this.records.get("command", id)).value as unknown as RocksCommand | null)?.identity;
 	}
@@ -1211,7 +1229,7 @@ export class RocksEngineMutations {
 						throw new EngineTargetError("stale_target", "Control snapshot differs from the admitted Attempt");
 				}
 			}
-			const control = ENGINE_CONTROL_OPS.has(command.operation);
+			const control = Object.hasOwn(ENGINE_CONTROL_OPS, command.operation);
 			const bytes = Buffer.byteLength(command.serializedCommand ?? "");
 			await this.pendingBudget(tx, command.agentInstanceId, control, 1, bytes);
 			await this.register(tx, command);
@@ -1473,7 +1491,7 @@ export class RocksEngineMutations {
 					state: "received",
 					canonical_hash: command.canonicalHash,
 					payload_bytes: Buffer.byteLength(command.serializedCommand ?? ""),
-					control_admission: ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
+					control_admission: Object.hasOwn(ENGINE_CONTROL_OPS, command.operation) ? 1 : 0,
 					engine_generation: command.engineGeneration,
 					operation: command.operation,
 					identity: command,
@@ -1731,7 +1749,7 @@ export class RocksEngineMutations {
 			return this.append(tx, target, event);
 		});
 	}
-	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot, digest?: string): Promise<void> {
+	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot): Promise<void> {
 		const engine = await tx.get<{ generation: number }>("metadata", "engine");
 		if (engine?.generation !== binding.engineGeneration) throw new EngineAttemptConflictError(binding.attemptId);
 		await this.register(tx, {
@@ -1760,8 +1778,11 @@ export class RocksEngineMutations {
 			engine_agent_id: binding.engineAgentId,
 			session_file: binding.sessionFile ?? null,
 			binding_snapshot: binding.bindingSnapshot,
-			profile_digest: binding.profileDigest,
-			conversation_identity_digest: digest ?? old?.conversation_identity_digest ?? null,
+			execution_schema: 2,
+			execution_digest: binding.executionDigest,
+			continuation_digest: binding.continuationDigest,
+			dispatch_ref: binding.dispatchRef,
+			dispatch_hash: binding.dispatchHash,
 			state: binding.state,
 			manual_hold: binding.manualHold || (await this.holds(tx, binding.agentInstanceId)).length ? 1 : 0,
 			intent_revision: identity.intent_revision,
@@ -1866,7 +1887,7 @@ export class RocksEngineMutations {
 					else if (!guard.allowInheritedHold) await this.checkIntent(tx, binding.agentInstanceId, undefined, true);
 				}
 				if (options.restoreWorkspaceReceipt) await completeRestoreRebind(tx, options.restoreWorkspaceReceipt);
-				await this.bind(tx, binding, options.conversationIdentityDigest);
+				await this.bind(tx, binding);
 				if (options.startIntent) {
 					const command = await tx.get<RocksCommand>("command", binding.commandId);
 					const identity = await tx.get<RocksIdentity>("identity", binding.agentInstanceId);
@@ -1898,7 +1919,8 @@ export class RocksEngineMutations {
 					retry_scheduled_at: null,
 					retry_outcome: null,
 					retry_error: null,
-					profile_route_state: null,
+					execution: options.execution,
+					executor_route_state: null,
 					result_payload: null,
 					detail_revision: 0,
 					input_revision: 0,
@@ -1923,6 +1945,9 @@ export class RocksEngineMutations {
 						...(native ? { transcript_native: native } : {}),
 					});
 				await tx.put("attempt", binding.attemptId, row);
+				// §6: an actual pause or a terminal state releases the routing lease exactly once, atomically.
+				if ((state === "paused" || terminal.has(state)) && old?.state !== state)
+					await stageRelease(tx, binding.attemptId);
 				if (terminal.has(state))
 					committed.push(
 						...(await settleRuntimeMessages(
@@ -2083,7 +2108,7 @@ export class RocksEngineMutations {
 		target: EventTarget,
 		input: EngineToolEffectInput | EngineModelEffectInput,
 		model: boolean,
-		approval: boolean,
+		approval: ApprovalRequest | undefined,
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
 		return this.mutation(
@@ -2123,16 +2148,24 @@ export class RocksEngineMutations {
 				};
 				await tx.put("effect", input.effectId, row);
 				await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
-				if (approval)
-					await tx.put("approval", input.effectId, {
-						approval_id: input.effectId,
-						effect_id: input.effectId,
+				// §5.1: the request is saved with its planned effect before the requested event is emitted.
+				if (approval) {
+					if (approval.id !== input.effectId || approval.effect_id !== input.effectId)
+						throw new EngineEffectConflictError(input.effectId);
+					await tx.create("approval", approval.id, {
+						approval_id: approval.id,
+						effect_id: approval.effect_id,
 						state: "pending",
 						decision: null,
 						updated_at: Date.now(),
-					});
+						request: approval,
+						decision_record: null,
+						timed_out_attempt_ids: [],
+					} satisfies EngineApprovalRow);
+					return this.append(tx, target, { kind: "tool_approval_requested", payload: approval });
+				}
 				return this.append(tx, target, {
-					kind: approval ? "tool_approval_requested" : model ? "model_started" : "tool_started",
+					kind: model ? "model_started" : "tool_started",
 					payload: model
 						? { effectId: input.effectId, modelCallId: modelCall }
 						: {
@@ -2142,7 +2175,6 @@ export class RocksEngineMutations {
 								policy: tool?.policy,
 								inputHash: input.inputHash,
 								...(tool?.origin ? { origin: tool.origin } : {}),
-								...(approval ? { approvalId: input.effectId } : {}),
 							},
 				});
 			},
@@ -2154,21 +2186,22 @@ export class RocksEngineMutations {
 		effect: EngineToolEffectInput,
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
-		return this.effectStart(target, effect, false, false, checkpoint);
+		return this.effectStart(target, effect, false, undefined, checkpoint);
 	}
 	async startModelEffect(
 		target: EventTarget,
 		effect: EngineModelEffectInput,
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
-		return this.effectStart(target, effect, true, false, checkpoint);
+		return this.effectStart(target, effect, true, undefined, checkpoint);
 	}
 	async requestToolApproval(
 		target: EventTarget,
 		effect: EngineToolEffectInput,
+		request: ApprovalRequest,
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
-		return this.effectStart(target, effect, false, true, checkpoint);
+		return this.effectStart(target, effect, false, request, checkpoint);
 	}
 	async effectSettle(
 		tx: RuntimeTransaction,
@@ -2229,12 +2262,16 @@ export class RocksEngineMutations {
 			this.checkpointDependencies(checkpoint),
 		);
 	}
-	async resolveToolApproval(
+	/**
+	 * One decisive CAS on the requester's own approval record. The decision (or cancellation) is saved
+	 * before the planned effect is unblocked; a late decision never revives a closed request.
+	 */
+	async resolveApproval(
 		target: EventTarget,
 		id: string,
-		decision: "approve" | "deny" | "cancelled",
+		outcome: "approve" | "approve_always" | "deny" | "cancelled",
+		record: ApprovalDecision | null,
 		options: {
-			reason?: string;
 			causationCommandId?: string;
 			settleCommandId?: string;
 			expectedIntentRevision?: number;
@@ -2244,37 +2281,54 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			await this.assertFence(tx, target);
 			const approval = await tx.get<EngineApprovalRow>("approval", id);
-			const effect = await tx.get<RocksEffect>("effect", id);
-			if (approval?.state !== "pending" || effect?.state !== "planned" || !this.sameFence(effect, target))
+			if (approval?.state !== "pending") throw new EngineEffectConflictError(id);
+			const request = approval.request;
+			if (
+				record &&
+				(record.request_id !== id ||
+					record.expected_address_revision !== request.address_revision ||
+					record.expected_decision_revision !== request.decision_revision)
+			)
+				throw new EngineTargetError("stale_target", "Approval request revision changed");
+			const effect = request.kind === "tool" ? await tx.get<RocksEffect>("effect", request.effect_id) : undefined;
+			if (request.kind === "tool" && (effect?.state !== "planned" || !this.sameFence(effect, target)))
 				throw new EngineEffectConflictError(id);
-			if (decision !== "cancelled")
-				await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision, decision === "approve");
+			if (outcome !== "cancelled")
+				await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision, outcome !== "deny");
 			if (options.expectedInputRevision !== undefined) {
 				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
 				if (attempt?.input_revision !== options.expectedInputRevision)
 					throw new EngineTargetError("stale_target", "Input revision changed");
 			}
+			const status = outcome === "cancelled" ? "cancelled" : outcome === "deny" ? "denied" : "approved";
+			const resolved = { ...request, status, decision_revision: request.decision_revision + 1 } as ApprovalRequest;
 			await tx.put("approval", id, {
 				...approval,
 				state: "resolved",
-				decision,
-				reason: options.reason ?? null,
+				decision: outcome,
+				decision_record: record,
+				request: resolved,
 				updated_at: Date.now(),
-			});
+			} satisfies EngineApprovalRow);
 			const events = [
 				await this.append(tx, target, {
-					kind: "tool_approval_resolved",
+					kind: `${request.kind}_approval_resolved`,
 					causationCommandId: options.causationCommandId,
-					payload: { approvalId: id, decision, ...(options.reason ? { reason: options.reason } : {}) },
+					payload: {
+						request_id: id,
+						decision_revision: resolved.decision_revision,
+						outcome: status,
+						decided_by: record?.decided_by ?? null,
+					},
 				}),
 			];
-			if (decision === "approve") {
-				await tx.put("effect", id, { ...effect, state: "started", updated_at: Date.now() });
+			if (effect && status === "approved") {
+				await tx.put("effect", effect.effect_id, { ...effect, state: "started", updated_at: Date.now() });
 				events.push(
 					await this.append(tx, target, {
 						kind: "tool_started",
 						payload: {
-							invocationId: id,
+							invocationId: effect.effect_id,
 							toolCallId: effect.tool_call_id,
 							toolName: effect.tool_name,
 							policy: effect.policy,
@@ -2282,18 +2336,58 @@ export class RocksEngineMutations {
 						},
 					}),
 				);
-			} else
+			} else if (effect)
 				events.push(
 					await this.effectSettle(
 						tx,
 						target,
-						id,
-						decision === "deny" ? "denied" : "cancelled",
-						options.reason ? { error: options.reason } : {},
+						effect.effect_id,
+						status === "denied" ? "denied" : "cancelled",
+						record?.reason ? { error: record.reason } : {},
 					),
 				);
 			if (options.settleCommandId) await this.settle(tx, options.settleCommandId, { outcome: "applied" });
 			return events;
+		});
+	}
+	/** Timeout: address the next capable ancestor, or the human with the same transition when none remains. */
+	async readdressApproval(
+		target: EventTarget,
+		id: string,
+		expectedAddressRevision: number,
+		to: ApprovalRequest["addressed_to"],
+		expiresAt: string | null,
+	): Promise<EngineEvent[]> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const approval = await tx.get<EngineApprovalRow>("approval", id);
+			if (approval?.state !== "pending" || approval.request.address_revision !== expectedAddressRevision) return [];
+			const from = approval.request.addressed_to;
+			const now = new Date().toISOString();
+			const request = {
+				...approval.request,
+				addressed_to: to,
+				addressed_at: now,
+				expires_at: expiresAt,
+				address_revision: expectedAddressRevision + 1,
+			} as ApprovalRequest;
+			await tx.put("approval", id, {
+				...approval,
+				request,
+				timed_out_attempt_ids:
+					from.kind === "attempt" ? [...approval.timed_out_attempt_ids, from.attempt_id] : approval.timed_out_attempt_ids,
+				updated_at: Date.now(),
+			} satisfies EngineApprovalRow);
+			return [
+				await this.append(tx, target, {
+					kind: "approval_timed_out",
+					payload: { request_id: id, address_revision: expectedAddressRevision, status: request.status },
+				}),
+				await this.append(tx, target, {
+					kind: "approval_escalated",
+					payload: { request_id: id, address_revision: request.address_revision, from, to, expires_at: expiresAt },
+				}),
+			];
 		});
 	}
 
@@ -2319,27 +2413,101 @@ export class RocksEngineMutations {
 			return this.append(tx, target, event);
 		});
 	}
-	async commitAttemptProfileRoute(
+	/** Phase-only projection of the current route (loading/active/exhausted); no transition, no lease change. */
+	async commitExecutorRouteState(target: EngineBindingSnapshot, state: ExecutorRouteState): Promise<void> {
+		await this.mutation(target.agentInstanceId, async tx => {
+			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return;
+			await this.assertFence(tx, target);
+			await tx.put("attempt", target.attemptId, { ...row, executor_route_state: JSON.stringify(state) });
+		});
+	}
+	/**
+	 * Durable route change before the next model effect. Another frozen route unit transfers the lease
+	 * atomically (own-lease credit); a same-route billing-pool change keeps lease and slot untouched.
+	 * Returns undefined when the target cannot fit now: the caller skips that candidate.
+	 */
+	async commitExecutorRoute(
 		target: EngineBindingSnapshot,
-		state: EngineProfileRouteState,
+		to: CandidateIdentity,
+		reason: "route_fallback" | "billing_pool_exhausted" | "billing_pool_observed",
+		toExecutionDigest: string,
+		limits: RoutingLimits,
 	): Promise<EngineEvent | undefined> {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
-			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
+			if (!row?.execution || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
 			await this.assertFence(tx, target);
-			await tx.put("attempt", target.attemptId, { ...row, profile_route_state: JSON.stringify(state) });
-			const event = await this.append(tx, target, {
-				kind: "profile_route_changed",
-				payload: { profileRoute: state },
-			});
-			// The public projection stamps the same sequence on its detail; an agent without a canonical ref has
-			// no projection, so the retained route is stamped here as well.
+			const choice = row.execution.executor_choice;
+			const from = currentIdentity(choice);
+			const sameRoute = candidateRef(from) === candidateRef(to);
+			const unit = choice.candidates.find(candidate => candidateRef(candidate) === candidateRef(to));
+			if (!unit || (sameRoute) !== (reason !== "route_fallback"))
+				throw new EngineTargetError("invalid_request", "Unregistered executor fallback is forbidden");
+			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+			if (!lease) throw new EngineTargetError("stale_target", "Executor route change requires a held lease");
+			let leaseRevision = lease.lease_revision;
+			if (!sameRoute) {
+				const transferred = await stageTransfer(tx, target.attemptId, unit, limits, target.engineGeneration);
+				if (transferred === undefined) return undefined;
+				leaseRevision = transferred;
+			}
+			const seq = choice.transitions.length + 1;
+			const transition: ChoiceTransition = {
+				seq,
+				event_id: `${target.attemptId}:route:${seq}`,
+				from,
+				to: candidateIdentity(to),
+				reason,
+				at: new Date().toISOString(),
+				lease_revision: leaseRevision,
+				from_execution_digest: choice.execution_digest,
+				to_execution_digest: toExecutionDigest,
+			};
+			const state: ExecutorRouteState = {
+				dispatchHash: row.execution.dispatch_hash,
+				selected: transition.to,
+				pending: null,
+				fallback: true,
+				phase: "loading",
+				eventSeq: 0,
+			};
 			await tx.put("attempt", target.attemptId, {
-				...(await tx.get<RocksAttempt>("attempt", target.attemptId)),
-				profile_route_state: JSON.stringify({ ...state, eventSeq: event.seq }),
+				...row,
+				execution: {
+					...row.execution,
+					executor_choice: { ...choice, execution_digest: toExecutionDigest, transitions: [...choice.transitions, transition] },
+				},
+				executor_route_state: JSON.stringify(state),
 			});
-			return event;
+			return this.append(tx, target, { kind: "executor_route_changed", payload: transition });
 		});
+	}
+	/** §6/§6.1 atomic device admission: full-roster search, cycle proof, lease or FIFO entry. */
+	async admitRouting(request: AdmissionRequest): Promise<AdmissionOutcome> {
+		return this.mutation("routing", tx => stageAdmission(tx, request));
+	}
+	async cancelRoutingQueue(
+		request: Pick<AdmissionRequest, "principalId" | "deviceId" | "commandId" | "agentInstanceRef" | "attemptId">,
+		status: "cancelled" | "refused",
+		reason: string,
+	): Promise<boolean> {
+		return this.mutation("routing", tx => stageQueueCancel(tx, request, status, reason));
+	}
+	async renewRouting(attemptId: string, engineGeneration: number): Promise<boolean> {
+		return this.mutation("routing", tx => stageRenew(tx, attemptId, engineGeneration));
+	}
+	/** Restart: leases of an older Engine generation are released; recovery holds forbid their old effects. */
+	async releaseStaleRouting(principalId: string, deviceId: string, engineGeneration: number): Promise<void> {
+		const stale = await this.mutation("routing", tx => staleLeaseAttempts(tx, principalId, deviceId, engineGeneration));
+		for (const attemptId of stale) await this.releaseRouting(attemptId);
+	}
+	/** Releases a lease exactly once; an unaccepted Start has no Attempt row yet, so its command is named. */
+	async releaseRouting(
+		attemptId: string,
+		start?: { commandId: string; agentInstanceRef: string; candidate: CandidateIdentity },
+	): Promise<void> {
+		await this.mutation("routing", tx => stageRelease(tx, attemptId, start));
 	}
 
 	/** A durable native entry owns a directly delivered message's bodies; its ready upload rows are done (C5). */
@@ -2890,8 +3058,13 @@ export class RocksEngineMutations {
 										...approval,
 										state: "resolved",
 										decision: "cancelled",
-										reason: "engine_lost",
-									});
+										updated_at: Date.now(),
+										request: {
+											...approval.request,
+											status: "cancelled",
+											decision_revision: approval.request.decision_revision + 1,
+										},
+									} satisfies EngineApprovalRow);
 								await this.counter(tx, `effects:${effect.attempt_id}:${effect.binding_id}`, "open_effects", -1);
 								return [
 									await this.append(tx, target, {

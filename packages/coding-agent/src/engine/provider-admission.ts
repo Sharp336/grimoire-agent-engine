@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-utils/latency-audit";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ProviderExecutionIdentity } from "./provider-execution";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -67,31 +68,14 @@ class ProviderSseOutcome {
 	}
 }
 
-export interface ProviderAdmissionIdentity {
+export interface ProviderAdmissionIdentity extends Omit<ProviderExecutionIdentity, "modelId"> {
 	executionPin?: string;
-	expectedPrincipalId: string;
-	profileRef: string;
-	profileContentHash: string;
-	providerAccountRef: string;
-	providerAccountContentHash: string;
-	routeRef: string;
-	routeContentHash: string;
 	providerKind: "openai_codex_subscription";
-	providerId: string;
 	accountBindingId: string;
 }
 
-export interface ProviderApiKeyRouteIdentity {
-	expectedPrincipalId: string;
-	profileRef: string;
-	profileContentHash: string;
-	providerAccountRef: string;
-	providerAccountContentHash: string;
-	routeRef: string;
-	routeContentHash: string;
-	providerId: string;
+export interface ProviderApiKeyRouteIdentity extends ProviderExecutionIdentity {
 	runtimeProviderId: string;
-	modelId: string;
 	baseUrl: string;
 }
 
@@ -167,13 +151,13 @@ export class ProviderAdmissionClient {
 		if (!decision.allowed) {
 			throw new ProviderAdmissionError(
 				decision.status || "provider_admission_denied",
-				"The launch profile could not be authorized",
+				"The admitted route could not be authorized",
 			);
 		}
 		if (typeof decision.executionPin !== "string" || !/^[a-f0-9]{64}$/.test(decision.executionPin)) {
 			throw new ProviderAdmissionError(
 				"provider_admission_invalid_response",
-				"The launch profile pin is unavailable",
+				"The admitted route pin is unavailable",
 			);
 		}
 		return decision.executionPin;
@@ -491,10 +475,17 @@ function matchesApiKeyRoute(model: Model, route: ProviderApiKeyRouteIdentity): b
 function providerObservationIdentity(identity: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) {
 	return {
 		expectedPrincipalId: identity.expectedPrincipalId,
-		profileRef: identity.profileRef,
-		profileContentHash: identity.profileContentHash,
+		agentInstanceRef: identity.agentInstanceRef,
+		attemptId: identity.attemptId,
+		bindingRevision: identity.bindingRevision,
+		installationId: identity.installationId,
+		dispatchRef: identity.dispatchRef,
+		dispatchHash: identity.dispatchHash,
+		executionDigest: identity.executionDigest,
+		originReceiptId: identity.originReceiptId,
 		providerAccountRef: identity.providerAccountRef,
 		providerAccountContentHash: identity.providerAccountContentHash,
+		credentialGeneration: identity.credentialGeneration,
 		routeRef: identity.routeRef,
 		routeContentHash: identity.routeContentHash,
 		providerId: identity.providerId,

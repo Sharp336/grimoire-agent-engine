@@ -215,6 +215,7 @@ export class RuntimeRecords {
 
 /** Read versions are checked by the RocksDB owner in the same critical section as its batch. */
 export class RuntimeTransaction {
+	routingAdmission?: StorageRuntimeMutation["routing_admission"];
 	readonly #read = new Map<string, StorageRuntimeRecord>();
 	readonly #puts = new Map<string, StorageRuntimeKey & { value: StoragePayload }>();
 	readonly #deletes = new Map<string, StorageRuntimeKey>();
@@ -361,6 +362,7 @@ export class RuntimeTransaction {
 			checks: [...this.#read.values()].map(({ kind, id, revision }) => ({ kind, id, revision })),
 			puts: [...this.#puts.values()],
 			deletes: [...this.#deletes.values()],
+			...(this.routingAdmission ? { routing_admission: this.routingAdmission } : {}),
 		};
 	}
 }
