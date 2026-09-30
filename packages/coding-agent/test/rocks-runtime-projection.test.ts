@@ -20,7 +20,7 @@ import {
 	type StorageRuntimeQueryResponse,
 	type StorageRuntimeRecord,
 } from "../src/session/storage-protocol";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { binding as nativeBinding, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 class Rows extends RuntimeRecords {
 	readonly values = new Map<string, StorageRuntimeRecord>();
@@ -364,6 +364,7 @@ describe("Rocks runtime atomic public projections", () => {
 		expect((await summary()).pendingStart).toBeNull();
 		const next = start("explicit");
 		expect(await store.admitCommand(next, 1)).toEqual({ status: "claimed" });
+		const admitted = nativeBinding("explicit");
 		await store.commitAttemptTransition(
 			{
 				commandId: next.commandId,
@@ -372,10 +373,10 @@ describe("Rocks runtime atomic public projections", () => {
 				attemptId: next.attemptId!,
 				bindingId: "binding-explicit",
 				engineAgentId: "native-a",
-				executionDigest: "sha256:execution",
-				continuationDigest: "sha256:continuation",
-				dispatchRef: "gctx:dispatch",
-				dispatchHash: "sha256:dispatch",
+				executionDigest: admitted.executionDigest,
+				continuationDigest: admitted.continuationDigest,
+				dispatchRef: admitted.dispatchRef,
+				dispatchHash: admitted.dispatchHash,
 				state: "running",
 				engineGeneration: 1,
 				bindingGeneration: 2,

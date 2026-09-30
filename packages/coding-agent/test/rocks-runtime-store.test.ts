@@ -6,7 +6,7 @@ import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
 import { startStorageWorker } from "./helpers/storage-worker-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { binding as nativeBinding, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const workerExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const testRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -53,6 +53,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			).rejects.toThrow();
 			expect(await store.admitCommand(command, generation)).toEqual({ status: "in_progress" });
 			await expect(store.admitCommand({ ...command, canonicalHash: "changed" }, generation)).rejects.toThrow();
+			const admitted = nativeBinding(suffix);
 			const binding: EngineBindingSnapshot = {
 				commandId: command.commandId,
 				agentInstanceId: command.agentInstanceId,
@@ -60,10 +61,10 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				attemptId: command.attemptId!,
 				bindingId: `binding-${suffix}`,
 				engineAgentId: `native-${suffix}`,
-				executionDigest: "sha256:execution",
-				continuationDigest: "sha256:continuation",
-				dispatchRef: "gctx:dispatch",
-				dispatchHash: "sha256:dispatch",
+				executionDigest: admitted.executionDigest,
+				continuationDigest: admitted.continuationDigest,
+				dispatchRef: admitted.dispatchRef,
+				dispatchHash: admitted.dispatchHash,
 				state: "running",
 				engineGeneration: generation,
 				bindingGeneration: 1,

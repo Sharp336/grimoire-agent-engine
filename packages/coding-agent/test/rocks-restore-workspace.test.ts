@@ -15,6 +15,7 @@ import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import type { RuntimeTransaction } from "../src/engine/runtime-records";
 import type { NativeSessionPosition } from "../src/session/native-session-storage";
 import type { SessionHeader } from "../src/session/session-entries";
+import { binding as nativeBinding } from "./helpers/runtime-v1-rocks-fixture";
 
 const hash = (value: unknown) => new Bun.CryptoHasher("sha256").update(stableStringifyJson(value)).digest("hex");
 
@@ -72,6 +73,7 @@ it.skipIf(process.platform !== "win32")(
 		const rows = new Map<string, unknown>([["metadata:restore-workspace", descriptor]]);
 		const agentInstanceId = "restored-agent";
 		const sessionFile = "native:family/generation";
+		const admitted = nativeBinding("restored");
 		const binding: RocksBinding = {
 			agent_instance_id: agentInstanceId,
 			binding_id: "old-binding",
@@ -81,10 +83,10 @@ it.skipIf(process.platform !== "win32")(
 			engine_agent_id: "native-agent",
 			session_file: sessionFile,
 			execution_schema: 2,
-			execution_digest: "sha256:execution",
-			continuation_digest: "sha256:continuation",
-			dispatch_ref: "gctx:dispatch",
-			dispatch_hash: "sha256:dispatch",
+			execution_digest: admitted.executionDigest,
+			continuation_digest: admitted.continuationDigest,
+			dispatch_ref: admitted.dispatchRef,
+			dispatch_hash: admitted.dispatchHash,
 			state: "running",
 			engine_generation: 1,
 			binding_generation: 1,
@@ -174,15 +176,15 @@ it.skipIf(process.platform !== "win32")(
 			process.env.GRIMOIRE_ENGINE_WORK_ROOT = firstRoot;
 			rows.set(`binding:${agentInstanceId}`, { ...binding, binding_id: "other-binding" });
 			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
-			rows.set(`binding:${agentInstanceId}`, { ...binding, execution_digest: "sha256:changed" });
+			rows.set(`binding:${agentInstanceId}`, { ...binding, execution_digest: `sha256:${"d".repeat(64)}` });
 			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
-			rows.set(`binding:${agentInstanceId}`, { ...binding, continuation_digest: "sha256:changed" });
+			rows.set(`binding:${agentInstanceId}`, { ...binding, continuation_digest: `sha256:${"e".repeat(64)}` });
 			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
-			rows.set(`binding:${agentInstanceId}`, { ...binding, dispatch_hash: "sha256:changed" });
+			rows.set(`binding:${agentInstanceId}`, { ...binding, dispatch_hash: `sha256:${"f".repeat(64)}` });
 			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
 			rows.set(`binding:${agentInstanceId}`, binding);
 			await expect(completeRestoreRebind(tx, {
-				...receipt, oldContinuationDigest: "sha256:forged",
+				...receipt, oldContinuationDigest: `sha256:${"e".repeat(64)}`,
 			})).rejects.toThrow("receipt changed");
 			await completeRestoreRebind(tx, receipt);
 			expect(
