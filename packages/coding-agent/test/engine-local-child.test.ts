@@ -280,6 +280,8 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			).rejects.toMatchObject({ code: "stale_target" });
 			const committedHash = command.canonicalHash;
 			expect(engineCommandIdentity(JSON.parse(command.serializedCommand!)).canonicalHash).toBe(committedHash);
+			directParentRelease.resolve();
+			await runtime.drain();
 			await runtime.dispose();
 			runtime = await EngineRuntime.create({
 				databasePath: path.join(root, "must-not-open.sqlite"),
@@ -314,22 +316,23 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			expect(JSON.stringify(await runtime.store.nativeHistoryPage(first.agentInstanceId))).toContain(
 				"Verified local evidence 42",
 			);
+			const beforeRefusals = hosted.requests;
 			await expect(
 				launchLocalEngineChild(runtime, hosted.rpc, {
 					...request,
 					toolCallId: "too-large",
 					assignment: "я".repeat(16_385),
 				}),
-			).rejects.toThrow("exceeds");
+			).rejects.toMatchObject({ code: "invalid_request" });
 			await expect(
 				launchLocalEngineChild(runtime, hosted.rpc, {
 					...request,
 					toolCallId: "missing-target",
 					target: { task_ref: "", work_step_id: null },
 				}),
-			).rejects.toThrow("real Task or WorkStep");
-			directParentRelease.resolve();
-			await runtime.drain();
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(hosted.requests).toBe(beforeRefusals);
+			expect(calls).toBe(1);
 			await runtime.dispose();
 			runtime = undefined;
 			// The same prepare server also serves the Engine service's hosted callback below.
