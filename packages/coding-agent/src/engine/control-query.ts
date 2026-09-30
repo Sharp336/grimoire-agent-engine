@@ -30,6 +30,7 @@ import { RuntimeQueryError } from "./runtime-projection";
 import {
 	ENGINE_CONTROL_OPS,
 	RUNTIME_PROTOCOL_HASH,
+	RUNTIME_PROTOCOL_REVISION,
 	type RuntimeAccess,
 	type RuntimeEventsRequest,
 	type RuntimeScope,
@@ -327,7 +328,7 @@ async function dispatchRequest(
 	switch (request.method) {
 		case "installation.verify": {
 			if (params.deviceId !== options.deviceId || params.engineId !== options.engineId ||
-				params.runtimeContractRevision !== 16 || params.runtimeContractHash !== RUNTIME_PROTOCOL_HASH)
+				params.runtimeContractRevision !== RUNTIME_PROTOCOL_REVISION || params.runtimeContractHash !== RUNTIME_PROTOCOL_HASH)
 				throw new EngineTargetError("stale_target", "Installation verification contour mismatch");
 			const installationId = requiredString(params, "installationId");
 			options.runtime.verifyInstallation(installationId, requiredString(params, "principalId"));

@@ -99,7 +99,8 @@ export type DispatchRequirement = {
 	"min_effort": Effort | null;
 	"service_tier": ServiceTier;
 	"downgrade": "forbidden" | "approval" | "allowed";
-	"pin": DispatchPin | null;
+	"require_trusted_provider": boolean;
+	"fallback_mode": "none" | "same_model" | "scope";
 };
 
 export type DispatchSkill = {
@@ -355,7 +356,7 @@ export type ExecutorChoice = {
 	"dispatch_hash": Hash;
 	"preset_ref": ArtifactRef | null;
 	"effective_requirement": DispatchRequirement;
-	"scope_revision": number;
+	"scope_revision": Hash;
 	"candidates": Array<Candidate>;
 	"filtered_counts": Record<string, number>;
 	"selected": SelectedExecutor;
@@ -696,8 +697,8 @@ export type EngineExecutionConfiguration = {
 	"sessionDefaults": SessionDefaults;
 	"record_revisions": RecordRevisions;
 	"routingLimits": RoutingLimits;
-	"scope_revision": number;
-	"roster_revision": number;
+	"scope_revision": Hash;
+	"roster_revision": Hash;
 	"roster_complete": true;
 };
 
@@ -718,7 +719,7 @@ export type ExecutionDigestInput = {
 	"dispatchHash": Hash;
 	"executionConfiguration": EngineExecutionConfiguration;
 	"record_revisions": RecordRevisions;
-	"scope_revision": number;
+	"scope_revision": Hash;
 	"candidates": Array<Candidate>;
 	"selected": SelectedExecutor;
 };
@@ -769,7 +770,8 @@ export type DispatchRequirementRequest = {
 	"min_effort"?: Effort | null;
 	"service_tier"?: ServiceTier;
 	"downgrade"?: "forbidden" | "approval" | "allowed";
-	"pin"?: DispatchPin | null;
+	"require_trusted_provider"?: boolean;
+	"fallback_mode"?: "none" | "same_model" | "scope";
 };
 
 export type DispatchSpawnRequest = {

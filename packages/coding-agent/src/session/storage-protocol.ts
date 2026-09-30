@@ -11,7 +11,7 @@ export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
 export const STORAGE_PROTOCOL_REVISION = 21 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:18a9c16df4194014f80519343c699d7584dee44826b5e7e9fa9ea7dd49ab930e" as const;
+	"sha256:fd7efd5264605afc9549de95d3e9d44a62b7b12359367cdec93fb9f2c02339b8" as const;
 
 export type StorageOperation =
 	| "write"
@@ -484,7 +484,8 @@ export interface StorageSlotQueue {
 	origin_receipt_id: string;
 	bindingSnapshot: BindingSnapshot;
 	auth_context_id: string;
-	roster_revision: number;
+	/** Derived roster identity hash; genuine routing CAS stays numeric. */
+	roster_revision: `sha256:${string}`;
 	/** Full stable pre-admission roster, never truncated to the fallback limit. */
 	candidate_refs: string[];
 	requested_at: number;
