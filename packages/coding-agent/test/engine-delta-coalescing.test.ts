@@ -5,6 +5,8 @@ import type { StreamAdmissionLimits } from "@oh-my-pi/pi-ai/utils/stream-admissi
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { EngineOrdinaryEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import type { RocksEvent } from "@oh-my-pi/pi-coding-agent/engine/rocks-runtime-rows";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { admittedExecution, admitRequest, startRequest } from "./helpers/engine-runtime-admitted-fixture";
@@ -149,7 +151,8 @@ async function runFlood(
 		await runtime.drain();
 		const attempt = await runtime.store.getAttempt(started.attemptId);
 		const updates = (await runtime.store.pendingEvents()).filter(
-			event => event.attemptId === started.attemptId && event.kind === "message_updated",
+			(event): event is RocksEvent & EngineOrdinaryEvent =>
+				event.attemptId === started.attemptId && event.kind === "message_updated",
 		);
 		const history = await runtime.sessionHistoryPage(
 			started.agentInstanceId,

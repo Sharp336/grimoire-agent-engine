@@ -7,8 +7,9 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import { type EngineBindingSnapshot, type EngineStartRequest } from "../../src/engine/contracts";
+import { type EngineBindingSnapshot, type EngineOrdinaryEvent, type EngineStartRequest } from "../../src/engine/contracts";
 import { runEngineCommand } from "../../src/engine/control-query";
+import type { RocksEvent } from "../../src/engine/rocks-runtime-rows";
 import { EngineRuntime, type EngineRuntimeOptions } from "../../src/engine/runtime";
 import { BlobStore } from "../../src/session/blob-store";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
@@ -285,7 +286,8 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 				await runtime.drain();
 				unsubscribe();
 				const ordinarySnapshots = events.filter(
-					event => event.kind === "assistant_snapshot" && event.attemptId === attemptId,
+					(event): event is EngineOrdinaryEvent =>
+						event.kind === "assistant_snapshot" && event.attemptId === attemptId,
 				);
 				const snapshot = ordinarySnapshots.findLast(
 					event => typeof event.payload?.stopReason === "string",
@@ -691,8 +693,9 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 			);
 			expect(interrupted?.state).toBe("interrupted");
 			expect(requests).toBe(1);
-			expect(firstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);
-			const settled = firstEvents.filter(event => event.kind === "model_settled");
+			const settled = firstEvents.filter((event): event is RocksEvent & EngineOrdinaryEvent =>
+				event.kind === "model_settled");
+			expect(settled).toHaveLength(1);
 			expect(settled[0]?.payload?.status).toBe("failed");
 			expect(firstEvents.some(event => event.kind === "completed")).toBe(false);
 			const interruptedHistory = await runtime.sessionHistoryPage(

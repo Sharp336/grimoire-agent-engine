@@ -4,6 +4,8 @@ import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import type { EngineOrdinaryEvent } from "../../src/engine/contracts";
+import type { RocksEvent } from "../../src/engine/rocks-runtime-rows";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { admittedExecution, admitRequest, startRequest } from "../helpers/engine-runtime-admitted-fixture";
@@ -60,7 +62,8 @@ try {
 	await runtime.drain();
 	const attempt = await runtime.store.getAttempt(started.attemptId);
 	const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
-	const settlements = events.filter(event => event.kind === "model_settled");
+	const settlements = events.filter((event): event is RocksEvent & EngineOrdinaryEvent =>
+		event.kind === "model_settled");
 	assert.equal(attempt?.state, "interrupted");
 	assert.equal(mock.calls.length, 1);
 	assert.equal(settlements.length, 1);

@@ -152,7 +152,15 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 		const parentTaskRef = "grimoire://tasks/grimoire/child-test";
 		// The admitted typed execution every local child Start consumes read-only.
 		const execution = admittedExecution(model.model, modelRegistry, { taskRef: parentTaskRef });
-		const directParentModel = createMockModel({ responses: [{ content: ["Parent admitted child delegation"] }] });
+		const directParentEntered = Promise.withResolvers<void>();
+		const directParentRelease = Promise.withResolvers<void>();
+		const directParentModel = createMockModel({
+			handler: async () => {
+				directParentEntered.resolve();
+				await directParentRelease.promise;
+				return { content: ["Parent admitted child delegation"] };
+			},
+		});
 		const directParentExecution = admittedExecution(directParentModel.model, modelRegistry, {
 			taskRef: parentTaskRef, continuation: { systemPrompt: "Direct parent admission" },
 		});
@@ -221,7 +229,8 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					executionId: `direct-parent-execution-${crypto.randomUUID()}`, attemptId: parentAttemptId,
 				}, { cwd, principalId: "test-owner", input: "Authorize local child work" }),
 				{ deviceId: "fixture-device", engineId: "fixture-engine" });
-			await runtime.drain();
+			await directParentEntered.promise;
+			expect((await runtime.store.getAttempt(parentAttemptId))?.state).toBe("running");
 			const parentBindingSnapshot = (await runtime.store.getBinding(parentAgentInstanceId))?.bindingSnapshot;
 			if (!parentBindingSnapshot) throw new Error("Admitted parent lost its semantic binding");
 			expect(parentStarted.attemptId).toBe(parentAttemptId);
@@ -319,6 +328,8 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					target: { task_ref: "", work_step_id: null },
 				}),
 			).rejects.toThrow("real Task or WorkStep");
+			directParentRelease.resolve();
+			await runtime.drain();
 			await runtime.dispose();
 			runtime = undefined;
 			// The same prepare server also serves the Engine service's hosted callback below.
@@ -342,7 +353,10 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			// The service-phase child yields structured output; its own admitted execution carries the yield contract.
 			structuredExecution = admittedExecution(structuredChildModel.model, modelRegistry, {
 				taskRef: parentTaskRef,
-				continuation: { requireYieldTool: true, outputSchema: { type: "object", required: ["evidence", "verified"] } },
+				continuation: {
+					toolNames: ["yield"], restrictToolNames: true, requireYieldTool: true,
+					outputSchema: { type: "object", required: ["evidence", "verified"] },
+				},
 			});
 			executions.push(structuredExecution);
 			let serviceChildAgentInstanceRef: string | undefined;
@@ -391,6 +405,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				taskRef: parentTaskRef,
 				// The service parent spawns one local child then reports its structured result.
 				spawn: { allowed: "yes", max_depth: 1, max_children: 1, on_exceed: "deny" },
+				continuation: { toolNames: ["task"], restrictToolNames: true },
 			});
 			executions.push(parentExecution);
 			const originalCreate = EngineRuntime.create.bind(EngineRuntime);
@@ -488,6 +503,7 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 				runtime = undefined;
 			}
 		} finally {
+			directParentRelease.resolve();
 			await runtime?.dispose();
 			readBinding.mockRestore();
 			auth.close();

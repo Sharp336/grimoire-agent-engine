@@ -66,6 +66,7 @@ it.skipIf(!(executable && runRoot))(
 			const sourceModel = createMockModel({ handler: () => ({ content: ["retained answer"] }) });
 			const execution = admittedExecution(sourceModel.model, modelRegistry, {
 				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+				continuation: { toolNames: ["read"], restrictToolNames: true },
 			});
 			const sourceBlobs = new BlobStore(storageBlobsDir(sourceRoot));
 			process.env.PI_BLOBS_DIR = sourceBlobs.dir;
@@ -240,6 +241,7 @@ it.skipIf(!(executable && runRoot))(
 			});
 			const targetExecution = admittedExecution(targetModel.model, modelRegistry, {
 				taskRef: "grimoire://tasks/grimoire/restore-fixture",
+				continuation: { toolNames: ["read"], restrictToolNames: true },
 			});
 			// The refused queue delivery has a separate admitted execution without the read tool.
 			const deniedExecution = admittedExecution(targetModel.model, modelRegistry, {

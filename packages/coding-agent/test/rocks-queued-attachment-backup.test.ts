@@ -220,6 +220,7 @@ it.skipIf(!(executable && runRoot))(
 				const delivered: Array<{ input: string; imageData?: string }> = [];
 				const execution = admittedExecution(mock.model, new ModelRegistry(new AuthStorage(":memory:")), {
 					taskRef: "grimoire://tasks/grimoire/queue-fixture",
+					continuation: { toolNames: ["read"], restrictToolNames: true },
 				});
 				runtime = await EngineRuntime.create({
 					databasePath: path.join(freshRoot, "engine.sqlite"),
