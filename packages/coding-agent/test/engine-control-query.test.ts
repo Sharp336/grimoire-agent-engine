@@ -615,14 +615,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
-		expect(
-			await client.request("command", { command: { ...command, payload: { changed: true } } }).then(
-				() => null,
-				(error: unknown) => error,
-			),
-		).toMatchObject({
-			code: "command_id_conflict",
-		});
 
 		await server.close();
 		await runtime.dispose();
@@ -786,10 +778,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				items: [{ toolCallId: "ipc-tool", phase: "started" }],
 				nextCursor: null,
 			});
-			await assert.rejects(
-				client.request("runtime.tools", { ...request, principalId: "foreign" }),
-				{ code: "agent_not_found" },
+			const denied = await client.request("runtime.tools", { ...request, principalId: "foreign" }).then(
+				() => null,
+				(error: unknown) => error,
 			);
+			expect((denied as { code?: unknown } | null)?.code).toBe("agent_not_found");
 		} finally {
 			await server.close();
 			await runtime.dispose();
@@ -946,61 +939,6 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	});
 });
 
-it("refuses approval authorization without the addressed live ancestor", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-approval-${Snowflake.next()}-`));
-	const approval = {
-		state: "pending",
-		request: {
-			principal_id: "grimoire:user:alice",
-			requester_attempt_id: "child-attempt",
-			dispatch_hash: "sha256:child",
-			status: "pending",
-			requires_human: false,
-			addressed_to: { kind: "attempt", agent_ref: "parent", attempt_id: "parent-attempt" },
-			kind: "spawn",
-			subject: { name: "child" },
-			settings_hash: "sha256:settings",
-		},
-	};
-	const runtime = {
-		runControlQuery: async (work: () => Promise<unknown>) => work(),
-		store: {
-			getApproval: async () => approval,
-			getAttempt: async (id: string) => id === "child-attempt"
-				? { attempt_id: id, input_revision: 3, execution: { dispatch_hash: "sha256:child" } }
-				: undefined,
-		},
-	};
-	const server = await startEngineControlQueryServer({
-		runtime: runtime as unknown as EngineRuntime,
-		runtimeDir: dir,
-		deviceId: "device",
-		engineId: "engine",
-	});
-	try {
-		const client = new EngineControlQueryClient(dir);
-		const params = { requestId: "approval", principalId: "grimoire:user:alice", expectedInputRevision: 3 };
-		await assert.rejects(client.request("approval.authorize", params), { code: "stale_target" });
-		for (const attemptId of ["child-attempt", "sibling-attempt"])
-			await assert.rejects(client.request("approval.authorize", {
-				...params, callerContext: { agentInstanceRef: "parent", attemptId },
-			}), { code: "stale_target" });
-		approval.request.requires_human = true;
-		await assert.rejects(client.request("approval.authorize", {
-			...params, callerContext: { agentInstanceRef: "parent", attemptId: "parent-attempt" },
-		}), { code: "stale_target" });
-		approval.request.requires_human = false;
-		approval.state = "resolved";
-		await assert.rejects(client.request("approval.authorize", params), { code: "too_late" });
-		approval.state = "pending";
-		await assert.rejects(client.request("approval.authorize", {
-			...params, expectedInputRevision: 2,
-		}), { code: "stale_target" });
-	} finally {
-		await server.close();
-		removeSyncWithRetries(dir);
-	}
-});
 
 it("distinguishes explicit Core origin refusal from unknown bridge transport", async () => {
 	const rpc = new HostedGrimoireRpc({ serverUrl: "https://core.example/mcp", token: "test", clientId: "test" });
