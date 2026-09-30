@@ -55,23 +55,27 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		auth.setRuntimeApiKey("mock", "isolated-test");
 		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
-		const runtime = await EngineRuntime.create({
+		let resolverCalls = 0;
+		const baseOptions = execution.optionsFor({ deviceId: "device-1" });
+		const executionRuntime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
-			...execution.optionsFor({ deviceId: "device-1" }),
+			...baseOptions,
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				resolverCalls++;
+				return baseOptions.resolveExecution!(config, frozen, attempt, resolverCwd, signal);
+			},
 		});
 		const client = await connect({ servers: broker.url });
-		const command = startCommand(runtime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
+		const command = startCommand(executionRuntime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
 		command.agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/agent";
 		command.bindingSnapshot = semanticBinding(command.agentInstanceRef);
 		command.principalId = "owner";
 		command.browserPayloadHash = `sha256:${"a".repeat(64)}`;
 		command.browserTarget = { agentInstanceRef: command.agentInstanceRef };
 		const identity = engineCommandIdentity(command);
-		let resolverCalls = 0;
-		execution.setModelOverride({});
 		const errors: Error[] = [];
 		const options = {
-			runtime,
+			runtime: executionRuntime,
 			runtimeDir: tempDir,
 			deviceId: command.deviceId,
 			engineId: command.engineId,
@@ -83,9 +87,9 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		let server: EngineControlQueryServer | undefined;
 		let adapter: NatsEngineAdapter | undefined;
 		try {
-			await runtime.store.admitCommand(identity, runtime.engineGeneration);
+			await executionRuntime.store.admitCommand(identity, executionRuntime.engineGeneration);
 			// Beyond one live change, below one storage write: the receipt is retained whole but projected bounded.
-			await runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
+			await executionRuntime.store.settleCommand(identity.commandId, identity.canonicalHash, {
 				outcome: "applied",
 				detail: { text: "legacy".repeat(20_000) },
 			});
@@ -117,12 +121,12 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				return info.delivered.consumer_seq > 0 && info.num_ack_pending === 0;
 			});
 			expect(resolverCalls).toBe(0);
-			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
+			expect(await executionRuntime.store.getAttempt(command.attemptId!)).toBeUndefined();
 			expect(errors).toEqual([]);
 		} finally {
 			await server?.close();
 			await adapter?.dispose();
-			await runtime.dispose();
+			await executionRuntime.dispose();
 			await client.drain();
 			broker.process.kill();
 			await broker.process.exited;
@@ -327,6 +331,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					expectedIntentRevision: hold.intentRevision,
 				},
 			};
+			command.payload.originReceiptId = "origin:queued-while-delivery-busy";
+			execution.captureCommand(command);
 			await jetstream(client).publish(
 				adapter.commandSubject(started.agentInstanceId, "enqueue"),
 				JSON.stringify(command),
@@ -451,6 +457,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					clientMessageId: "nats-resume-user-message",
 				},
 			};
+			command.payload.originReceiptId = "origin:nats-resume-message";
+			execution.captureCommand(command);
 			const identity = engineCommandIdentity(command);
 			expect(await runtime.store.admitCommand(identity, runtime.engineGeneration)).toMatchObject({ status: "claimed" });
 			await runtime.store.releaseCommand(command.commandId, identity.canonicalHash, runtime.engineGeneration);
@@ -630,6 +638,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				displayName: "Runtime Gardener",
 				delegationHint: "Engine broker integration",
 			};
+			execution.captureCommand(commandA);
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd, execution);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
@@ -881,6 +890,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const deliveredBefore = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
 				.consumer_seq;
 			const duplicateA = { ...commandA, commandId: "command-a-redelivery", issuedAt: Date.now() };
+			duplicateA.payload.originReceiptId = "origin:command-a-redelivery";
+			execution.captureCommand(duplicateA);
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(duplicateA), {
 				msgID: duplicateA.commandId,
 			});
@@ -910,6 +921,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const settlementCommand: EngineCommandEnvelope = {
 				...commandA, commandId: "command-settlement-race", op: "reconcile", payload: {},
 			};
+			settlementCommand.payload.originReceiptId = "origin:command-settlement-race";
+			execution.captureCommand(settlementCommand);
 			const winningReceipt = { outcome: "rejected" as const, detail: { code: "cancelled" } };
 			const settlementIdentity = engineCommandIdentity(settlementCommand);
 			const settlementEntered = Promise.withResolvers<void>();
@@ -1336,6 +1349,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				issuedAt: Date.now(),
 				payload: { reason: "Stopped from Artel before binding" },
 			};
+			cancel.payload.originReceiptId = "origin:command-cancel-pending";
+			refusedExecution.captureCommand(cancel);
 			await js.publish(adapter.commandSubject(cancel.agentInstanceId, "cancel"), JSON.stringify(cancel), {
 				msgID: cancel.commandId,
 			});
@@ -1380,6 +1395,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				attemptId: reusePending.attemptId,
 				issuedAt: Date.now(),
 			};
+			reuseCancel.payload = { ...reuseCancel.payload, originReceiptId: "origin:command-cancel-reuse-pending" };
+			refusedExecution.captureCommand(reuseCancel);
 			await js.publish(adapter.commandSubject(reuseCancel.agentInstanceId, "cancel"), JSON.stringify(reuseCancel), {
 				msgID: reuseCancel.commandId,
 			});
@@ -1412,6 +1429,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				attemptId: live.attemptId,
 				issuedAt: Date.now(),
 			};
+			racedCancel.payload = { ...racedCancel.payload, originReceiptId: "origin:command-cancel-live-without-binding" };
+			liveExecution.captureCommand(racedCancel);
 			await js.publish(adapter.commandSubject(racedCancel.agentInstanceId, "cancel"), JSON.stringify(racedCancel), {
 				msgID: racedCancel.commandId,
 			});
@@ -1518,6 +1537,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				issuedAt: Date.now(),
 				payload: { reason: "Persisted Stop before Engine upgrade" },
 			};
+			cancel.payload.originReceiptId = "origin:command-cancel-upgrade";
+			execution.captureCommand(cancel);
 			await js.publish(adapter.commandSubject(cancel.agentInstanceId, "cancel"), JSON.stringify(cancel), {
 				msgID: cancel.commandId,
 			});
@@ -1573,6 +1594,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			dispatches++;
 			throw new Error("ENOENT: reconcile fixture storage is offline");
 		});
+		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -1599,6 +1621,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				issuedAt: Date.now(),
 				payload: {},
 			};
+			command.payload.originReceiptId = "origin:command-always-failing";
+			refusedExecutionForCommands.captureCommand(command);
 			const settled = async () => {
 				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
 				return info.num_pending === 0 && info.num_ack_pending === 0;
@@ -1644,6 +1668,9 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 	it("takes back its own claim after a failed release instead of redelivering it as in progress forever", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-release-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async () => true,
@@ -1654,6 +1681,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			throw new Error("ENOENT: reconcile fixture storage is offline");
 		});
 		let releases = 0;
+		const refusedExecutionForCommands = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
 		const release = spyOn(runtime.store, "releaseCommand").mockImplementation(async () => {
 			releases++;
 			throw new Error("release fixture storage is offline");
@@ -1685,6 +1713,8 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				issuedAt: Date.now(),
 				payload: {},
 			};
+			command.payload.originReceiptId = "origin:command-release-failing";
+			refusedExecutionForCommands.captureCommand(command);
 			await js.publish(adapter.commandSubject(command.agentInstanceId, "reconcile"), JSON.stringify(command), {
 				msgID: "delivery-1",
 			});
@@ -1792,18 +1822,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			admissions++;
 			throw new Error("ENOENT: admission fixture storage is offline");
 		});
-		const resolverCalls = { count: 0 };
-		const countingExecution = {
-			...execution,
-			optionsFor: (runtimeOptions: Parameters<typeof execution.optionsFor>[0]) => {
-				const base = execution.optionsFor(runtimeOptions);
-				return { ...base, resolveExecution: async (config: unknown, frozen: readonly unknown[], attempt: unknown, resolverCwd: string, signal?: AbortSignal) => {
-					resolverCalls.count++;
-					return (base.resolveExecution as NonNullable<typeof base.resolveExecution>)(
-						config as never, frozen as never, attempt as never, resolverCwd, signal);
-				} } as typeof base;
-			},
-		};
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd, execution);
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-1",
@@ -1822,11 +1845,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, consumer);
 				return info.num_pending === 0 && info.num_ack_pending === 0;
 			};
-			const mock = createMockModel({ handler: { content: ["done"] } });
-		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
-		auth.setRuntimeApiKey("mock", "isolated-test");
-		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
-		const start = startCommand(runtime.engineGeneration, "agent-unadmitted", "unadmitted", cwd, execution);
 			await js.publish(adapter.commandSubject(start.agentInstanceId, "start"), JSON.stringify(start), {
 				msgID: "delivery-1",
 			});
@@ -1882,7 +1900,7 @@ function startCommand(
 		engineGeneration,
 		agentInstanceId,
 		agentInstanceRef,
-		bindingSnapshot: semanticBinding(agentInstanceRef),
+		bindingSnapshot: execution ? semanticBinding(agentInstanceRef, execution.taskRef) : semanticBinding(agentInstanceRef),
 		executionId: `execution-${suffix}`,
 		attemptId: `attempt-${suffix}`,
 		authorityGeneration: 1,
