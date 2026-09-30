@@ -61,6 +61,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 import {
+	admitStart,
 	admittedExecution,
 	approvalDecisionFor,
 	startRequest,
@@ -4256,6 +4257,295 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		},
 		60000,
 	);
+
+	it("delivers staged images through native start, queue and steer into provider input and retained user history", async () => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const mock = createMockModel({
+			handler: async () => {
+				if (++calls === 1) {
+					reached.resolve();
+					await release.promise;
+				}
+				return { content: ["image response"] };
+			},
+		});
+		mock.input.push("image");
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const setup = await createRuntime(execution, undefined);
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			"base64",
+		);
+		const originalAttachment = {
+			name: "pixel.png",
+			mediaType: "image/png",
+			bytes: png.length,
+			contentHash: `sha256:${new Bun.SHA256().update(png).digest("hex")}`,
+		};
+		const agentInstanceRef = "grimoire://tasks/grimoire/attachment-test/agents/one";
+		const stage = async (uploadId: string, clientMessageId: string) => {
+			await setup.runtime.attachmentUploads.stage("alice", {
+				uploadId,
+				clientMessageId,
+				name: "pixel.png",
+				mediaType: "image/png",
+				bytes: png.length,
+				contentHash: `sha256:${new Bun.SHA256().update(png).digest("hex")}`,
+				offset: 0,
+				contentBase64: png.toString("base64"),
+			});
+		};
+		try {
+			await stage("first-image", "image-message");
+			const started = await admitStart(setup.runtime, execution, startRequest(execution, {
+				commandId: "image-start", agentInstanceId: "image-agent",
+				agentInstanceRef, executionId: "image-execution", attemptId: "image-attempt",
+			}, {
+				cwd: setup.cwd, principalId: "alice",
+				clientMessageId: "image-message",
+				attachmentUploadIds: ["first-image"],
+				explicitContinue: true,
+			}));
+			await withTimeout(reached.promise, 5000, "Image-only start did not reach the provider");
+			const binding = setup.runtime.getBinding(started.agentInstanceId)!;
+			const runningCommand = {
+				commandId: "steer-image-command",
+				op: "steer" as const,
+				deviceId: "test-device",
+				engineId: "test-engine",
+				engineGeneration: setup.runtime.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				agentInstanceRef,
+				runtimeBindingId: binding.bindingId,
+				bindingGeneration: binding.bindingGeneration,
+				executionId: started.executionId,
+				attemptId: started.attemptId,
+				authorityGeneration: started.authorityGeneration,
+				principalId: "alice",
+				issuedAt: Date.now(),
+				payload: {
+					clientMessageId: "steer-message",
+					text: "steered caption",
+					attachmentUploadIds: ["steer-image"],
+				},
+			};
+			await stage("steer-image", "steer-message");
+			await dispatchEngineCommand({ runtime: setup.runtime, command: runningCommand });
+			await dispatchEngineCommand({ runtime: setup.runtime, command: runningCommand });
+			release.resolve();
+			await setup.runtime.drain();
+			const lastCallUsers = mock.calls.at(-1)!.context.messages.filter(message => message.role === "user");
+			expect(lastCallUsers).toHaveLength(2);
+			expect(
+				lastCallUsers.map(message =>
+					JSON.stringify(message.content).match(/attachment:\/\/original\/message\/[^/]+\/0/g),
+				),
+			).toEqual([
+				["attachment://original/message/image-message/0"],
+				["attachment://original/message/steer-message/0"],
+			]);
+			const providerImages = await normalizeModelContextImages(
+				[{ type: "image", mimeType: "image/png", data: png.toString("base64") }],
+				{ model: mock.model },
+			);
+			for (const message of lastCallUsers) {
+				expect(message).not.toHaveProperty("originalAttachments");
+				expect(Array.isArray(message.content) ? message.content.filter(part => part.type === "image") : []).toEqual(
+					providerImages ?? [],
+				);
+			}
+			expect(providerImages?.[0]?.data).not.toBe(png.toString("base64"));
+			await setup.runtime.dispose();
+			const reopened = await openRuntime(setup.options);
+			const page = await reopened.sessionHistoryPage(started.agentInstanceId, agentInstanceRef, undefined, 100);
+			const users = page.entries.filter(entry => entry.role === "user");
+			expect(users.map(entry => entry.clientMessageId)).toEqual(["image-message", "steer-message"]);
+			expect(users.map(entry => entry.images?.length)).toEqual([1, 1]);
+			for (const entry of users) {
+				expect(entry.attachments).toHaveLength(1);
+				expect(entry.attachments?.[0].resource).toMatchObject({
+					...originalAttachment,
+					kind: "history_attachment",
+					attachmentIndex: 0,
+				});
+			}
+			expect(users.map(entry => entry.text)).toEqual(["\n[Image]", "steered caption\n[Image]"]);
+			await reopened.dispose();
+		} finally {
+			release.resolve();
+			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
+		}
+	}, 30_000);
+
+	it("publishes durable tool-only and intermediate history while the next response is still running", async () => {
+		const release = Promise.withResolvers<void>();
+		const reachedFinal = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: (async function* () {
+				yield {
+					content: [
+						{ type: "toolCall" as const, id: "only-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				yield {
+					content: [
+						"Intermediate answer",
+						{ type: "toolCall" as const, id: "next-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				reachedFinal.resolve();
+				await release.promise;
+				yield { content: ["Final answer"] };
+			})(),
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["read"], restrictToolNames: true },
+		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		fs.writeFileSync(path.join(cwd, "input.txt"), "Retained tool result");
+		const agentInstanceId = "incremental-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/history-checkpoint/agents/owner";
+		const attemptId = "incremental-history-attempt";
+		await runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const retained = Promise.withResolvers<void>();
+		const unsubscribe = runtime.subscribe(async event => {
+			if (
+				event.attemptId !== attemptId ||
+				event.kind !== "history_checkpoint" ||
+				!event.payload?.transcriptCheckpoint
+			)
+				return;
+			try {
+				const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+				const assistants = page.entries.filter(entry => entry.role === "assistant");
+				if (
+					assistants.length === 2 &&
+					assistants.every(entry => entry.blocks?.some(block => block.toolStatus === "succeeded"))
+				)
+					retained.resolve();
+			} catch (error) {
+				retained.reject(error);
+			}
+		});
+		try {
+			await runtime.start(startRequest(execution, {
+				commandId: "incremental-history-start", agentInstanceId,
+				agentInstanceRef, executionId: "incremental-history-execution", attemptId,
+			}, { cwd, principalId: "owner", input: "Read twice" }));
+			await withTimeout(reachedFinal.promise, 10_000, "Provider did not reach the held final response");
+			await withTimeout(
+				retained.promise,
+				10_000,
+				"No history invalidation exposed retained tool-only results before completion",
+			);
+			expect((await runtime.store.getAttempt(attemptId))?.state).toBe("running");
+			const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+			const assistants = page.entries.filter(entry => entry.role === "assistant");
+			expect(assistants.map(entry => entry.text)).toEqual(["", "Intermediate answer"]);
+			expect(assistants.map(entry => entry.blocks?.find(block => block.kind === "tool_call")?.toolCallId)).toEqual([
+				"only-tool",
+				"next-tool",
+			]);
+			expect(assistants.every(entry => entry.assistantMessageId)).toBe(true);
+		} finally {
+			release.resolve();
+			unsubscribe();
+			await runtime.drain();
+		}
+	}, 30_000);
+
+	it("anchors a retry after its empty failed response through native execution and restart", async () => {
+		const mock = createMockModel({
+			responses: [{ throw: "503 service unavailable" }, { content: ["Recovered answer"] }],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const setup = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity));
+		const agentInstanceId = "empty-retry-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/empty-retry-history/agents/owner";
+		const attemptId = "empty-retry-attempt";
+		await setup.runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		await setup.runtime.start(startRequest(execution, {
+			commandId: "empty-retry-command", agentInstanceId,
+			agentInstanceRef, executionId: "empty-retry-execution", attemptId,
+		}, { cwd: setup.cwd, principalId: "owner", input: "Recover from a transient error" }));
+		await setup.runtime.drain();
+		expect(mock.calls).toHaveLength(2);
+		const events = await setup.runtime.store.pendingEvents();
+		const retry = events.find(event => event.kind === "retry_scheduled")!;
+		const retryScope: RuntimeScope = {
+			kind: "attempt",
+			agentInstanceRef,
+			attemptId,
+			kinds: ["state"],
+		};
+		const retryRequest = { principalId: "owner", agentInstanceRef, attemptId };
+		const settledDetail = (await setup.runtime.store.runtimeSnapshot(retryScope, retryRequest)).agents[0];
+		expect(settledDetail).toMatchObject({
+			attemptId,
+			retry: { attempt: 1, maxAttempts: 3, outcome: "succeeded", delayMs: 3000 },
+		});
+		const retryChanges = await setup.runtime.store.runtimeEvents({
+			scope: retryScope,
+			principalId: "owner",
+			epoch: (await setup.runtime.store.meta()).epoch,
+			afterCursor: retry.eventId - 1,
+			timeoutMs: 0,
+			limit: 100,
+			maxBytes: 61440,
+			remainingWork: runtimeRemainingWork(),
+		});
+		expect(retryChanges.changes.some(change => change.kind === "state" && (change.value.retry as { outcome?: string } | null)?.outcome === "waiting")).toBeTrue();
+		expect(retryChanges.changes.some(change => change.kind === "state" && (change.value.retry as { outcome?: string } | null)?.outcome === "succeeded")).toBeTrue();
+		const page = await setup.runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const lifecycle = await setup.runtime.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			page.lifecycleContext,
+		);
+		const assistants = page.entries.filter(entry => entry.role === "assistant");
+		expect(assistants.map(entry => [entry.text, entry.stopReason])).toEqual([
+			["", "error"],
+			["Recovered answer", "stop"],
+		]);
+		expect(lifecycle.activities.find(event => event.eventId === String(retry.eventId))).toMatchObject({
+			afterEntryId: assistants[0].entryId,
+			terminal: false,
+		});
+		const failure = events.find(
+			event =>
+				event.kind === "assistant_snapshot" &&
+				event.payload?.assistantMessageId === assistants[0].assistantMessageId,
+		)!;
+		expect(failure.payload).toMatchObject({ text: "", stopReason: "error", historyEntryId: assistants[0].entryId });
+		expect(failure.eventId).toBeLessThan(retry.eventId);
+		await setup.runtime.dispose();
+		const reopened = await openRuntime(setup.options);
+		expect((await reopened.store.runtimeSnapshot(retryScope, retryRequest)).agents[0].retry).toEqual(settledDetail.retry);
+		const retained = await reopened.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const retainedLifecycle = await reopened.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			retained.lifecycleContext,
+		);
+		expect(retainedLifecycle.activities).toEqual(lifecycle.activities);
+		expect(retained.entries).toEqual(page.entries);
+	}, 30_000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
