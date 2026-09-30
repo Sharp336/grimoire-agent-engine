@@ -6,13 +6,16 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:254c2c6344f1b94c20fea21267e93740a65c04d468cc25f275a19d95bd349a42";
+export const RUNTIME_PROTOCOL_HASH = "sha256:0c8d332e62fe011db9898266f9e82e91b27bf70ee9318eb9e39ecbc64d2f3d9a";
+export { RUNTIME_PROTOCOL_REVISION } from "./runtime-protocol.mjs";
 export const runtimeOriginIdChars = protocol.$defs.id.maxLength;
 export const runtimeLimits = protocol["x-artel"].limits;
 export const runtimeToolPageRecords = protocol.$defs.toolsPage.properties.items.maxItems;
 export const runtimeToolIdChars = protocol.$defs.toolCallId.maxLength;
 export const runtimeToolNameChars = protocol.$defs.toolDetail.properties.name.maxLength;
-export const ENGINE_CONTROL_OPS = new Set(["pause", "resume", "cancel", "resolve_input", "resolve_tool_approval"]);
+export const ENGINE_CONTROL_OPS: Readonly<Record<string, true>> = {
+	pause: true, resume: true, cancel: true, resolve_input: true, resolve_approval: true,
+};
 
 export type RuntimeDetailKind = "assistant" | "tool" | "state" | "queue" | "input" | "history" | "usage";
 export type RuntimeDetailInterest =
@@ -28,7 +31,7 @@ export interface RuntimeAccess {
 	authorizedAgentInstanceRefs?: string[];
 }
 
-/** Frozen revision-16 shapes. S0 does not activate these S1 admission operations. */
+/** Current binding shapes; revision17 is required at the managed boundary. */
 export interface RuntimeBindingGate {
 	bindingSnapshot: EngineSemanticBindingSnapshot;
 	phase: "open" | "preparing" | "committed_closed";
@@ -47,7 +50,7 @@ export interface RuntimeBindingCheckpoint {
 	binding_revision: number;
 	gate_revision: number;
 	census_mutation_revision: number;
-	runtime_contract_revision: 16;
+	runtime_contract_revision: 17;
 	engine_generation?: number;
 	status: "complete" | "busy" | "unknown";
 	nonterminal_starts: number;

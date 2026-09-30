@@ -1,8 +1,25 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
-import type { CreateAgentSessionOptions } from "../sdk";
 import { engineRouteToken } from "./route";
 import { validateRuntimeValue } from "./runtime-protocol";
+import type {
+	ApprovalAddressee, ApprovalDecider, ApprovalDecision, ApprovalRequest, ChoiceTransition,
+	EngineExecutionConfiguration, ExecutorChoice, StartSpecialRef,
+} from "./runtime-protocol.mjs";
+export type {
+	Effort, ServiceTier, WorkTarget, WorkStep, TaskHead, AgentHead, RequestedExecution,
+	DispatchRequest, DispatchDerivedPromptRequest, DispatchBranchRequest,
+	Dispatch, DispatchSpawn, DispatchRequirement, DispatchLimits, SpecialRef,
+	CandidateIdentity, Candidate, SelectedExecutor, ChoiceTransition, ExecutorChoice,
+	BillingPool, QuotaWindow, Price, ExecutorGlobalSettings, DispatchPreset,
+	UserProvider, ProviderAccount, UserModel, AvailableModelRoute, ScopeLimits, Rule, Consultant,
+	ApprovalRequest, ApprovalDecision, ApprovalDecisionInput, ApprovalAddressee, ApprovalDecider,
+	ToolApprovalSubject, SpawnApprovalSubject, EscalationApprovalSubject, ConsultantApprovalSubject,
+	EngineExecutionConfiguration, EngineExecutionRoutes, EngineExecutionRoute, ExecutionDescriptor,
+	ExecutorRouteState as EngineExecutorRouteState, ImmutableAttemptStart, EngineCommandPayload,
+	ContinuationConfiguration, ContinuationDigestInput, ExecutionDigestInput, RoutingLimits,
+	NativeCompatibility, RosterRequest, ExecutorSettingsRequest, AutomationExecution,
+} from "./runtime-protocol.mjs";
 
 /** Immutable semantic scope admitted by Core/ClientHost, independent of transport generations. */
 export interface EngineSemanticBindingSnapshot {
@@ -84,7 +101,7 @@ export interface EngineBindingCheckpoint {
 	binding_revision: number;
 	gate_revision: number;
 	census_mutation_revision: number;
-	runtime_contract_revision: 16;
+	runtime_contract_revision: 17;
 	engine_generation: number;
 	status: "complete" | "busy" | "unknown";
 	nonterminal_starts: number;
@@ -152,75 +169,7 @@ export interface EngineRetryState {
 	error?: string;
 }
 
-/** Attempt-local routing facts; phase describes routing, not the Attempt's lifecycle. */
-export interface EngineProfileRouteState {
-	/** Durable route-event sequence, present on queried snapshots. */
-	eventSeq?: number;
-	profileRef: string;
-	primaryRouteRef: string;
-	/** Last route observed in an assistant stream, never merely the next selected model. */
-	routeRef?: string;
-	pendingRouteRef?: string;
-	/** Present only after this exact slot was observed serving an assistant stream. */
-	slotId?: string;
-	thinkingLevel?: string | null;
-	thinkingSource?: "launch" | "slot" | "profile" | "model";
-	fallback: boolean;
-	phase: "loading" | "active" | "exhausted";
-}
-
-/** Immutable, non-secret mapping resolved with the launch profile. */
-export interface EngineProfileRoutes {
-	profileRef: string;
-	primaryRouteRef: string;
-	routes: ReadonlyArray<{
-		routeRef: string;
-		provider: string;
-		modelId: string;
-		slotId?: string;
-		thinkingLevel?: string | null;
-		thinkingSource?: "launch" | "slot" | "profile" | "model";
-	}>;
-}
-
 export const MAX_ENGINE_CHILD_ASSIGNMENT_BYTES = 32 * 1024;
-
-export interface EngineLaunchProfile {
-	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
-	spawns: string;
-	profileDigest: string;
-	/** Exact reopens prior conversation state; fresh always starts a new transcript. */
-	continuationPolicy?: "exact" | "fresh";
-	launchProfileRef?: string;
-	selectedRouteRef?: string;
-	/** Exact per-launch reasoning request resolved against the selected model. */
-	thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
-	/** Reject models whose resolved reasoning effort falls below this floor. */
-	minimumThinkingLevel?: "high";
-	/** Descendants allowed below this session. Artel default: one leaf child. */
-	maxSpawnDepth?: number;
-	/** Total child AgentInstances this Attempt may launch. */
-	maxChildren?: number;
-	/** Exact child AgentProfiles allowed by the pinned parent AgentProfile. */
-	childProfileRefs?: string[];
-	/** Per-launch stable instructions; AgentProfile itself intentionally has no permanent prompt. */
-	systemPrompt?: string;
-	/** Stable provider cache identity compiled by ClientHost for consultant launches. */
-	providerPromptCacheKey?: string;
-	toolNames?: string[];
-	restrictToolNames?: boolean;
-	/** Optional per-tool boundary policy. Missing tools remain unrestricted. */
-	toolPolicies?: Record<string, EngineToolPolicy>;
-	enableMCP?: boolean;
-	enableLsp?: boolean;
-	/** Per-session LSP transport policy; false keeps a private client. */
-	lspShared?: boolean;
-	/** Capability providers excluded by the compiled launch policy. */
-	disabledCapabilityProviders?: string[];
-	/** Existing OMP yield schema used by bounded consultant sessions. */
-	outputSchema?: unknown;
-	requireYieldTool?: boolean;
-}
 
 export interface EngineStartRequest {
 	commandId: string;
@@ -228,12 +177,17 @@ export interface EngineStartRequest {
 	attachmentUploadIds?: string[];
 	/** Opaque UI identity for the exact user message introduced by this command. */
 	clientMessageId?: string;
-	/** Canonical AGI revision whose selected profile matches this compiled launch. */
-	profileSelectionRevision?: number;
+	/** Complete authorized pre-admission roster; selection is made atomically by Engine. */
+	executionConfiguration: EngineExecutionConfiguration;
+	dispatchRef: string;
+	dispatchHash: string;
+	executionKind: "ordinary" | "automation" | "consultation";
+	specialRef: StartSpecialRef | null;
+	originReceiptId: string;
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
-	agentInstanceRef?: string;
-	bindingSnapshot?: EngineSemanticBindingSnapshot;
+	agentInstanceRef: string;
+	bindingSnapshot: EngineSemanticBindingSnapshot;
 	/** Presentation-only name. Identity and routing stay agentInstanceId/ref. */
 	displayName?: string;
 	/** Evidence-backed future delegation hint; never routing authority. */
@@ -267,7 +221,7 @@ export interface EngineStartRequest {
 	/** Required to clear a durable manual hold for an explicit user send. */
 	expectedIntentRevision?: number;
 	explicitContinue?: boolean;
-	principalId?: string;
+	principalId: string;
 }
 
 export interface EngineRestoreCheckpointSource {
@@ -336,13 +290,11 @@ export interface EngineControlRequest extends EngineTarget {
 	expectedIntentRevision?: number;
 }
 
-export interface EngineToolApprovalDecision extends EngineTarget {
+export interface EngineApprovalDecision extends EngineTarget {
 	expectedIntentRevision?: number;
 	expectedInputRevision?: number;
 	commandId: string;
-	approvalId: string;
-	decision: "approve" | "deny";
-	reason?: string;
+	approvalDecision: ApprovalDecision;
 }
 
 export interface EngineIndexedInputResult {
@@ -442,7 +394,10 @@ export interface EngineBindingSnapshot extends EngineTarget {
 	commandId: string;
 	engineAgentId: string;
 	sessionFile?: string;
-	profileDigest: string;
+	executionDigest: string;
+	continuationDigest: string;
+	dispatchRef: string;
+	dispatchHash: string;
 	state: EngineBindingState;
 	manualHold?: boolean;
 	intentRevision?: number;
@@ -454,6 +409,7 @@ export interface EngineStartResult extends EngineBindingSnapshot {
 	queueId?: string;
 	queueRevision?: number;
 	historyEdit?: EngineHistoryEditResult;
+	executorChoice: ExecutorChoice;
 }
 
 export interface EngineHistoryEditResult {
@@ -498,7 +454,7 @@ export interface EngineRejectedCommand {
 	operation?: "start";
 }
 
-export interface EngineEvent {
+export interface EngineEventBase {
 	agentInstanceRef?: string;
 	bindingSnapshot?: EngineSemanticBindingSnapshot;
 	eventId: number;
@@ -511,6 +467,10 @@ export interface EngineEvent {
 	bindingId: string;
 	bindingGeneration: number;
 	authorityGeneration: number;
+	createdAt: number;
+}
+
+export interface EngineOrdinaryEvent extends EngineEventBase {
 	kind:
 		| "agent_registered"
 		| "holds_changed"
@@ -528,8 +488,6 @@ export interface EngineEvent {
 		| "interrupted"
 		| "reconciled"
 		| "steered"
-		| "tool_approval_requested"
-		| "tool_approval_resolved"
 		| "input_requested"
 		| "input_resolved"
 		| "tool_started"
@@ -538,7 +496,8 @@ export interface EngineEvent {
 		| "model_settled"
 		| "retry_scheduled"
 		| "retry_settled"
-		| "profile_route_changed"
+		| "queued"
+		| "waiting_children"
 		| "inbox_changed"
 		| "assistant_snapshot"
 		| "history_checkpoint"
@@ -546,14 +505,47 @@ export interface EngineEvent {
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;
-	createdAt: number;
 }
+
+export interface EngineApprovalEventPayloads {
+	tool_approval_requested: ApprovalRequest;
+	spawn_approval_requested: ApprovalRequest;
+	escalation_approval_requested: ApprovalRequest;
+	consultant_approval_requested: ApprovalRequest;
+	tool_approval_resolved: EngineApprovalResolved;
+	spawn_approval_resolved: EngineApprovalResolved;
+	escalation_approval_resolved: EngineApprovalResolved;
+	consultant_approval_resolved: EngineApprovalResolved;
+	approval_escalated: {
+		request_id: string; address_revision: number;
+		from: ApprovalAddressee;
+		to: ApprovalAddressee;
+		expires_at: string | null;
+	};
+	approval_timed_out: { request_id: string; address_revision: number; status: "pending" | "waiting_human_paused" };
+	executor_route_changed: ChoiceTransition;
+}
+export type EngineApprovalResolved = {
+	request_id: string;
+	decision_revision: number;
+} & (
+	| { outcome: "approved" | "denied"; decided_by: ApprovalDecider }
+	| { outcome: "cancelled"; decided_by: ApprovalDecider | null }
+);
+export type EngineEvent = EngineOrdinaryEvent | {
+	[Kind in keyof EngineApprovalEventPayloads]: EngineEventBase & {
+		kind: Kind; payload: EngineApprovalEventPayloads[Kind];
+	}
+}[keyof EngineApprovalEventPayloads];
 
 export class EngineTargetError extends Error {
 	constructor(
 		readonly code:
 			| "agent_not_found"
 			| "agent_busy"
+			| "admission_dependency_cycle"
+			| "capacity_unavailable"
+			| "admission_state_unknown"
 			| "queue_full"
 			| "payload_too_large"
 			| "retention_gap"
@@ -574,6 +566,7 @@ export class EngineTargetError extends Error {
 			| "message_accepted_resume_unknown"
 			| "cancelled",
 		message: string,
+		readonly detail?: Record<string, unknown>,
 	) {
 		super(message);
 		this.name = "EngineTargetError";
@@ -582,17 +575,23 @@ export class EngineTargetError extends Error {
 
 export function validateStartRequest(request: EngineStartRequest): void {
 	validateCommandContext(request.context);
-	if (request.agentInstanceRef !== undefined || request.bindingSnapshot !== undefined) {
-		if (!request.agentInstanceRef || !request.bindingSnapshot)
-			throw new EngineTargetError("invalid_request", "Hosted Start requires both agentInstanceRef and bindingSnapshot");
-		validateSemanticBinding(request.bindingSnapshot, request.agentInstanceRef);
-	}
-	if (
-		request.profileSelectionRevision !== undefined &&
-		(!Number.isSafeInteger(request.profileSelectionRevision) || request.profileSelectionRevision < 1)
-	) {
-		throw new EngineTargetError("invalid_request", "Invalid profile selection revision");
-	}
+	validateSemanticBinding(request.bindingSnapshot, request.agentInstanceRef);
+	validateRuntimeValue("engineExecutionConfiguration", request.executionConfiguration);
+	validateRuntimeValue("artifactRef", request.dispatchRef);
+	validateRuntimeValue("hash", request.dispatchHash);
+	validateRuntimeValue("id", request.originReceiptId);
+	const dispatch = request.executionConfiguration.dispatch;
+	if (request.executionKind !== dispatch.execution_kind ||
+		(request.specialRef === null) !== (dispatch.special_ref === null) ||
+		(dispatch.target !== null && (dispatch.target.task_ref !== request.bindingSnapshot.taskRef ||
+			dispatch.target.work_step_id !== request.bindingSnapshot.workStepId)))
+		throw new EngineTargetError("invalid_request", "Start differs from its admitted dispatch or binding");
+	if (dispatch.special_ref && (!request.specialRef ||
+		request.specialRef.definitionRef !== dispatch.special_ref.definition_ref ||
+		request.specialRef.revision !== dispatch.special_ref.definition_revision ||
+		request.specialRef.occurrenceOrCallId !== ("occurrence_id" in dispatch.special_ref
+			? dispatch.special_ref.occurrence_id : dispatch.special_ref.call_id)))
+		throw new EngineTargetError("invalid_request", "Start special identity differs from its dispatch");
 	for (const [name, value] of Object.entries({
 		commandId: request.commandId,
 		agentInstanceId: request.agentInstanceId,

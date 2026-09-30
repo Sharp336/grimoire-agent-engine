@@ -1140,7 +1140,11 @@
                       "restore_workspace",
                       "semantic_binding",
                       "binding_result",
-                      "binding_mutation"
+                      "binding_mutation",
+                      "slot_lease",
+                      "slot_queue",
+                      "wait_edge",
+                      "routing_state"
                     ]
                   }
                 }
@@ -1206,141 +1210,664 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "metadata"
+              },
+              "value": {
+                "properties": {
+                  "subtype": {
+                    "const": "slot_lease"
+                  }
+                },
+                "required": [
+                  "subtype"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/slotLease"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "metadata"
+              },
+              "value": {
+                "properties": {
+                  "subtype": {
+                    "const": "slot_queue"
+                  }
+                },
+                "required": [
+                  "subtype"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/slotQueue"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "metadata"
+              },
+              "value": {
+                "properties": {
+                  "subtype": {
+                    "const": "wait_edge"
+                  }
+                },
+                "required": [
+                  "subtype"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/waitEdge"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "metadata"
+              },
+              "value": {
+                "properties": {
+                  "subtype": {
+                    "const": "routing_state"
+                  }
+                },
+                "required": [
+                  "subtype"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/routingState"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "binding"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/executionBinding"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "approval"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/approvalRow"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "attempt"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "required": [
+                  "execution",
+                  "executor_route_state"
+                ],
+                "properties": {
+                  "execution": {
+                    "$ref": "#/$defs/executionProvenance"
+                  },
+                  "executor_route_state": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "not": {
+                  "required": [
+                    "profile_route_state"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "command"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "properties": {
+                  "routing": {
+                    "$ref": "#/$defs/routingReceipt"
+                  }
+                },
+                "not": {
+                  "properties": {
+                    "operation": {
+                      "const": "resolve_tool_approval"
+                    }
+                  },
+                  "required": [
+                    "operation"
+                  ]
+                }
+              }
+            }
+          }
         }
       ]
     },
     "semanticId": {
-      "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[A-Za-z0-9:_.-]+$"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9:_.-]+$"
     },
-    "semanticRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "semanticRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "semanticAgentRef": {
-      "type": "string", "maxLength": 1000,
+      "type": "string",
+      "maxLength": 1000,
       "pattern": "^grimoire://(?:tasks/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/agents|agents/~u/[a-f0-9]{64})/[A-Za-z0-9._-]+$"
     },
     "semanticTaskRef": {
-      "type": ["string", "null"], "maxLength": 1000,
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 1000,
       "pattern": "^grimoire://tasks/(?:[A-Za-z0-9._-]+|~u/[a-f0-9]{64})/[A-Za-z0-9._-]+$"
     },
-    "semanticInstallation": { "type": "string", "pattern": "^install_[a-f0-9]{32}$" },
+    "semanticInstallation": {
+      "type": "string",
+      "pattern": "^install_[a-f0-9]{32}$"
+    },
     "semanticSnapshot": {
-      "type": "object", "additionalProperties": false,
-      "required": ["agentInstanceRef", "taskRef", "workStepId", "bindingRevision", "installationId", "parentAgentInstanceRef", "parentAttemptId", "parentBindingRevision"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentInstanceRef",
+        "taskRef",
+        "workStepId",
+        "bindingRevision",
+        "installationId",
+        "parentAgentInstanceRef",
+        "parentAttemptId",
+        "parentBindingRevision"
+      ],
       "properties": {
-        "agentInstanceRef": { "$ref": "#/$defs/semanticAgentRef" },
-        "taskRef": { "$ref": "#/$defs/semanticTaskRef" },
-        "workStepId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
-        "bindingRevision": { "$ref": "#/$defs/semanticRevision" },
-        "installationId": { "anyOf": [{ "$ref": "#/$defs/semanticInstallation" }, { "type": "null" }] },
-        "parentAgentInstanceRef": { "anyOf": [{ "$ref": "#/$defs/semanticAgentRef" }, { "type": "null" }] },
-        "parentAttemptId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
-        "parentBindingRevision": { "anyOf": [{ "$ref": "#/$defs/semanticRevision" }, { "type": "null" }] }
+        "agentInstanceRef": {
+          "$ref": "#/$defs/semanticAgentRef"
+        },
+        "taskRef": {
+          "$ref": "#/$defs/semanticTaskRef"
+        },
+        "workStepId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bindingRevision": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "installationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticInstallation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentAgentInstanceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticAgentRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentAttemptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentBindingRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       }
     },
     "semanticGate": {
-      "type": "object", "additionalProperties": false,
-      "required": ["bindingSnapshot", "phase", "operationId", "proposalHash", "gateRevision", "censusMutationRevision"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindingSnapshot",
+        "phase",
+        "operationId",
+        "proposalHash",
+        "gateRevision",
+        "censusMutationRevision"
+      ],
       "properties": {
-        "bindingSnapshot": { "$ref": "#/$defs/semanticSnapshot" },
-        "phase": { "enum": ["open", "preparing", "committed_closed"] },
-        "operationId": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
-        "proposalHash": { "anyOf": [{ "$ref": "#/$defs/bytesHash" }, { "type": "null" }] },
-        "gateRevision": { "$ref": "#/$defs/semanticRevision" },
-        "censusMutationRevision": { "$ref": "#/$defs/semanticRevision" },
-        "committedTarget": { "$ref": "#/$defs/semanticSnapshot" }
+        "bindingSnapshot": {
+          "$ref": "#/$defs/semanticSnapshot"
+        },
+        "phase": {
+          "enum": [
+            "open",
+            "preparing",
+            "committed_closed"
+          ]
+        },
+        "operationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposalHash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/bytesHash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gateRevision": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "censusMutationRevision": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "committedTarget": {
+          "$ref": "#/$defs/semanticSnapshot"
+        }
       }
     },
     "semanticCheckpoint": {
-      "type": "object", "additionalProperties": false,
-      "required": ["agent_ref", "installation_id", "operation_id", "proposal_hash", "binding_revision", "gate_revision", "census_mutation_revision", "runtime_contract_revision", "status", "nonterminal_starts", "nonterminal_attempts", "open_effects", "unsettled_children", "mutable_pending_writes", "next_cursor"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_ref",
+        "installation_id",
+        "operation_id",
+        "proposal_hash",
+        "binding_revision",
+        "gate_revision",
+        "census_mutation_revision",
+        "runtime_contract_revision",
+        "status",
+        "nonterminal_starts",
+        "nonterminal_attempts",
+        "open_effects",
+        "unsettled_children",
+        "mutable_pending_writes",
+        "next_cursor"
+      ],
       "properties": {
-        "agent_ref": { "$ref": "#/$defs/semanticAgentRef" },
-        "installation_id": { "$ref": "#/$defs/semanticInstallation" },
-        "operation_id": { "$ref": "#/$defs/semanticId" },
-        "proposal_hash": { "$ref": "#/$defs/bytesHash" },
-        "binding_revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
-        "gate_revision": { "$ref": "#/$defs/semanticRevision" },
-        "census_mutation_revision": { "$ref": "#/$defs/semanticRevision" },
-        "runtime_contract_revision": { "const": 16 },
-        "engine_generation": { "$ref": "#/$defs/semanticRevision" },
-        "status": { "enum": ["complete", "busy", "unknown"] },
-        "nonterminal_starts": { "$ref": "#/$defs/semanticRevision" },
-        "nonterminal_attempts": { "$ref": "#/$defs/semanticRevision" },
-        "open_effects": { "$ref": "#/$defs/semanticRevision" },
-        "unsettled_children": { "$ref": "#/$defs/semanticRevision" },
-        "mutable_pending_writes": { "$ref": "#/$defs/semanticRevision" },
-        "next_cursor": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] }
+        "agent_ref": {
+          "$ref": "#/$defs/semanticAgentRef"
+        },
+        "installation_id": {
+          "$ref": "#/$defs/semanticInstallation"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/semanticId"
+        },
+        "proposal_hash": {
+          "$ref": "#/$defs/bytesHash"
+        },
+        "binding_revision": {
+          "$ref": "#/$defs/semanticRevision",
+          "minimum": 1
+        },
+        "gate_revision": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "census_mutation_revision": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "runtime_contract_revision": {
+          "const": 17
+        },
+        "engine_generation": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "busy",
+            "unknown"
+          ]
+        },
+        "nonterminal_starts": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "nonterminal_attempts": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "open_effects": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "unsettled_children": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "mutable_pending_writes": {
+          "$ref": "#/$defs/semanticRevision"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       }
     },
     "semanticOperationResult": {
       "type": "object",
-      "required": ["agent_ref", "revision", "binding_revision", "task_ref", "work_step_id", "installation_id", "phase", "operation_id", "proposal_hash", "status"],
+      "required": [
+        "agent_ref",
+        "revision",
+        "binding_revision",
+        "task_ref",
+        "work_step_id",
+        "installation_id",
+        "phase",
+        "operation_id",
+        "proposal_hash",
+        "status"
+      ],
       "properties": {
-        "agent_ref": { "$ref": "#/$defs/semanticAgentRef" },
-        "revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
-        "binding_revision": { "$ref": "#/$defs/semanticRevision", "minimum": 1 },
-        "task_ref": { "$ref": "#/$defs/semanticTaskRef" },
-        "work_step_id": { "anyOf": [{ "$ref": "#/$defs/semanticId" }, { "type": "null" }] },
-        "installation_id": { "$ref": "#/$defs/semanticInstallation" },
-        "phase": { "enum": ["active", "preparing", "committed_await_adopt"] },
-        "operation_id": { "$ref": "#/$defs/semanticId" },
-        "proposal_hash": { "$ref": "#/$defs/bytesHash" },
-        "status": { "enum": ["prepared", "committed", "adopted", "aborted", "unchanged"] }
+        "agent_ref": {
+          "$ref": "#/$defs/semanticAgentRef"
+        },
+        "revision": {
+          "$ref": "#/$defs/semanticRevision",
+          "minimum": 1
+        },
+        "binding_revision": {
+          "$ref": "#/$defs/semanticRevision",
+          "minimum": 1
+        },
+        "task_ref": {
+          "$ref": "#/$defs/semanticTaskRef"
+        },
+        "work_step_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installation_id": {
+          "$ref": "#/$defs/semanticInstallation"
+        },
+        "phase": {
+          "enum": [
+            "active",
+            "preparing",
+            "committed_await_adopt"
+          ]
+        },
+        "operation_id": {
+          "$ref": "#/$defs/semanticId"
+        },
+        "proposal_hash": {
+          "$ref": "#/$defs/bytesHash"
+        },
+        "status": {
+          "enum": [
+            "prepared",
+            "committed",
+            "adopted",
+            "aborted",
+            "unchanged"
+          ]
+        }
       }
     },
     "semanticResult": {
-      "allOf": [{ "$ref": "#/$defs/semanticOperationResult" }],
+      "allOf": [
+        {
+          "$ref": "#/$defs/semanticOperationResult"
+        }
+      ],
       "unevaluatedProperties": false,
-      "required": ["schema", "action", "operation_result"],
+      "required": [
+        "schema",
+        "action",
+        "operation_result"
+      ],
       "properties": {
-        "schema": { "const": "grimoire.agent_binding.result.v1" },
-        "action": { "enum": ["prepare", "status", "commit", "abort", "adopt"] },
+        "schema": {
+          "const": "grimoire.agent_binding.result.v1"
+        },
+        "action": {
+          "enum": [
+            "prepare",
+            "status",
+            "commit",
+            "abort",
+            "adopt"
+          ]
+        },
         "operation_result": {
-          "allOf": [{ "$ref": "#/$defs/semanticOperationResult" }], "unevaluatedProperties": false
+          "allOf": [
+            {
+              "$ref": "#/$defs/semanticOperationResult"
+            }
+          ],
+          "unevaluatedProperties": false
         }
       }
     },
     "semanticMetadataPut": {
-      "description": "Reserved metadata key prefixes require exact subtype/envelopes. All changed keys retain exactly one revision check; nested contracts mirror runtime16 without changing its bytes. The 256 KiB runtime value bound also bounds census depth.",
+      "description": "Reserved metadata key prefixes require exact subtype/envelopes. All changed keys retain exactly one revision check; nested contracts mirror runtime17. The 256 KiB runtime value bound also bounds census depth.",
       "allOf": [
         {
-          "if": { "properties": { "id": { "pattern": "^(semantic-binding|semantic-birth|binding-census|binding-result|binding-terminal|binding-mutation):" } } },
+          "if": {
+            "properties": {
+              "id": {
+                "pattern": "^(semantic-binding|semantic-birth|binding-census|binding-result|binding-terminal|binding-mutation):"
+              }
+            }
+          },
           "then": {
             "oneOf": [
               {
                 "properties": {
-                  "id": { "pattern": "^semantic-binding:[A-Za-z0-9:_.-]+$" },
+                  "id": {
+                    "pattern": "^semantic-binding:[A-Za-z0-9:_.-]+$"
+                  },
                   "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype", "gate"],
-                    "properties": { "subtype": { "const": "semantic_binding" }, "gate": { "$ref": "#/$defs/semanticGate" } }
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "id": { "pattern": "^semantic-birth:[A-Za-z0-9:_.-]+$" },
-                  "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype", "established"],
-                    "properties": { "subtype": { "const": "semantic_binding" }, "established": { "const": true } }
-                  }
-                }
-              },
-              {
-                "properties": {
-                  "id": { "pattern": "^binding-census:[A-Za-z0-9:_.-]+$" },
-                  "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype", "checkpoint", "stack"],
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype",
+                      "gate"
+                    ],
                     "properties": {
-                      "subtype": { "const": "semantic_binding" },
-                      "checkpoint": { "$ref": "#/$defs/semanticCheckpoint" },
+                      "subtype": {
+                        "const": "semantic_binding"
+                      },
+                      "gate": {
+                        "$ref": "#/$defs/semanticGate"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "pattern": "^semantic-birth:[A-Za-z0-9:_.-]+$"
+                  },
+                  "value": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype",
+                      "established"
+                    ],
+                    "properties": {
+                      "subtype": {
+                        "const": "semantic_binding"
+                      },
+                      "established": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "pattern": "^binding-census:[A-Za-z0-9:_.-]+$"
+                  },
+                  "value": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype",
+                      "checkpoint",
+                      "stack"
+                    ],
+                    "properties": {
+                      "subtype": {
+                        "const": "semantic_binding"
+                      },
+                      "checkpoint": {
+                        "$ref": "#/$defs/semanticCheckpoint"
+                      },
                       "stack": {
                         "type": "array",
                         "items": {
-                          "type": "object", "additionalProperties": false, "required": ["id", "ref", "stage"],
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "ref",
+                            "stage"
+                          ],
                           "properties": {
-                            "id": { "$ref": "#/$defs/semanticId" },
-                            "ref": { "$ref": "#/$defs/semanticAgentRef" },
-                            "stage": { "enum": [0, 1] },
-                            "after": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/runtimeId" } }
+                            "id": {
+                              "$ref": "#/$defs/semanticId"
+                            },
+                            "ref": {
+                              "$ref": "#/$defs/semanticAgentRef"
+                            },
+                            "stage": {
+                              "enum": [
+                                0,
+                                1
+                              ]
+                            },
+                            "after": {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 1,
+                              "items": {
+                                "$ref": "#/$defs/runtimeId"
+                              }
+                            }
                           }
                         }
                       }
@@ -1350,34 +1877,100 @@
               },
               {
                 "properties": {
-                  "id": { "pattern": "^binding-result:[A-Za-z0-9:_.-]+$" },
+                  "id": {
+                    "pattern": "^binding-result:[A-Za-z0-9:_.-]+$"
+                  },
                   "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype", "result", "gate"],
-                    "properties": { "subtype": { "const": "binding_result" }, "result": { "$ref": "#/$defs/semanticResult" }, "gate": { "$ref": "#/$defs/semanticGate" } }
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype",
+                      "result",
+                      "gate"
+                    ],
+                    "properties": {
+                      "subtype": {
+                        "const": "binding_result"
+                      },
+                      "result": {
+                        "$ref": "#/$defs/semanticResult"
+                      },
+                      "gate": {
+                        "$ref": "#/$defs/semanticGate"
+                      }
+                    }
                   }
                 }
               },
               {
                 "properties": {
-                  "id": { "pattern": "^binding-terminal:[A-Za-z0-9:_.-]+$" },
+                  "id": {
+                    "pattern": "^binding-terminal:[A-Za-z0-9:_.-]+$"
+                  },
                   "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype", "result", "gate", "old"],
-                    "properties": { "subtype": { "const": "binding_result" }, "result": { "$ref": "#/$defs/semanticResult" }, "gate": { "$ref": "#/$defs/semanticGate" }, "old": { "$ref": "#/$defs/semanticSnapshot" } }
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype",
+                      "result",
+                      "gate",
+                      "old"
+                    ],
+                    "properties": {
+                      "subtype": {
+                        "const": "binding_result"
+                      },
+                      "result": {
+                        "$ref": "#/$defs/semanticResult"
+                      },
+                      "gate": {
+                        "$ref": "#/$defs/semanticGate"
+                      },
+                      "old": {
+                        "$ref": "#/$defs/semanticSnapshot"
+                      }
+                    }
                   }
                 }
               },
               {
                 "properties": {
-                  "id": { "pattern": "^binding-mutation:[A-Za-z0-9:_.-]+$" },
+                  "id": {
+                    "pattern": "^binding-mutation:[A-Za-z0-9:_.-]+$"
+                  },
                   "value": {
-                    "type": "object", "additionalProperties": false, "required": ["subtype"],
-                    "properties": { "subtype": { "const": "binding_mutation" } }
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subtype"
+                    ],
+                    "properties": {
+                      "subtype": {
+                        "const": "binding_mutation"
+                      }
+                    }
                   }
                 }
               }
             ]
           },
-          "else": { "properties": { "value": { "properties": { "subtype": { "not": { "enum": ["semantic_binding", "binding_result", "binding_mutation"] } } } } } }
+          "else": {
+            "properties": {
+              "value": {
+                "properties": {
+                  "subtype": {
+                    "not": {
+                      "enum": [
+                        "semantic_binding",
+                        "binding_result",
+                        "binding_mutation"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -1411,6 +2004,9 @@
           "items": {
             "$ref": "#/$defs/runtimeKey"
           }
+        },
+        "routing_admission": {
+          "$ref": "#/$defs/routingAdmission"
         }
       }
     },
@@ -1537,7 +2133,10 @@
                     "delete_pending",
                     "attempt_open",
                     "command_received",
-                    "inbox_pending"
+                    "inbox_pending",
+                    "routing_leases",
+                    "routing_queue",
+                    "routing_wait_edges"
                   ]
                 },
                 "key": {
@@ -1975,10 +2574,3178 @@
           }
         }
       }
+    },
+    "artifactRef": {
+      "type": "string",
+      "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$"
+    },
+    "effort": {
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    "serviceTier": {
+      "enum": [
+        "standard",
+        "priority",
+        "flex"
+      ]
+    },
+    "dispatchPin": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "route_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "model_id",
+        "effort",
+        "route_ref",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "dispatchRequirement": {
+      "type": "object",
+      "properties": {
+        "min_tier": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "tools",
+              "image"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "required_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preferred_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "models": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exclude": {
+          "type": "object",
+          "properties": {
+            "models": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "families": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "agent_instances": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/agi"
+              }
+            }
+          },
+          "required": [
+            "models",
+            "families",
+            "agent_instances"
+          ],
+          "additionalProperties": false
+        },
+        "min_context": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min_output": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latency_ceiling_ms": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "min_effort": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/effort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "service_tier": {
+          "$ref": "#/$defs/serviceTier"
+        },
+        "downgrade": {
+          "enum": [
+            "forbidden",
+            "approval",
+            "allowed"
+          ]
+        },
+        "pin": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/dispatchPin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "min_tier",
+        "required",
+        "required_tags",
+        "preferred_tags",
+        "models",
+        "exclude",
+        "min_context",
+        "min_output",
+        "latency_ceiling_ms",
+        "min_effort",
+        "service_tier",
+        "downgrade",
+        "pin"
+      ],
+      "additionalProperties": false
+    },
+    "candidateIdentity": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "route_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "service_tier": {
+          "$ref": "#/$defs/serviceTier"
+        },
+        "billing_pool_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billing_pool_basis": {
+          "enum": [
+            "expected",
+            "observed"
+          ]
+        }
+      },
+      "required": [
+        "model_id",
+        "route_ref",
+        "account_ref",
+        "effort",
+        "service_tier",
+        "billing_pool_id",
+        "billing_pool_basis"
+      ],
+      "additionalProperties": false
+    },
+    "recordRevisions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "route_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "service_tier": {
+          "$ref": "#/$defs/serviceTier"
+        },
+        "billing_pool_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billing_pool_basis": {
+          "enum": [
+            "expected",
+            "observed"
+          ]
+        },
+        "tier": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "quota_window_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "shadow_cost": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "price_source": {
+          "enum": [
+            "account",
+            "list",
+            "tier_estimate",
+            "unknown"
+          ]
+        },
+        "estimated": {
+          "type": "boolean"
+        },
+        "record_revisions": {
+          "$ref": "#/$defs/recordRevisions"
+        }
+      },
+      "required": [
+        "model_id",
+        "route_ref",
+        "account_ref",
+        "effort",
+        "service_tier",
+        "billing_pool_id",
+        "billing_pool_basis",
+        "tier",
+        "provider_id",
+        "quota_window_ids",
+        "shadow_cost",
+        "price_source",
+        "estimated",
+        "record_revisions"
+      ],
+      "additionalProperties": false
+    },
+    "selectedExecutor": {
+      "type": "object",
+      "properties": {
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "route_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "account_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "service_tier": {
+          "$ref": "#/$defs/serviceTier"
+        },
+        "billing_pool_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "billing_pool_basis": {
+          "enum": [
+            "expected",
+            "observed"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "rank",
+            "pin",
+            "order",
+            "user"
+          ]
+        },
+        "order_match": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "scope_ref": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "for_tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "scope_ref",
+                "index",
+                "for_tags"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "model_id",
+        "route_ref",
+        "account_ref",
+        "effort",
+        "service_tier",
+        "billing_pool_id",
+        "billing_pool_basis",
+        "basis",
+        "order_match"
+      ],
+      "additionalProperties": false
+    },
+    "choiceTransition": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "$ref": "#/$defs/candidateIdentity"
+        },
+        "to": {
+          "$ref": "#/$defs/candidateIdentity"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lease_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "from_execution_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "to_execution_digest": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "seq",
+        "event_id",
+        "from",
+        "to",
+        "reason",
+        "at",
+        "lease_revision",
+        "from_execution_digest",
+        "to_execution_digest"
+      ],
+      "additionalProperties": false
+    },
+    "choiceProvenance": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "content_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "ref",
+        "revision",
+        "content_hash"
+      ],
+      "additionalProperties": false
+    },
+    "actualCost": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cached_input_tokens": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 1
+        },
+        "amount": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "currency",
+        "amount",
+        "source",
+        "observed_at"
+      ],
+      "additionalProperties": false
+    },
+    "executorChoice": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "grimoire.executor_choice.v1"
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "preset_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_requirement": {
+          "$ref": "#/$defs/dispatchRequirement"
+        },
+        "scope_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidate"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "filtered_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "selected": {
+          "$ref": "#/$defs/selectedExecutor"
+        },
+        "execution_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "shadow_cost_estimate": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/choiceProvenance"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/choiceProvenance"
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/choiceTransition"
+          }
+        },
+        "actual_cost": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actualCost"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "grants_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "receipt_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dispatch_hash": {
+                "$ref": "#/$defs/hash"
+              },
+              "scope_ref": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "receipt_ref",
+              "dispatch_hash",
+              "scope_ref"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "dispatch_hash",
+        "preset_ref",
+        "effective_requirement",
+        "scope_revision",
+        "candidates",
+        "filtered_counts",
+        "selected",
+        "execution_digest",
+        "shadow_cost_estimate",
+        "rules",
+        "skills",
+        "transitions",
+        "actual_cost",
+        "grants_used"
+      ],
+      "additionalProperties": false
+    },
+    "approvalAddressee": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "attempt"
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "agent_ref",
+            "attempt_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "human"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "principal_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "approvalDecider": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "human"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "principal_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "agent"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "principal_id",
+            "agent_ref",
+            "attempt_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "toolApprovalSubject": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "call_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "ceiling_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "tool_name",
+        "call_hash",
+        "ceiling_hash"
+      ],
+      "additionalProperties": false
+    },
+    "spawnApprovalSubject": {
+      "type": "object",
+      "properties": {
+        "child_dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "admission_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requested_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "requested_child_ordinal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "exceeded": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "max_depth",
+              "max_children"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "ceiling_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "child_dispatch_hash",
+        "admission_id",
+        "requested_depth",
+        "requested_child_ordinal",
+        "exceeded",
+        "ceiling_hash"
+      ],
+      "additionalProperties": false
+    },
+    "escalationApprovalSubject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "premium_once"
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "dispatch_hash",
+            "model_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "scope_grant"
+            },
+            "scope_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mutation_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "scope_ref",
+            "model_id",
+            "expected_revision",
+            "mutation_hash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "$ref": "#/$defs/scopeLimitSubject"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "selection_gate_change"
+            },
+            "object_ref": {
+              "$ref": "#/$defs/artifactRef"
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mutation_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "before_effective_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "after_effective_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "object_ref",
+            "expected_revision",
+            "mutation_hash",
+            "before_effective_hash",
+            "after_effective_hash"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "consultantApprovalSubject": {
+      "type": "object",
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "definition_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "definition_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "unavailable_pin": {
+          "$ref": "#/$defs/consultantPin"
+        },
+        "proposed_reselection_hash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "call_id",
+        "definition_ref",
+        "definition_revision",
+        "dispatch_hash",
+        "unavailable_pin",
+        "proposed_reselection_hash"
+      ],
+      "additionalProperties": false
+    },
+    "approvalRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "grimoire.approval_request.v1"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "requester_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_binding_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "effect_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requires_human": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "addressed_to": {
+              "$ref": "#/$defs/approvalAddressee"
+            },
+            "addressed_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expires_at": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "address_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "decision_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "waiting_human_paused",
+                "approved",
+                "denied",
+                "cancelled"
+              ]
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "settings_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "settings_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "kind": {
+              "const": "tool"
+            },
+            "subject": {
+              "$ref": "#/$defs/toolApprovalSubject"
+            }
+          },
+          "required": [
+            "schema",
+            "id",
+            "principal_id",
+            "requester_agent_ref",
+            "requester_attempt_id",
+            "requester_binding_revision",
+            "dispatch_hash",
+            "effect_id",
+            "name",
+            "requires_human",
+            "reason",
+            "created_at",
+            "addressed_to",
+            "addressed_at",
+            "expires_at",
+            "address_revision",
+            "decision_revision",
+            "status",
+            "timeout_seconds",
+            "settings_revision",
+            "settings_hash",
+            "kind",
+            "subject"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "grimoire.approval_request.v1"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "requester_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_binding_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "effect_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requires_human": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "addressed_to": {
+              "$ref": "#/$defs/approvalAddressee"
+            },
+            "addressed_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expires_at": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "address_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "decision_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "waiting_human_paused",
+                "approved",
+                "denied",
+                "cancelled"
+              ]
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "settings_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "settings_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "kind": {
+              "const": "spawn"
+            },
+            "subject": {
+              "$ref": "#/$defs/spawnApprovalSubject"
+            }
+          },
+          "required": [
+            "schema",
+            "id",
+            "principal_id",
+            "requester_agent_ref",
+            "requester_attempt_id",
+            "requester_binding_revision",
+            "dispatch_hash",
+            "effect_id",
+            "name",
+            "requires_human",
+            "reason",
+            "created_at",
+            "addressed_to",
+            "addressed_at",
+            "expires_at",
+            "address_revision",
+            "decision_revision",
+            "status",
+            "timeout_seconds",
+            "settings_revision",
+            "settings_hash",
+            "kind",
+            "subject"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "grimoire.approval_request.v1"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "requester_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_binding_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "effect_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requires_human": {
+              "const": true
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "addressed_to": {
+              "$ref": "#/$defs/approvalAddressee"
+            },
+            "addressed_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expires_at": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "address_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "decision_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "waiting_human_paused",
+                "approved",
+                "denied",
+                "cancelled"
+              ]
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "settings_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "settings_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "kind": {
+              "const": "escalation"
+            },
+            "subject": {
+              "$ref": "#/$defs/escalationApprovalSubject"
+            }
+          },
+          "required": [
+            "schema",
+            "id",
+            "principal_id",
+            "requester_agent_ref",
+            "requester_attempt_id",
+            "requester_binding_revision",
+            "dispatch_hash",
+            "effect_id",
+            "name",
+            "requires_human",
+            "reason",
+            "created_at",
+            "addressed_to",
+            "addressed_at",
+            "expires_at",
+            "address_revision",
+            "decision_revision",
+            "status",
+            "timeout_seconds",
+            "settings_revision",
+            "settings_hash",
+            "kind",
+            "subject"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "const": "grimoire.approval_request.v1"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "requester_attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requester_binding_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "effect_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "requires_human": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "addressed_to": {
+              "$ref": "#/$defs/approvalAddressee"
+            },
+            "addressed_at": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expires_at": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "address_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "decision_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "waiting_human_paused",
+                "approved",
+                "denied",
+                "cancelled"
+              ]
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "settings_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "settings_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "kind": {
+              "const": "consultant"
+            },
+            "subject": {
+              "$ref": "#/$defs/consultantApprovalSubject"
+            }
+          },
+          "required": [
+            "schema",
+            "id",
+            "principal_id",
+            "requester_agent_ref",
+            "requester_attempt_id",
+            "requester_binding_revision",
+            "dispatch_hash",
+            "effect_id",
+            "name",
+            "requires_human",
+            "reason",
+            "created_at",
+            "addressed_to",
+            "addressed_at",
+            "expires_at",
+            "address_revision",
+            "decision_revision",
+            "status",
+            "timeout_seconds",
+            "settings_revision",
+            "settings_hash",
+            "kind",
+            "subject"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "approvalDecision": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_address_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expected_decision_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "approve_always",
+            "deny"
+          ]
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema": {
+          "const": "grimoire.approval_decision.v1"
+        },
+        "origin_receipt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decided_by": {
+          "$ref": "#/$defs/approvalDecider"
+        },
+        "authority": {
+          "type": "object",
+          "properties": {
+            "ceiling_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "subject_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "dispatch_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "ceiling_hash",
+            "subject_hash",
+            "dispatch_hash"
+          ],
+          "additionalProperties": false
+        },
+        "decided_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "request_id",
+        "expected_address_revision",
+        "expected_decision_revision",
+        "command_id",
+        "decision",
+        "reason",
+        "schema",
+        "origin_receipt_id",
+        "decided_by",
+        "authority",
+        "decided_at"
+      ],
+      "additionalProperties": false
+    },
+    "taskRef": {
+      "type": "string",
+      "maxLength": 1000,
+      "pattern": "^grimoire://tasks/(?:[A-Za-z0-9._-]+|~u/[a-f0-9]{64})/[A-Za-z0-9._-]+(?![\\s\\S])"
+    },
+    "agi": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^grimoire://(?:tasks/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/agents|agents/~u/[a-f0-9]{64})/[A-Za-z0-9._-]+(?![\\s\\S])"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "bindingSnapshot": {
+      "type": "object",
+      "properties": {
+        "agentInstanceRef": {
+          "$ref": "#/$defs/agi"
+        },
+        "taskRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/taskRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workStepId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "installationId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/installationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentAgentInstanceRef": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentAttemptId": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentBindingRevision": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agentInstanceRef",
+        "taskRef",
+        "workStepId",
+        "bindingRevision",
+        "installationId",
+        "parentAgentInstanceRef",
+        "parentAttemptId",
+        "parentBindingRevision"
+      ],
+      "additionalProperties": false
+    },
+    "installationId": {
+      "type": "string",
+      "pattern": "^install_[a-f0-9]{32}(?![\\s\\S])"
+    },
+    "routingAdmission": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "acquire"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "queue_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "candidate": {
+              "$ref": "#/$defs/candidateIdentity"
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "renew"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "queue_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "candidate": {
+              "$ref": "#/$defs/candidateIdentity"
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "release"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "queue_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "candidate": {
+              "$ref": "#/$defs/candidateIdentity"
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "transfer"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "queue_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "candidate": {
+              "$ref": "#/$defs/candidateIdentity"
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "from_candidate": {
+              "$ref": "#/$defs/candidateIdentity"
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision",
+            "from_candidate"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "enqueue"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "queue_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "candidate": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/candidateIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "cancel"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "queue_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "candidate": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/candidateIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "dequeue"
+            },
+            "expected_routing_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "command_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attempt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent_ref": {
+              "$ref": "#/$defs/agi"
+            },
+            "principal_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "lease_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "queue_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "candidate": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/candidateIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "receipt_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "receipt_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "lease_revision": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "expected_routing_revision",
+            "command_id",
+            "attempt_id",
+            "agent_ref",
+            "principal_id",
+            "device_id",
+            "lease_id",
+            "queue_id",
+            "candidate",
+            "receipt_id",
+            "receipt_hash",
+            "lease_revision"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "routingResources": {
+      "type": "object",
+      "properties": {
+        "scope_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "tier": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "consultation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "scope_refs",
+        "tier",
+        "account_ref",
+        "provider_id",
+        "consultation"
+      ],
+      "additionalProperties": false
+    },
+    "slotLease": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "grimoire.slot_lease.v1"
+        },
+        "subtype": {
+          "const": "slot_lease"
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lease_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "engine_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "binding_snapshot_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "resources": {
+          "$ref": "#/$defs/routingResources"
+        },
+        "acquired_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "heartbeat_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "schema",
+        "subtype",
+        "principal_id",
+        "device_id",
+        "attempt_id",
+        "lease_revision",
+        "engine_generation",
+        "dispatch_hash",
+        "binding_snapshot_hash",
+        "resources",
+        "acquired_at",
+        "heartbeat_at",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "slotQueue": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "grimoire.slot_queue.v1"
+        },
+        "subtype": {
+          "const": "slot_queue"
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "admission_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dispatch_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "origin_receipt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bindingSnapshot": {
+          "$ref": "#/$defs/bindingSnapshot"
+        },
+        "auth_context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "roster_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "candidate_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requested_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_revisions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "status": {
+          "enum": [
+            "waiting",
+            "admitting",
+            "accepted",
+            "cancelled",
+            "refused"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "subtype",
+        "principal_id",
+        "device_id",
+        "sequence",
+        "admission_id",
+        "command_id",
+        "attempt_id",
+        "dispatch_ref",
+        "dispatch_hash",
+        "origin_receipt_id",
+        "bindingSnapshot",
+        "auth_context_id",
+        "roster_revision",
+        "candidate_refs",
+        "requested_at",
+        "reason",
+        "expected_revisions",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "waitEdge": {
+      "type": "object",
+      "properties": {
+        "subtype": {
+          "const": "wait_edge"
+        },
+        "caller_attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "waited_admission_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "child",
+            "consultation"
+          ]
+        }
+      },
+      "required": [
+        "subtype",
+        "caller_attempt_id",
+        "waited_admission_id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "routingState": {
+      "type": "object",
+      "properties": {
+        "subtype": {
+          "const": "routing_state"
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routing_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "subtype",
+        "principal_id",
+        "device_id",
+        "routing_revision"
+      ],
+      "additionalProperties": false
+    },
+    "routingReceipt": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "acquire",
+            "renew",
+            "release",
+            "transfer",
+            "enqueue",
+            "cancel",
+            "dequeue"
+          ]
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lease_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/candidateIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receipt_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "lease_revision": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "attempt_id",
+        "lease_id",
+        "queue_id",
+        "candidate",
+        "receipt_id",
+        "receipt_hash",
+        "lease_revision"
+      ],
+      "additionalProperties": false
+    },
+    "executionProvenance": {
+      "type": "object",
+      "properties": {
+        "execution_schema": {
+          "const": 2
+        },
+        "execution_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "continuation_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "dispatch_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "executor_choice": {
+          "$ref": "#/$defs/executorChoice"
+        },
+        "lease_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "queue_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "execution_schema",
+        "execution_digest",
+        "continuation_digest",
+        "dispatch_ref",
+        "dispatch_hash",
+        "executor_choice",
+        "lease_id",
+        "queue_id"
+      ],
+      "additionalProperties": false
+    },
+    "approvalMetadata": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/approvalRequest"
+        },
+        "decision_record": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/approvalDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timed_out_attempt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "request",
+        "decision_record",
+        "timed_out_attempt_ids"
+      ],
+      "additionalProperties": false
+    },
+    "approvalRow": {
+      "type": "object",
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effect_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "resolved"
+          ]
+        },
+        "decision": {
+          "oneOf": [
+            {
+              "enum": [
+                "approve",
+                "approve_always",
+                "deny",
+                "cancelled"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request": {
+          "$ref": "#/$defs/approvalRequest"
+        },
+        "decision_record": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/approvalDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timed_out_attempt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "approval_id",
+        "effect_id",
+        "state",
+        "decision",
+        "updated_at",
+        "request",
+        "decision_record",
+        "timed_out_attempt_ids"
+      ],
+      "additionalProperties": false
+    },
+    "executionBinding": {
+      "type": "object",
+      "properties": {
+        "binding_snapshot": {
+          "$ref": "#/$defs/bindingSnapshot"
+        },
+        "agent_instance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "binding_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "execution_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "engine_agent_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_file": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_schema": {
+          "const": 2
+        },
+        "execution_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "continuation_digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "dispatch_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "dispatch_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "state": {
+          "enum": [
+            "idle",
+            "running",
+            "released"
+          ]
+        },
+        "engine_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "binding_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "authority_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "manual_hold": {
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "intent_command_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "agent_instance_id",
+        "binding_id",
+        "command_id",
+        "execution_id",
+        "attempt_id",
+        "engine_agent_id",
+        "session_file",
+        "execution_schema",
+        "execution_digest",
+        "continuation_digest",
+        "dispatch_ref",
+        "dispatch_hash",
+        "state",
+        "engine_generation",
+        "binding_generation",
+        "authority_generation",
+        "manual_hold",
+        "intent_revision",
+        "intent_command_id",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "scopeLimitSubject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "scope_limit"
+            },
+            "scope_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "field": {
+              "const": "agents"
+            },
+            "proposed_value": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mutation_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "scope_ref",
+            "field",
+            "proposed_value",
+            "expected_revision",
+            "mutation_hash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "scope_limit"
+            },
+            "scope_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "field": {
+              "enum": [
+                "consultations",
+                "max_depth",
+                "max_children"
+              ]
+            },
+            "proposed_value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mutation_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "scope_ref",
+            "field",
+            "proposed_value",
+            "expected_revision",
+            "mutation_hash"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "scope_limit"
+            },
+            "scope_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "field": {
+              "const": "by_tier"
+            },
+            "proposed_value": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "tier": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "mode": {
+                    "enum": [
+                      "exact",
+                      "cumulative"
+                    ]
+                  }
+                },
+                "required": [
+                  "tier",
+                  "value",
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "expected_revision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "mutation_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          },
+          "required": [
+            "kind",
+            "scope_ref",
+            "field",
+            "proposed_value",
+            "expected_revision",
+            "mutation_hash"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "consultantPin": {
+      "type": "object",
+      "properties": {
+        "route_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "effort": {
+          "$ref": "#/$defs/effort"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "route_ref",
+        "effort",
+        "reason"
+      ],
+      "additionalProperties": false
     }
   },
   "x-artel": {
-    "protocolRevision": 20,
+    "protocolRevision": 21,
     "hash": {
       "algorithm": "sha-256",
       "encoding": "hex",
@@ -2306,10 +6073,37 @@
       "upload_ready": [
         "ready_at",
         "id"
+      ],
+      "routing_leases": [
+        "attempt_id",
+        "id"
+      ],
+      "routing_queue": [
+        "sequence",
+        "id"
+      ],
+      "routing_wait_edges": [
+        "id"
       ]
     },
-    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions. upload_ready has no partition, contains every metadata subtype=blob_upload row and orders by ready_at then id. Native reclaim reads only indexes: reclaim_pending (no partition) holds metadata native_tombstone rows with numeric deleted_at and native_delete_progress rows with complete=true and runtime_reclaimed!=true, and reclaim removes a row when its work is done; agent_records partitions every non-identity, non-metadata row by [agent_instance_id]; delivery_event partitions deliveries by [event_id]. All three order by id. Engine startup and loops read only indexes too, all without partition and ordered by id: delete_pending holds metadata native_delete_progress rows with complete!=true; attempt_open holds attempts whose state is not completed, failed, cancelled or interrupted; command_received holds commands with state=received; inbox_pending holds inbox subtype=item rows with disposition=pending. inbox_wake partitions by [engine_generation] and orders by deliver_at then id.",
-    "runtimeSortTypes": "All ordered scalar fields are safe unsigned integers except session.updated_at (ISO string); inbox.deliver_at may be null (sorts before numeric timestamps). after follows declared sort fields with optional final id; after without id excludes all records equal to that sort tuple. event_lifecycle is descending by positive event_id; after uses its original positive value."
+    "runtimeIndexSemantics": "Fixed field-derived catalog. Index cursor binds incarnation/partition/revision; any partition mutation invalidates it. after restarts from an exclusive typed keyset lower bound against the current short snapshot. Runtime record revisions persist through tombstones. Resolved inputs are excluded from projection_target/projection_attempt. event_projection tuple is [channel,scope,attempt,kind]. inbox_agent_pending partitions by [agent_instance_id], contains only inbox subtype=item with disposition=pending, and orders by numeric position then id; inbox_agent retains all dispositions. upload_ready has no partition, contains every metadata subtype=blob_upload row and orders by ready_at then id. Native reclaim reads only indexes: reclaim_pending (no partition) holds metadata native_tombstone rows with numeric deleted_at and native_delete_progress rows with complete=true and runtime_reclaimed!=true, and reclaim removes a row when its work is done; agent_records partitions every non-identity, non-metadata row by [agent_instance_id]; delivery_event partitions deliveries by [event_id]. All three order by id. Engine startup and loops read only indexes too, all without partition and ordered by id: delete_pending holds metadata native_delete_progress rows with complete!=true; attempt_open holds attempts whose state is not completed, failed, cancelled or interrupted; command_received holds commands with state=received; inbox_pending holds inbox subtype=item rows with disposition=pending. inbox_wake partitions by [engine_generation] and orders by deliver_at then id. routing_leases partitions [principal_id,device_id]; routing_queue partitions [principal_id,device_id] and includes only waiting/admitting; routing_wait_edges has no partition and sorts by id; owner census fences caller authority.",
+    "runtimeSortTypes": "All ordered scalar fields are safe unsigned integers except session.updated_at (ISO string); inbox.deliver_at may be null (sorts before numeric timestamps). after follows declared sort fields with optional final id; after without id excludes all records equal to that sort tuple. event_lifecycle is descending by positive event_id; after uses its original positive value.",
+    "routingAdmission": {
+      "transaction": "write.runtime.routing_admission",
+      "actions": [
+        "acquire",
+        "renew",
+        "release",
+        "transfer",
+        "enqueue",
+        "cancel",
+        "dequeue"
+      ],
+      "atomic": "Under the same writer lock, check expected_routing_revision and exact command/Attempt/lease/candidate/receipt identity; update routing_state, slots, queue, wait edges and command receipt together. No provider effect before commit.",
+      "revisionKey": "routing:<sha256(principal_id + NUL + device_id)>",
+      "leaseTtlSeconds": 120,
+      "heartbeatSeconds": 30
+    }
   },
   "allOf": [
     {

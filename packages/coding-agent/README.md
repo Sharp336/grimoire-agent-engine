@@ -13,6 +13,32 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Managed Artel execution contracts
+
+Managed execution uses runtime revision **17** and storage revision **21**.
+The runtime JSON is byte-identical in Core, Engine, and UI; the Core storage
+JSON and Engine fixture share one exact hash. Revision and hash must both
+match before admission. Native CLI configuration is not an execution profile
+for this boundary.
+
+`EngineStartRequest` is the pre-admission command: normalized dispatch,
+binding, verified origin receipt, and the complete authorized route roster.
+Engine selects and acquires capacity atomically. Its accepted receipt supplies
+the frozen `ExecutorChoice`; ClientHost seals `ImmutableAttemptStart` with the
+execution and continuation digests. There is no extra operation or guessed
+pre-admission selection. Only the admitted candidate list permits fallback.
+
+Storage writes may carry `runtime.routing_admission` with
+`acquire|renew|release|transfer|enqueue|cancel|dequeue`. The routing revision,
+lease/queue/wait rows, and exact command receipt commit together. Approval
+requests and decisions use the same existing durable effect/receipt namespace.
+Current writes reject profile fields; frozen historical records are read-only.
+
+The Core package-sequence floor is intentionally unallocated during source
+implementation. Release must assign the registry sequence before enabling
+Task v5, profile-free dispatch, and binding capabilities; pending floors deny
+new admission.
+
 ## Memory backends
 
 The agent supports three mutually-exclusive memory backends, selected via the `memory.backend` setting (Settings → Memory tab, or `~/.omp/config.yml`):

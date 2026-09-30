@@ -4,13 +4,14 @@
  * The JSON Schema is owned by the Core storage package. Keep this module to
  * types and a pinned identity; do not add a second runtime schema here.
  */
+import type { ApprovalDecision, ApprovalRequest, BindingSnapshot, CandidateIdentity, ExecutorChoice } from "../engine/runtime-protocol.mjs";
 
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
-export const STORAGE_PROTOCOL_REVISION = 20 as const;
+export const STORAGE_PROTOCOL_REVISION = 21 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:a10f1ea756e4f74c9ed58d4e04374df4676f3a5e337d2bbf7b0b5a4c8e3bd26f" as const;
+	"sha256:18a9c16df4194014f80519343c699d7584dee44826b5e7e9fa9ea7dd49ab930e" as const;
 
 export type StorageOperation =
 	| "write"
@@ -110,6 +111,8 @@ export interface StorageRuntimeMutation {
 	checks: Array<StorageRuntimeKey & { revision: number | null }>;
 	puts: Array<StorageRuntimeKey & { value: StoragePayload }>;
 	deletes: StorageRuntimeKey[];
+	/** Atomically fences routing state, lease/queue rows and the exact command receipt. */
+	routing_admission?: StorageRoutingAdmission;
 }
 export type StorageRuntimeIndex =
 	| "identity_ref"
@@ -153,6 +156,9 @@ export type StorageRuntimeIndex =
 	| "delete_pending"
 	| "attempt_open"
 	| "command_received"
+	| "routing_leases"
+	| "routing_queue"
+	| "routing_wait_edges"
 	| "inbox_pending";
 
 export interface StorageRuntimeQuery {
@@ -420,4 +426,97 @@ export function storageProtocolRequest(
 		operation,
 		...request,
 	} as StorageProtocolRequest;
+}
+
+export type StorageRoutingAction = "acquire" | "renew" | "release" | "transfer" | "enqueue" | "cancel" | "dequeue";
+interface StorageRoutingAdmissionBase {
+	action: StorageRoutingAction;
+	expected_routing_revision: number;
+	command_id: string;
+	attempt_id: string;
+	agent_ref: string;
+	principal_id: string;
+	device_id: string;
+	lease_id: string | null;
+	queue_id: string | null;
+	candidate: CandidateIdentity | null;
+	receipt_id: string;
+	receipt_hash: `sha256:${string}`;
+	lease_revision: number | null;
+}
+export type StorageRoutingAdmission = StorageRoutingAdmissionBase & (
+	| { action: "acquire" | "renew" | "release"; lease_id: string; candidate: CandidateIdentity; lease_revision: number; from_candidate?: never }
+	| { action: "transfer"; lease_id: string; candidate: CandidateIdentity; lease_revision: number; from_candidate: CandidateIdentity }
+	| { action: "enqueue" | "cancel" | "dequeue"; queue_id: string; from_candidate?: never }
+);
+export interface StorageSlotLease {
+	schema: "grimoire.slot_lease.v1";
+	subtype: "slot_lease";
+	principal_id: string;
+	device_id: string;
+	attempt_id: string;
+	lease_revision: number;
+	engine_generation: number;
+	dispatch_hash: string;
+	binding_snapshot_hash: string;
+	resources: {
+		scope_refs: string[];
+		tier: number | null;
+		account_ref: string;
+		provider_id: string;
+		consultation: boolean;
+	};
+	acquired_at: number;
+	heartbeat_at: number;
+	expires_at: number;
+}
+export interface StorageSlotQueue {
+	schema: "grimoire.slot_queue.v1";
+	subtype: "slot_queue";
+	principal_id: string;
+	device_id: string;
+	sequence: number;
+	admission_id: string;
+	command_id: string;
+	attempt_id: string;
+	dispatch_ref: string;
+	dispatch_hash: string;
+	origin_receipt_id: string;
+	bindingSnapshot: BindingSnapshot;
+	auth_context_id: string;
+	roster_revision: number;
+	/** Full stable pre-admission roster, never truncated to the fallback limit. */
+	candidate_refs: string[];
+	requested_at: number;
+	reason: string;
+	expected_revisions: Record<string, number>;
+	status: "waiting" | "admitting" | "accepted" | "cancelled" | "refused";
+}
+export interface StorageWaitEdge {
+	subtype: "wait_edge";
+	caller_attempt_id: string;
+	waited_admission_id: string;
+	kind: "child" | "consultation";
+}
+export interface StorageRoutingState {
+	subtype: "routing_state";
+	principal_id: string;
+	device_id: string;
+	routing_revision: number;
+}
+export interface StorageExecutionProvenance {
+	execution_schema: 2;
+	execution_digest: string;
+	continuation_digest: string;
+	dispatch_ref: string;
+	dispatch_hash: string;
+	executor_choice: ExecutorChoice;
+	lease_id: string | null;
+	queue_id: string | null;
+}
+export interface StorageApprovalMetadata {
+	request: ApprovalRequest;
+	decision_record: ApprovalDecision | null;
+	/** Address/deadline changes use the same request CAS and never replay the effect. */
+	timed_out_attempt_ids: string[];
 }

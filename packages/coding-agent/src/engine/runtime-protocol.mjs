@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 
 export const runtimeProtocol = protocol;
 export const runtimeLimits = protocol['x-artel'].limits;
+export const RUNTIME_PROTOCOL_REVISION = protocol['x-artel'].contractRevision;
 
 export class RuntimeProtocolError extends Error {
   constructor(code, message, admission = 'not_admitted') {
@@ -26,6 +27,10 @@ function matches(schema, value, depth = 0) {
   if (schema.type === 'null') return value === null;
   if (schema.type === 'boolean') return typeof value === 'boolean';
   if (schema.type === 'integer') return Number.isSafeInteger(value) && value >= (schema.minimum ?? 0) && value <= (schema.maximum ?? Number.MAX_SAFE_INTEGER);
+  if (schema.type === 'number') return typeof value === 'number' && Number.isFinite(value)
+    && (!Number.isInteger(value) || Number.isSafeInteger(value))
+    && value >= (schema.minimum ?? -Infinity) && value <= (schema.maximum ?? Infinity)
+    && value > (schema.exclusiveMinimum ?? -Infinity) && value < (schema.exclusiveMaximum ?? Infinity);
   if (schema.type === 'string') return typeof value === 'string'
     && [...value].length >= (schema.minLength ?? 0)
     && [...value].length <= (schema.maxLength ?? Infinity)
@@ -40,7 +45,8 @@ function matches(schema, value, depth = 0) {
     if ((schema.required ?? []).some(key => !Object.hasOwn(value, key))) return false;
     return Object.entries(value).every(([key, item]) => schema.properties?.[key]
       ? matches(schema.properties[key], item, depth + 1)
-      : schema.additionalProperties !== false);
+      : schema.additionalProperties !== false && (typeof schema.additionalProperties !== 'object'
+        || matches(schema.additionalProperties, item, depth + 1)));
   }
   return !schema.type;
 }
@@ -55,6 +61,18 @@ const projectionLimits = {
 
 // JSON Schema covers the shape; these are the cross-field byte/identity invariants.
 function validProjection(name, value) {
+  if (name === 'billingPool' && ['window', 'corp_quota'].includes(value.kind) && value.reserve > 1) return false;
+  if (name === 'requestedExecution' && (value.parent_attempt_id === null) !== (value.parent_binding_revision === null)) return false;
+  if (name === 'selectedExecutor' && (value.basis === 'order') !== (value.order_match !== null)) return false;
+  if (name === 'approvalDecision' && value.decided_by.kind === 'human' && value.decision === 'approve_always') return false;
+  if (name === 'approvalRequest' && value.status === 'waiting_human_paused'
+    && (value.addressed_to.kind !== 'human' || value.expires_at !== null)) return false;
+  if (name === 'executorChoice') {
+    const identities = ['route_ref', 'account_ref', 'model_id', 'effort', 'service_tier', 'billing_pool_id', 'billing_pool_basis'];
+    if (!identities.every(key => value.candidates[0][key] === value.selected[key])) return false;
+    if (value.candidates.some(candidate => candidate.tier === null) && value.selected.basis !== 'user') return false;
+    if (new Set(value.candidates.map(candidate => JSON.stringify([candidate.route_ref, candidate.effort, candidate.service_tier]))).size !== value.candidates.length) return false;
+  }
   if (name === 'bindingSnapshot') {
     if (value.taskRef === null && value.workStepId !== null) return false;
     if ((value.bindingRevision === 0) !== (value.installationId === null)) return false;
@@ -81,8 +99,9 @@ function validProjection(name, value) {
     && value.bindingSnapshot.agentInstanceRef !== value.agentInstanceRef) return false;
   if (name === 'command' && ['launch', 'continue', 'enqueue', 'steer', 'resume'].includes(value.action)) {
     const p = value.payload;
-    if (p.attachmentUploadIds && (!Object.hasOwn(p, 'text') || !p.clientMessageId)) return false;
-    if (Object.hasOwn(p, 'text') && !p.text.length && !p.attachmentUploadIds?.length) return false;
+    const text = p.dispatch?.prompt ?? p.text;
+    if (p.attachmentUploadIds && (typeof text !== 'string' || !p.clientMessageId)) return false;
+    if (!p.dispatch && typeof text === 'string' && !text.length && !p.attachmentUploadIds?.length) return false;
   }
   if (['attachment', 'attachmentStageRequest', 'nativeAttachmentStageRequest'].includes(name) && !value.name.trim()) return false;
   if (name === 'attachmentStageRequest' || name === 'nativeAttachmentStageRequest') {
@@ -94,8 +113,6 @@ function validProjection(name, value) {
     || value.complete !== (value.nextOffset === value.attachment.bytes))) return false;
   const bound = projectionLimits[name];
   if (bound && encodedBytes(JSON.stringify(value)) > runtimeLimits[bound]) return false;
-  if (name === 'command' && ['continue', 'history-branch-and-run'].includes(value.action)
-    && Object.hasOwn(value.payload, 'text') !== Object.hasOwn(value.payload, 'clientMessageId')) return false;
   if (name === 'nativeTargetRequest' && value.executionId !== undefined && value.attemptId === undefined) return false;
   if (name === 'nativeTarget' && value.kind === 'bound'
     && Object.hasOwn(value, 'startCommandId') !== Object.hasOwn(value, 'startExpectedIntentRevision')) return false;
@@ -196,7 +213,7 @@ function validProjection(name, value) {
 export function canonicalRuntimeJson(value, depth = 0) {
   if (depth > runtimeLimits.maxJsonDepth) throw new RuntimeProtocolError('invalid_params', 'Runtime JSON is nested too deeply.');
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value))) return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(item => canonicalRuntimeJson(item, depth + 1)).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalRuntimeJson(value[key], depth + 1)}`).join(',')}}`;
   throw new RuntimeProtocolError('invalid_params', 'Runtime JSON contains an unsupported value.');
