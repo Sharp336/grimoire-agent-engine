@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import { HostedBridgeUnavailableError, HostedGrimoireRpc } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
+import { engineCommandIdentity } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
@@ -748,6 +749,26 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			authorityGeneration: 1,
 			bindingGeneration: 1,
 		};
+		const startCommand: EngineCommandEnvelope = {
+			schema: "grimoire.engine.command.v1",
+			commandId: target.commandId,
+			op: "start",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: runtime.engineGeneration,
+			agentInstanceId: target.agentInstanceId,
+			agentInstanceRef,
+			executionId: target.executionId,
+			attemptId: target.attemptId,
+			authorityGeneration: 1,
+			principalId: "owner",
+			issuedAt: Date.now(),
+			payload: { originReceiptId: "origin:tools-start" },
+		};
+		const identity = engineCommandIdentity(startCommand);
+		const admitted = await runtime.store.admitCommand(identity, runtime.engineGeneration);
+		expect(admitted.status).toBe("claimed");
+		await runtime.store.settleCommand(startCommand.commandId, identity.canonicalHash, { outcome: "applied" });
 		await runtime.store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
 		const server = await startEngineControlQueryServer({
 			runtime,
