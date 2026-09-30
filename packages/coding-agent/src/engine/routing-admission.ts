@@ -4,6 +4,7 @@ import {
 	type Candidate,
 	type CandidateIdentity,
 	type EngineExecutionConfiguration,
+	type EngineExecutionRoute,
 	type EngineSemanticBindingSnapshot,
 	EngineTargetError,
 	type ExecutorChoice,
@@ -28,7 +29,7 @@ export const LEASE_HEARTBEAT_MS = 30_000;
 /** Admitted fallback list: selected plus up to seven. */
 const FROZEN_CANDIDATES = 8;
 
-const sha256 = (value: string) => `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+const sha256 = (value: string): `sha256:${string}` => `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 export const routingStateId = (principalId: string, deviceId: string) =>
 	`routing:${createHash("sha256").update(`${principalId}\0${deviceId}`, "utf8").digest("hex")}`;
 export const leaseId = (attemptId: string) => `slot-lease:${attemptId}`;
@@ -98,8 +99,8 @@ function ceilings(limits: RoutingLimits): Vector {
 	const result: Vector = {};
 	for (const scope of limits.scopes) {
 		result[`agents:${scope.scope_ref}`] = scope.agents ?? Infinity;
-		result[`consultations:${scope.scope_ref}`] = scope.consultations;
-		for (const limit of scope.by_tier) result[`tier:${scope.scope_ref}:${limit.mode}:${limit.tier}`] = limit.value;
+		result[`consultations:${scope.scope_ref}`] = scope.consultations ?? Infinity;
+		for (const limit of scope.by_tier) result[`tier:${scope.scope_ref}:${limit.mode}:${limit.tier}`] = limit.value ?? Infinity;
 	}
 	for (const [ref, value] of Object.entries(limits.accounts)) result[`account:${ref}`] = value ?? Infinity;
 	for (const [id, value] of Object.entries(limits.providers)) result[`provider:${id}`] = value ?? Infinity;
@@ -228,7 +229,7 @@ async function commitTransition(t: Transition): Promise<RoutingReceipt> {
 		candidate: t.candidate,
 		lease_revision: t.leaseRevision,
 	};
-	const receipt: RoutingReceipt = { ...unsigned, receipt_hash: sha256(storageCanonicalJson(unsigned)) };
+	const receipt = { ...unsigned, receipt_hash: sha256(storageCanonicalJson(unsigned)) } satisfies RoutingReceipt;
 	const command = await t.tx.get<RocksCommand>("command", t.commandId);
 	if (!command) throw new EngineTargetError("stale_target", "Routing command is not admitted");
 	await t.tx.put("command", t.commandId, { ...command, routing: receipt, updated_at: Date.now() });
@@ -266,10 +267,10 @@ export interface AdmissionRequest {
 	bindingSnapshot: EngineSemanticBindingSnapshot;
 	executionKind: "ordinary" | "automation" | "consultation";
 	limits: RoutingLimits;
-	rosterRevision: `sha256:${string}`;
+	rosterRevision: EngineExecutionConfiguration["roster_revision"];
 	expectedRevisions: Record<string, number>;
 	/** Complete authorized roster (new Start) or the admitted frozen list (Resume), in policy order. */
-	candidates: readonly Candidate[];
+	candidates: readonly EngineExecutionRoute[];
 	/** Awaiting caller Attempt whose lease stays held while this callee is pending. */
 	callerAttemptId: string | null;
 	/** Resume never grows its admitted list. */
@@ -277,7 +278,7 @@ export interface AdmissionRequest {
 }
 
 export type AdmissionOutcome =
-	| { status: "admitted"; selected: number; frozen: Candidate[]; leaseRevision: number; filtered: Record<string, number> }
+	| { status: "admitted"; selected: number; frozen: EngineExecutionRoute[]; leaseRevision: number; filtered: Record<string, number> }
 	| { status: "queued"; queueId: string };
 
 /** Everything a pending Start needs to prove capacity for a queued peer, read from its durable command. */

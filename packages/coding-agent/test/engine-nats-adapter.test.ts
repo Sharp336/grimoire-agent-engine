@@ -297,7 +297,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				agentInstanceRef,
 				executionId: "queue-execution",
 				attemptId: "queue-attempt",
-			}, { cwd, principalId: "queue-owner", input: "work" }));
+			}, { cwd, principalId: "queue-owner", input: "work" }), { deviceId: "queue-device", engineId: "queue-engine" });
 			await providerEntered.promise;
 			const hold = await runtime.pause({ ...started, commandId: "queue-pause", initiator: { kind: "human" } });
 			providerBoundary.resolve();
@@ -422,7 +422,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				agentInstanceRef,
 				executionId: "nats-resume-execution",
 				attemptId: "nats-resume-attempt",
-			}, { cwd, principalId: "owner", input: "initial work" }));
+			}, { cwd, principalId: "owner", input: "initial work" }), { deviceId: "resume-device", engineId: "resume-engine" });
 			await entered.promise;
 			const hold = await runtime.pause({
 				...started,

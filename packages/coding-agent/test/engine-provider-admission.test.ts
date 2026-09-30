@@ -17,6 +17,7 @@ import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
 	withProviderObservationContext,
+	type ProviderAdmissionIdentity,
 } from "../src/engine/provider-admission";
 import type { AuthStorage } from "../src/session/auth-storage";
 import { createProviderRetryBudgetHook, withProviderRetryBudget } from "../src/session/provider-retry-budget";
@@ -340,7 +341,7 @@ describe("ProviderAdmissionClient", () => {
 		expect(providerCalls).toBe(0);
 	});
 
-	it("bypasses subscription admission only for an exact pinned API-key fallback", async () => {
+	it("requires current admission for an exact pinned API-key fallback and refuses foreign routes", async () => {
 		let admissionCalls = 0;
 		let providerCalls = 0;
 		const authStorage = {
@@ -352,13 +353,9 @@ describe("ProviderAdmissionClient", () => {
 			return Response.json({ allowed: true });
 		}).createHook(identity(), authStorage, "https://chatgpt.com/backend-api", [
 			{
-				expectedPrincipalId: "grimoire:user:owner",
-				profileRef: "gctx:2222222222222222",
-				profileContentHash: "sha256:profile",
+				...identity(),
 				providerAccountRef: "gctx:4444444444444444",
-				providerAccountContentHash: "sha256:account",
 				routeRef: "gctx:5555555555555555",
-				routeContentHash: "sha256:route",
 				providerId: "cheapai-account-1",
 				runtimeProviderId: "cheapai-account-1",
 				modelId: "gpt-5.6-terra",
@@ -375,7 +372,7 @@ describe("ProviderAdmissionClient", () => {
 			return new Response("ok");
 		});
 		await fallbackFetch("https://cheapai.invalid/v1/responses");
-		expect({ admissionCalls, providerCalls }).toEqual({ admissionCalls: 0, providerCalls: 1 });
+		expect({ admissionCalls, providerCalls }).toEqual({ admissionCalls: 1, providerCalls: 1 });
 
 		for (const foreignSubscription of [
 			{ ...fallbackModel, provider: "other-subscription" },
@@ -385,7 +382,7 @@ describe("ProviderAdmissionClient", () => {
 			const error = await foreignFetch("https://other.invalid/v1/responses").catch(reason => reason);
 			expect(error).toMatchObject({ code: "provider_identity_mismatch", retryable: false });
 		}
-		expect(admissionCalls).toBe(0);
+		expect(admissionCalls).toBe(1);
 	});
 
 	it("stops waiting for a shared usage refresh when the provider request is cancelled", async () => {
@@ -416,19 +413,16 @@ describe("ProviderAdmissionClient", () => {
 		const observations: Array<Record<string, unknown>> = [];
 		const admissionFetch = async (_input: string | URL | Request, init?: RequestInit) => {
 			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (body.phase === "before") return Response.json({ allowed: true });
 			observations.push(body);
 			return observations.length === 1
 				? new Response("lost acknowledgement", { status: 503 })
 				: Response.json({ allowed: true, status: "recorded" });
 		};
 		const route = {
-			expectedPrincipalId: "grimoire:user:owner",
-			profileRef: "gctx:2222222222222222",
-			profileContentHash: "sha256:profile",
+			...identity(),
 			providerAccountRef: "gctx:4444444444444444",
-			providerAccountContentHash: "sha256:account",
 			routeRef: "gctx:5555555555555555",
-			routeContentHash: "sha256:route",
 			providerId: "cheapai",
 			runtimeProviderId: "artel-4444444444444444",
 			modelId: "gpt-5.6-terra",
@@ -479,13 +473,9 @@ describe("ProviderAdmissionClient", () => {
 		try {
 			const requests: Array<Record<string, unknown>> = [];
 			const route = {
-				expectedPrincipalId: "grimoire:user:owner",
-				profileRef: "gctx:2222222222222222",
-				profileContentHash: "sha256:profile",
+				...identity(),
 				providerAccountRef: "gctx:4444444444444444",
-				providerAccountContentHash: "sha256:account",
 				routeRef: "gctx:5555555555555555",
-				routeContentHash: "sha256:route",
 				providerId: "cheapai",
 				runtimeProviderId: "artel-4444444444444444",
 				modelId: "gpt-5.6-terra",
@@ -495,7 +485,9 @@ describe("ProviderAdmissionClient", () => {
 				"http://127.0.0.1/provider-admission",
 				"host-token-must-not-enter-log",
 				async (_input, init) => {
-					requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+					const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+					if (body.phase === "before") return Response.json({ allowed: true });
+					requests.push(body);
 					return Response.json({ allowed: false, status: "provider_observation_identity_stale" });
 				},
 			).createHook(undefined, {} as AuthStorage, "", [route]);
@@ -528,20 +520,18 @@ describe("ProviderAdmissionClient", () => {
 		const observationRelease = Promise.withResolvers<Response>();
 		let observation: Record<string, unknown> | undefined;
 		const route = {
-			expectedPrincipalId: "grimoire:user:owner",
-			profileRef: "gctx:2222222222222222",
-			profileContentHash: "sha256:profile",
+			...identity(),
 			providerAccountRef: "gctx:4444444444444444",
-			providerAccountContentHash: "sha256:account",
 			routeRef: "gctx:5555555555555555",
-			routeContentHash: "sha256:route",
 			providerId: "cheapai",
 			runtimeProviderId: "artel-4444444444444444",
 			modelId: "gpt-5.6-terra",
 			baseUrl: "https://cheapai.invalid/v1",
 		};
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
-			observation = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (body.phase === "before") return Response.json({ allowed: true });
+			observation = body;
 			observationStarted.resolve();
 			return await observationRelease.promise;
 		}).createHook(undefined, {} as AuthStorage, "", [route]);
@@ -566,20 +556,17 @@ describe("ProviderAdmissionClient", () => {
 	it("records HTTP 200 terminal SSE errors as physical provider failures", async () => {
 		const observations: Array<Record<string, unknown>> = [];
 		const route = {
-			expectedPrincipalId: "grimoire:user:owner",
-			profileRef: "gctx:2222222222222222",
-			profileContentHash: "sha256:profile",
+			...identity(),
 			providerAccountRef: "gctx:4444444444444444",
-			providerAccountContentHash: "sha256:account",
 			routeRef: "gctx:5555555555555555",
-			routeContentHash: "sha256:route",
 			providerId: "cheapai",
 			runtimeProviderId: "artel-4444444444444444",
 			modelId: "gpt-5.6-terra",
 			baseUrl: "https://cheapai.invalid/v1",
 		};
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
-			observations.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (body.phase !== "before") observations.push(body);
 			return Response.json({ allowed: true, status: "recorded" });
 		}).createHook(undefined, {} as AuthStorage, "", [route]);
 		const codexModel = buildModel({
@@ -632,20 +619,17 @@ describe("ProviderAdmissionClient", () => {
 		const observations: Array<Record<string, unknown>> = [];
 		const controller = new AbortController();
 		const route = {
-			expectedPrincipalId: "grimoire:user:owner",
-			profileRef: "gctx:2222222222222222",
-			profileContentHash: "sha256:profile",
+			...identity(),
 			providerAccountRef: "gctx:4444444444444444",
-			providerAccountContentHash: "sha256:account",
 			routeRef: "gctx:5555555555555555",
-			routeContentHash: "sha256:route",
 			providerId: "cheapai",
 			runtimeProviderId: "artel-4444444444444444",
 			modelId: "gpt-5.6-terra",
 			baseUrl: "https://cheapai.invalid/v1",
 		};
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
-			observations.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			if (body.phase !== "before") observations.push(body);
 			return Response.json({ allowed: true });
 		}).createHook(undefined, {} as AuthStorage, "", [route]);
 		const wrapped = hook.wrapFetch(
@@ -676,15 +660,17 @@ describe("ProviderAdmissionClient", () => {
 	});
 });
 
-function identity() {
+function identity(): ProviderAdmissionIdentity {
 	return {
 		expectedPrincipalId: "grimoire:user:owner",
-		profileRef: "gctx:1111111111111111",
-		profileContentHash: "sha256:profile",
+		agentInstanceRef: `grimoire://agents/~u/${"b".repeat(64)}/fixture`,
+		attemptId: "fixture-attempt", bindingRevision: 1, installationId: `install_${"a".repeat(32)}`,
+		dispatchRef: "gctx:1111111111111111", dispatchHash: `sha256:${"1".repeat(64)}`,
+		executionDigest: `sha256:${"d".repeat(64)}`, originReceiptId: "origin-fixture", credentialGeneration: 1,
 		providerAccountRef: "gctx:2222222222222222",
-		providerAccountContentHash: "sha256:account",
+		providerAccountContentHash: `sha256:${"2".repeat(64)}`,
 		routeRef: "gctx:3333333333333333",
-		routeContentHash: "sha256:route",
+		routeContentHash: `sha256:${"3".repeat(64)}`,
 		providerKind: "openai_codex_subscription" as const,
 		providerId: "openai-codex",
 		accountBindingId: "acct-1",

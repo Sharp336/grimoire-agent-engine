@@ -87,11 +87,11 @@ async function builtin(account: Account, credential: Credential, signal?: AbortS
 		const observedAt = new Date(report.fetchedAt).toISOString();
 		const observations: Observation[] = [];
 		for (const window of account.quota_windows) {
-			const limit = report.limits.find(item =>
+			const limit: UsageReport["limits"][number] | undefined = report.limits.find(item =>
 				codexLimitId.test(item.id) &&
 				item.id === window.window_id && item.window?.durationMs === window.window_seconds * 1000);
 			if (!limit) continue;
-			const prefix = limit.id.slice("openai-codex:".length).replace(/:(?:primary|secondary)$/, "");
+			const prefix: string = limit.id.slice("openai-codex:".length).replace(/:(?:primary|secondary)$/, "");
 			const meter = prefix === "primary" || prefix === "secondary" ? "chat" : prefix;
 			const exhausted = limit.status === "exhausted" ||
 				meterStates?.[meter]?.allowed === false && meterStates[meter]?.limitReached === true;

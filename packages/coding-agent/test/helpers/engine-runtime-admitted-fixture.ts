@@ -14,6 +14,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ResolvedEngineExecution } from "@oh-my-pi/pi-coding-agent/engine/execution-resolver";
 import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
+import { validateRuntimeValue } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { semanticBinding } from "./runtime-v1-rocks-fixture";
 
 const hash = (value: unknown) => `sha256:${Bun.SHA256.hash(storageCanonicalJson(value), "hex")}`;
@@ -307,6 +308,13 @@ export function startRequest(
 ): EngineStartRequest {
 	const originReceiptId = `origin:${identity.commandId}`;
 	const { principalId: _p, cwd: _c, bindingSnapshot, ...rest } = payload;
+	const special = execution.config.dispatch.special_ref;
+	const specialRef = special ? {
+		definitionRef: special.definition_ref,
+		revision: special.definition_revision,
+		occurrenceOrCallId: "occurrence_id" in special ? special.occurrence_id : special.call_id,
+	} : null;
+	if (specialRef) validateRuntimeValue("startSpecialRef", specialRef);
 	return {
 		...rest,
 		commandId: identity.commandId,
@@ -315,12 +323,7 @@ export function startRequest(
 		dispatchRef: execution.dispatchRef,
 		dispatchHash: execution.dispatchHash,
 		executionKind: execution.config.dispatch.execution_kind,
-		specialRef: execution.config.dispatch.special_ref ? {
-			definitionRef: execution.config.dispatch.special_ref.definition_ref,
-			revision: execution.config.dispatch.special_ref.definition_revision,
-			occurrenceOrCallId: "occurrence_id" in execution.config.dispatch.special_ref
-				? execution.config.dispatch.special_ref.occurrence_id : execution.config.dispatch.special_ref.call_id,
-		} : null,
+		specialRef: specialRef as EngineStartRequest["specialRef"],
 		originReceiptId,
 		agentInstanceId: identity.agentInstanceId,
 		agentInstanceRef: identity.agentInstanceRef,
@@ -333,13 +336,14 @@ export function startRequest(
 }
 
 /** Capture the exact transport envelope; duplicates retain their original generation and timestamp. */
-export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest): EngineCommandEnvelope {
+export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest,
+	transport = { deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine" }): EngineCommandEnvelope {
 	const { commandId, agentInstanceId, agentInstanceRef, bindingSnapshot, parentAgentInstanceId, parentAgentInstanceRef,
 		executionId, attemptId, authorityGeneration, principalId, ...payload } = request;
 	const prior = execution.receipts.get(request.originReceiptId);
 	const command: EngineCommandEnvelope = {
 		schema: "grimoire.engine.command.v1", op: "start", commandId,
-		deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+		deviceId: transport.deviceId, engineId: transport.engineId,
 		engineGeneration: prior?.engineGeneration ?? runtime.engineGeneration,
 		issuedAt: prior?.issuedAt ?? Date.now(), agentInstanceId, agentInstanceRef, bindingSnapshot,
 		parentAgentInstanceId, parentAgentInstanceRef, executionId, attemptId, authorityGeneration, principalId, payload,
@@ -348,9 +352,10 @@ export function startEnvelope(runtime: EngineRuntime, execution: AdmittedExecuti
 }
 
 /** The same native admission followed by Start that the Engine command transports perform. */
-export async function admitStart(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest): Promise<EngineStartResult> {
+export async function admitStart(runtime: EngineRuntime, execution: AdmittedExecutionFixture, request: EngineStartRequest,
+	transport?: { deviceId: string; engineId: string }): Promise<EngineStartResult> {
 	validateStartRequest(request);
-	const command = startEnvelope(runtime, execution, request);
+	const command = startEnvelope(runtime, execution, request, transport);
 	const admission = await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
 	if (admission.status === "binding_pending") throw new EngineBindingPendingError();
 	if (admission.status === "replay" && admission.receipt.outcome === "rejected")

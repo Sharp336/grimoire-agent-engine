@@ -11,7 +11,7 @@ import { Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import { formatRetryFallbackSelector } from "../session/retry-fallback-chains";
-import { resolveThinkingLevelForModel } from "../thinking";
+import { parseThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import type { EngineExecutionConfiguration, EngineExecutionRoute } from "./contracts";
 import { resolveCanonicalModelLimits, resolveExecutableModelLimits } from "./model-limits";
 import { candidateIdentity } from "./routing-admission";
@@ -237,7 +237,7 @@ export class EngineExecutionResolver {
 						});
 					}
 					const requested = route.effort === "none" ? "off" : route.effort;
-					const level = resolveThinkingLevelForModel(candidate, requested);
+					const level = resolveThinkingLevelForModel(candidate, parseThinkingLevel(requested));
 					if (level !== requested)
 						throw new Error(`Admitted effort ${route.effort} is not supported by ${candidate.provider}/${candidate.id}`);
 					selectors.push(formatRetryFallbackSelector(candidate, level));

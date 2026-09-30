@@ -206,7 +206,10 @@ export class ProviderExecutionClient {
 			providerRuntimeId,
 			baseUrl,
 			credential,
-			...(ownedOAuth ? { localOAuth: oauth as ProviderExecutionMaterial["localOAuth"] } : {}),
+			...(ownedOAuth ? { localOAuth: {
+				method: "oauth" as const, store: "local_omp" as const,
+				agentDir: oauth.agentDir, accountId: oauth.accountId, credentialId: oauth.credentialId,
+			} } : {}),
 			...(typeof pin === "string" ? { executionPin: pin } : {}),
 		};
 	}

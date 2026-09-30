@@ -19,6 +19,8 @@ import type {
 	EngineSemanticBindingSnapshot,
 	EngineBindingSnapshot,
 	EngineEvent,
+	EngineEventBase,
+	EngineOrdinaryEvent,
 	EngineInboxItem,
 	EngineInboxMutation,
 	EngineInboxSource,
@@ -66,7 +68,7 @@ import {
 	type EngineAttachment,
 	messageAttachmentReferences,
 } from "./runtime-attachments";
-import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { ENGINE_CONTROL_OPS, RUNTIME_PROTOCOL_REVISION, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { engineAgentInstanceId } from "./route";
 import {
 	type AdmissionOutcome,
@@ -576,7 +578,7 @@ export class RocksEngineMutations {
 					agent_ref: params.agentInstanceRef, installation_id: params.installationId,
 					operation_id: params.operationId, proposal_hash: params.proposalHash, binding_revision: params.bindingRevision,
 					gate_revision: gate.gateRevision, census_mutation_revision: revision,
-					runtime_contract_revision: 16, engine_generation: generation, status: "unknown",
+					runtime_contract_revision: RUNTIME_PROTOCOL_REVISION, engine_generation: generation, status: "unknown",
 					nonterminal_starts: 0, nonterminal_attempts: 0, open_effects: 0, unsettled_children: 0,
 					mutable_pending_writes: 0, next_cursor: null } };
 			}
@@ -1747,6 +1749,7 @@ export class RocksEngineMutations {
 		const eventId = await this.counter(tx, "events", "event_counter", 1);
 		const attempt = target.attemptId ? await tx.get<RocksAttempt>("attempt", target.attemptId) : undefined;
 		const stored: RocksEvent = {
+			...event,
 			eventId,
 			...(attempt?.binding_snapshot ? { bindingSnapshot: attempt.binding_snapshot } : {}),
 			seq,
@@ -1759,15 +1762,13 @@ export class RocksEngineMutations {
 			engineGeneration: target.engineGeneration,
 			bindingGeneration: target.bindingGeneration,
 			authorityGeneration: target.authorityGeneration,
-			kind: event.kind,
-			...(event.payload ? { payload: event.payload } : {}),
 			event_id: eventId,
 			agent_instance_id: target.agentInstanceId,
 			attempt_id: target.attemptId,
 			published_at: null,
 		};
 		const payload = await retainedInputPayload(tx, stored);
-		if (payload) stored.payload = payload;
+		if (payload && stored.kind === "input_requested") stored.payload = payload;
 		await tx.create("event", String(eventId), stored);
 		await this.projectEvent(tx, stored);
 		return stored;
@@ -1776,7 +1777,7 @@ export class RocksEngineMutations {
 		tx: RuntimeTransaction,
 		id: string,
 		commandId: string,
-		kind: EngineEvent["kind"],
+		kind: EngineOrdinaryEvent["kind"],
 		payload: Record<string, unknown>,
 	): Promise<EngineEvent> {
 		const identity = await tx.get<RocksIdentity>("identity", id);
@@ -1801,14 +1802,14 @@ export class RocksEngineMutations {
 			{ kind, payload },
 		);
 	}
-	async appendEvent(event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
+	async appendEvent(event: Omit<EngineEventBase, "eventId" | "seq" | "createdAt"> & EngineTransitionEvent): Promise<EngineEvent> {
 		return this.mutation(
 			event.agentInstanceId,
 			async tx => {
 				const target = { ...event, commandId: event.causationCommandId };
 				await this.eventReads(tx, target, event, true);
 				await this.assertFence(tx, target);
-				return this.append(tx, target, { kind: event.kind, payload: event.payload });
+				return this.append(tx, target, event);
 			},
 			[],
 			["message_updated", "assistant_snapshot", "trace_reasoning", "trace_tool"].includes(event.kind)
@@ -2275,11 +2276,11 @@ export class RocksEngineMutations {
 			}
 			const changed = await this.changeIntent(tx, id, commandId, action, expected);
 			if (action === "resume") {
-				const routes = new Map((routingResume ?? []).map(route => [engineAgentInstanceId(route.agentInstanceRef), route]));
+				const routes = new Map((routingResume ?? []).map(route => [route.attemptId, route]));
 				for (const agent of changed.agentIds) {
 					const binding = await tx.get<RocksBinding>("binding", agent);
 					const attempt = binding && await tx.get<RocksAttempt>("attempt", binding.attempt_id);
-					const route = routes.get(agent);
+					const route = attempt && routes.get(attempt.attempt_id);
 					if (attempt?.state !== "paused" || (await this.holds(tx, agent)).length) {
 						if (route) throw new EngineTargetError("stale_target", "Resume route has no paused unheld Attempt");
 						continue;
@@ -2297,7 +2298,7 @@ export class RocksEngineMutations {
 					if (admitted.status !== "admitted" ||
 						candidateRef(admitted.frozen[0]) !== candidateRef(route.candidates[0]))
 						throw new EngineTargetError("capacity_unavailable", "Resume awaits capacity for its frozen route");
-					routes.delete(agent);
+					routes.delete(attempt.attempt_id);
 				}
 				if (routes.size) throw new EngineTargetError("stale_target", "Resume route is outside the branch");
 			} else if (routingResume?.length)

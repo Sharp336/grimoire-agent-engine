@@ -53,6 +53,7 @@ import type {
 	SessionEntry,
 	SessionHeader,
 	LegacySessionLaunchSnapshot,
+	SessionLaunchSnapshot,
 	SessionMessageIdentity,
 } from "../session/session-entries";
 import {
@@ -87,6 +88,7 @@ import {
 	type EngineInboxMutation,
 	type EngineInboxSource,
 	type EngineExecutionConfiguration,
+	type EngineOrdinaryEvent,
 	type EngineExecutionRoute,
 	type EngineInboxTarget,
 	type EngineMessageAttachments,
@@ -105,6 +107,7 @@ import {
 	type EngineToolPolicy,
 	type ExecutorChoice,
 	type ExecutorRouteState,
+	type InstructionRule,
 	type SelectedExecutor,
 	validateCommandContext,
 	validateStartRequest,
@@ -654,7 +657,7 @@ export class EngineRuntime {
 	async #addressApproval(binding: LiveBinding, kind: ApprovalRequest["kind"], name: string,
 		subject?: ApprovalRequest["subject"], timedOut: readonly string[] = []): Promise<ApprovalAddressee | "unknown"> {
 		if (kind === "escalation") return { kind: "human", principal_id: binding.principalId };
-		if (!binding.bindingSnapshot || !this.#approvalAncestor) return "unknown";
+		if (!binding.bindingSnapshot?.installationId || !this.#approvalAncestor) return "unknown";
 		let agentInstanceRef = binding.bindingSnapshot.agentInstanceRef;
 		let attemptId = binding.attemptId;
 		let installationId = binding.bindingSnapshot.installationId;
@@ -1121,6 +1124,7 @@ export class EngineRuntime {
 	#branchControl(
 		request: EngineControlRequest | EngineCancelRequest,
 		action: "pause" | "resume" | "stop",
+		settleCommand = true,
 	): Promise<EngineControlResult> {
 		if (!request.commandId.trim()) throw new EngineTargetError("invalid_request", "commandId is required");
 		return this.#inLane(request.agentInstanceId, async () => {
@@ -1378,7 +1382,7 @@ export class EngineRuntime {
 						intentCommandId: request.commandId,
 					},
 					{ kind: "holds_changed", causationCommandId: request.commandId, payload: { action, ...result } },
-					request.commandId,
+					settleCommand ? request.commandId : undefined,
 					{ outcome: "applied", detail: result },
 				);
 			} catch (error) {
@@ -1464,7 +1468,8 @@ export class EngineRuntime {
 	resolveApproval(request: EngineApprovalDecision): Promise<void> {
 		const decision = request.approvalDecision;
 		validateRuntimeValue("approvalDecision", decision);
-		if (!request.commandId.trim() || decision.command_id !== request.commandId || !this.#verifyApprovalReceipt)
+		const verifyReceipt = this.#verifyApprovalReceipt;
+		if (!request.commandId.trim() || decision.command_id !== request.commandId || !verifyReceipt)
 			throw new EngineTargetError("invalid_request", "A verified approval decision and command are required");
 		return this.#inLane(request.agentInstanceId, async () => {
 			const live = this.#bindings.get(request.agentInstanceId);
@@ -1483,7 +1488,7 @@ export class EngineRuntime {
 				approval.request.requester_agent_ref !== binding.bindingSnapshot.agentInstanceRef ||
 				approval.request.principal_id !== decision.decided_by.principal_id)
 				throw new EngineTargetError("stale_target", "Approval requester or principal changed");
-			const verified = await this.#verifyApprovalReceipt({
+			const verified = await verifyReceipt({
 				originReceiptId: decision.origin_receipt_id,
 				commandId: request.commandId,
 				agentInstanceRef: binding.bindingSnapshot.agentInstanceRef,
@@ -2377,7 +2382,6 @@ export class EngineRuntime {
 		const compatibilityDigest = restoreReceipt
 			? await this.#continuationDigest(request, restoreReceipt.originalCwd)
 			: undefined;
-		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		if (request.restoreCheckpoint) throw nativeArchiveUnsupported();
 		const preparedHistory = await this.#prepareHistoryStart(request);
 		const preparedSession = preparedHistory?.sessionManager;
@@ -2601,7 +2605,7 @@ export class EngineRuntime {
 			};
 			resolved = await this.#resolveExecution(config, preview.frozen, attempt, request.cwd, pendingStartSignal);
 			binding = await this.#openBinding(
-				request, resolved, continuationDigest, conversationIdentityDigest,
+				request, resolved, continuationDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
 				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings,
 			);
@@ -2613,7 +2617,7 @@ export class EngineRuntime {
 				queuedItem.sessionId !== binding.previousInboxSessionId &&
 				queuedItem.sessionId !== `pending:${request.agentInstanceId}`)
 				throw new EngineTargetError("stale_target", "Queued message belongs to another session");
-			binding.manualHold = initial.manualHold;
+			binding.manualHold = initial.manualHold ?? false;
 			binding.intentRevision = initial.intentRevision ?? 0;
 			binding.intentCommandId = request.commandId;
 			binding.state = "running";
@@ -2762,7 +2766,6 @@ export class EngineRuntime {
 		request: EngineStartRequest,
 		resolved: ResolvedEngineExecution,
 		continuationDigest: string,
-		conversationIdentityDigest: string,
 		executionDigest: string,
 		choice: ExecutorChoice,
 		frozen: readonly EngineExecutionRoute[],
@@ -2799,6 +2802,7 @@ export class EngineRuntime {
 				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
 			if (
 				!recoverSession &&
+				!preparedSessionManager &&
 				prior?.sessionFile &&
 				await this.#sameAdmittedBinding(prior, request) &&
 				(prior.continuationDigest === continuationDigest ||
@@ -2813,7 +2817,6 @@ export class EngineRuntime {
 					? await this.#conversationCarrySource(
 							prior,
 							request,
-							conversationIdentityDigest,
 							restoreReceipt,
 						)
 					: undefined;
@@ -2973,7 +2976,7 @@ export class EngineRuntime {
 					attemptId: request.attemptId,
 					rules: l1For(config.instruction_sources, currentIdentity(liveBinding?.execution.choice ?? choice)),
 					compactionEntryId: () => {
-						const branch = sessionManager.getContextBranch();
+						const branch = sessionManager!.getContextBranch();
 						const entry = branch.findLast(
 							(item): item is Extract<SessionEntry, { type: "compaction" }> => item.type === "compaction",
 						);
@@ -3173,7 +3176,6 @@ export class EngineRuntime {
 				continuationDigest,
 				dispatchRef: request.dispatchRef,
 				dispatchHash: request.dispatchHash,
-				conversationIdentityDigest,
 				...(previousInboxSessionId ? { previousInboxSessionId } : {}),
 				...(uncommittedForkSessionFile ? { uncommittedForkSessionFile } : {}),
 				attemptState: "accepted",
@@ -3544,32 +3546,17 @@ export class EngineRuntime {
 	async #conversationCarrySource(
 		prior: EngineBindingSnapshot,
 		request: EngineStartRequest,
-		conversationIdentityDigest: string,
 		restoreReceipt?: RestoreWorkspaceReceipt,
 	): Promise<string | undefined> {
 		if (!prior.sessionFile || request.executionConfiguration.continuationPolicy === "fresh") return undefined;
 		if (prior.authorityGeneration !== request.authorityGeneration) return undefined;
 		if (!(await this.#sameAdmittedBinding(prior, request))) return undefined;
-		const storedDigest = await this.store.getBindingConversationIdentity(request.agentInstanceId);
-		const restoredIdentity =
-			restoreReceipt &&
-			storedDigest === restoreReceipt.oldIdentityDigest &&
-			storedDigest === (await this.#conversationIdentityDigest(request, restoreReceipt.originalCwd));
-		if (storedDigest !== conversationIdentityDigest && !restoredIdentity) {
-			if (storedDigest) return undefined;
-			// Upgrade compatibility for bindings created before the conversation digest
-			// column existed. The admitted start retains the same durable identity tuple.
-			const identity = await this.store.getStartConversationIdentity(prior.commandId);
-			if (
-				identity?.operation !== "start" ||
-				identity.agentInstanceId !== request.agentInstanceId ||
-				identity.agentInstanceRef !== request.agentInstanceRef ||
-				identity.parentAgentInstanceId !== request.parentAgentInstanceId ||
-				identity.authorityGeneration !== request.authorityGeneration
-			) {
-				return undefined;
-			}
-		}
+		const identity = await this.store.getStartConversationIdentity(prior.commandId);
+		if (identity?.operation !== "start" || identity.agentInstanceId !== request.agentInstanceId ||
+			identity.agentInstanceRef !== request.agentInstanceRef ||
+			identity.parentAgentInstanceId !== request.parentAgentInstanceId ||
+			identity.authorityGeneration !== request.authorityGeneration || identity.principalId !== request.principalId)
+			return undefined;
 		let header: SessionHeader | undefined;
 		try {
 			header = await this.#sessionHeader(prior.sessionFile);
@@ -3579,22 +3566,11 @@ export class EngineRuntime {
 		if (header?.type !== "session" || typeof header.cwd !== "string") {
 			throw new Error("Retained AgentSession conversation is missing or invalid");
 		}
-		if ((await canonicalWorkspacePath(header.cwd)) !== (await canonicalWorkspacePath(request.cwd))) return undefined;
+		const retainedCwd = restoreReceipt?.oldBindingId === prior.bindingId ? restoreReceipt.originalCwd : request.cwd;
+		if (canonicalRetainedWorkspacePath(header.cwd) !== canonicalRetainedWorkspacePath(retainedCwd)) return undefined;
 		return header.id;
 	}
 
-	async #conversationIdentityDigest(request: EngineStartRequest, canonicalCwdOverride?: string): Promise<string> {
-		return executionHash({
-			agentInstanceId: request.agentInstanceId,
-			agentInstanceRef: request.agentInstanceRef,
-			parentAgentInstanceId: request.parentAgentInstanceId ?? null,
-			authorityGeneration: request.authorityGeneration,
-			canonicalCwd:
-				canonicalCwdOverride === undefined
-					? await canonicalWorkspacePath(request.cwd)
-					: canonicalRetainedWorkspacePath(canonicalCwdOverride),
-		});
-	}
 
 	async #requestInput(
 		binding: LiveBinding,
@@ -3773,7 +3749,7 @@ export class EngineRuntime {
 					parentAttemptId: binding.attemptId, parentBindingSnapshot: binding.bindingSnapshot,
 					principalId: binding.principalId, authorityGeneration: binding.authorityGeneration,
 					target: child.target, assignment: child.assignment, toolCallId: call.toolCallId,
-					cwd: binding.session.cwd, signal,
+					cwd: binding.session.settings.getCwd(), signal,
 				});
 				return await this.#requestToolApproval(record, signal, subject);
 			} catch (error) {
@@ -4303,7 +4279,7 @@ export class EngineRuntime {
 			return;
 		}
 		// The start command owns the Attempt terminal event, including parent-driven cancellation.
-		await this.cancel({ ...this.#snapshot(binding), commandId: binding.commandId, reason });
+		await this.#branchControl({ ...this.#snapshot(binding), commandId: binding.commandId, reason }, "stop", false);
 	}
 
 	async #resumeApprovedTool(binding: LiveBinding, id: string): Promise<void> {
@@ -4528,7 +4504,7 @@ export class EngineRuntime {
 	}
 
 	#messageAttachments(
-		request: Pick<EngineStartRequest, "principalId" | "clientMessageId" | "attachmentUploadIds">,
+		request: Pick<EngineSteerRequest, "principalId" | "clientMessageId" | "attachmentUploadIds">,
 	): EngineMessageAttachments | undefined {
 		if (request.attachmentUploadIds === undefined) return undefined;
 		validateRuntimeValue("id", request.clientMessageId);
@@ -5795,7 +5771,8 @@ export class EngineRuntime {
 		const deltas = eventId === undefined ? replay : replay.filter(delta => delta.eventId === eventId);
 		const delivered = new Set(
 			binding.session.sessionManager.getContextBranch()
-				.filter(entry => entry.type === "custom_message" && entry.customType === "executor-rules")
+				.filter((entry): entry is Extract<SessionEntry, { type: "custom_message" }> =>
+					entry.type === "custom_message" && entry.customType === "executor-rules")
 				.flatMap(entry => {
 					const details = entry.details as { attemptId?: unknown; eventId?: unknown } | undefined;
 					return details?.attemptId === binding.attemptId && typeof details.eventId === "string" ? [details.eventId] : [];
@@ -5941,13 +5918,13 @@ export class EngineRuntime {
 			originReceiptId: request.originReceiptId,
 		}, request.cwd);
 		const binding = await this.#openBinding(request, resolved, continuationDigest,
-			await this.#conversationIdentityDigest(request), choice.execution_digest, choice, remaining, current,
+			choice.execution_digest, choice, remaining, current,
 			current.bindingGeneration, undefined, undefined, undefined, undefined, undefined,
 			origin.approvalSettings ?? undefined, true);
 		await this.#restoreMeasuredUsage(binding, attempt.transcript_native);
 		await this.#repairExecutorRuleMessages(binding, choice, config);
-		binding.manualHold = current.manualHold;
-		binding.intentRevision = current.intentRevision;
+		binding.manualHold = current.manualHold ?? false;
+		binding.intentRevision = current.intentRevision ?? 0;
 		binding.attemptState = "paused";
 		binding.state = "running";
 		binding.pauseGate.pause();
@@ -6040,7 +6017,7 @@ export class EngineRuntime {
 			| "bindingGeneration"
 			| "authorityGeneration"
 		>,
-		kind: EngineEvent["kind"],
+		kind: EngineOrdinaryEvent["kind"],
 		payload?: Record<string, unknown>,
 		causationCommandId = target.commandId,
 	): Promise<void> {
@@ -6070,7 +6047,7 @@ export class EngineRuntime {
 			| "bindingGeneration"
 			| "authorityGeneration"
 		>,
-		kind: EngineEvent["kind"],
+		kind: EngineOrdinaryEvent["kind"],
 		payload?: Record<string, unknown>,
 		causationCommandId = target.commandId,
 		settleCommandId?: string,
@@ -6119,7 +6096,6 @@ export class EngineRuntime {
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
 			...options,
-			conversationIdentityDigest: binding.conversationIdentityDigest,
 			...(binding.previousInboxSessionId ? { previousInboxSessionId: binding.previousInboxSessionId } : {}),
 			...(binding.pendingInboxSourceSessionId
 				? { pendingInboxSourceSessionId: binding.pendingInboxSourceSessionId }
