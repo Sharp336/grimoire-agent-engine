@@ -156,16 +156,19 @@ export function eventReadKeys(
 		keys.push({ kind: "projection", id: projectionId("ownership", "command", event.causationCommandId) });
 	if (event.kind === "message_updated") {
 		const value = event.payload ?? {};
-		const message = String(value.messageId);
+		const message = String("messageId" in value ? value.messageId : undefined);
 		keys.push(
 			{
 				kind: "projection",
-				id: projectionId("message", event.attemptId, message, String(value.blockId), String(value.stream)),
+				id: projectionId("message", event.attemptId, message,
+					String("blockId" in value ? value.blockId : undefined),
+					String("stream" in value ? value.stream : undefined)),
 			},
 			{ kind: "projection", id: projectionId("ownership", agent, message) },
 		);
 	}
-	if (event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string")
+	if (event.kind === "assistant_snapshot" && event.payload &&
+		"assistantMessageId" in event.payload && typeof event.payload.assistantMessageId === "string")
 		keys.push({ kind: "projection", id: projectionId("ownership", agent, event.payload.assistantMessageId) });
 	if (summaryEvents.has(event.kind) || approvalEvent(event.kind))
 		keys.push(
@@ -190,7 +193,7 @@ export interface RocksProjection {
 	/** Base64 bytes of one input part. */
 	part?: string;
 }
-export interface ProjectedEvent extends RocksEvent {
+export type ProjectedEvent = RocksEvent & {
 	projection_principal: string;
 	projection_root: string;
 	summary_payload: Record<string, unknown> | null;
@@ -203,7 +206,7 @@ export interface ProjectedEvent extends RocksEvent {
 	message_end_offset?: number;
 	message_snapshot?: Record<string, unknown>;
 	lifecycle_summary?: string | null;
-}
+};
 
 function merged<T extends object>(
 	tx: RuntimeTransaction,
@@ -617,14 +620,15 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		attempt.tool_revision = event.eventId;
 	}
 	if (event.kind.startsWith("input_") || approvalEvent(event.kind)) {
+		const payload = event.payload;
 		const inputId = String(event.kind === "input_requested" || event.kind === "input_resolved"
-			? event.payload?.inputId
-			: event.kind.endsWith("_approval_requested") ? event.payload?.id : event.payload?.request_id);
+			? payload?.inputId
+			: payload && ("id" in payload ? payload.id : "request_id" in payload ? payload.request_id : undefined));
 		const id = projectionId("input", event.attemptId, inputId);
 		if (event.kind.endsWith("requested")) {
 			// An oversized question already carries its preview; approvals retain their exact request.
 			const body = runtimeInputBody(event);
-			const parts = event.payload?.inputParts as InputParts | undefined;
+			const parts = event.kind === "input_requested" ? event.payload?.inputParts as InputParts | undefined : undefined;
 			await putProjection(
 				tx,
 				event,
@@ -898,13 +902,19 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			changes.push(projectionChange("state", identity.agent_instance_ref, event.eventId, event.eventId, detail));
 	}
 	const invalidations: string[] = [];
-	if (event.kind === "model_settled" || event.kind === "profile_route_changed" || terminal.has(event.kind))
+	if (event.kind === "model_settled" || event.kind === "executor_route_changed" || terminal.has(event.kind))
 		invalidations.push("usage", "context");
 	if (event.kind === "inbox_changed") invalidations.push("queue");
 	if (event.kind === "holds_changed") invalidations.push("holds");
 	if ((event.kind.startsWith("input_") || approvalEvent(event.kind)) && attempt)
 		invalidations.push("input");
-	if (event.payload?.transcriptCheckpoint && event.attemptId) invalidations.push("history");
+	const checkpoint = event.payload && "transcriptCheckpoint" in event.payload
+		? event.payload.transcriptCheckpoint : undefined;
+	const checkpointRevision = checkpoint && typeof checkpoint === "object" &&
+		"revision" in checkpoint ? checkpoint.revision : undefined;
+	if (checkpoint && (typeof checkpointRevision !== "number" || !Number.isSafeInteger(checkpointRevision)))
+		throw new EngineTargetError("invalid_request", "Transcript checkpoint has no valid revision");
+	if (checkpoint && event.attemptId) invalidations.push("history");
 	for (const resource of invalidations) {
 		const revision =
 			resource === "queue"
@@ -912,7 +922,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 				: resource === "holds"
 					? identity.intent_revision
 					: resource === "history"
-						? (event.payload!.transcriptCheckpoint as { revision: number }).revision
+						? checkpointRevision ?? event.eventId
 						: event.eventId;
 		changes.push(
 			projectionChange(

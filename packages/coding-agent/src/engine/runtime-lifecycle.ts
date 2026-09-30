@@ -19,7 +19,9 @@ const lifecycleKinds = {
 export function lifecycleSummary(event: Pick<EngineEvent, "kind" | "payload">): string | null {
 	if (!Object.hasOwn(lifecycleKinds, event.kind)) return null;
 	const value = event.payload ?? {};
-	const retry = value.retry as { attempt?: number; maxAttempts?: number; route?: string; error?: string } | undefined;
+	const retry = "retry" in value
+		? value.retry as { attempt?: number; maxAttempts?: number; route?: string; error?: string } | undefined
+		: undefined;
 	if (retry)
 		return [
 			retry.attempt === undefined ? "" : `attempt ${retry.attempt}/${retry.maxAttempts}`,
@@ -29,7 +31,7 @@ export function lifecycleSummary(event: Pick<EngineEvent, "kind" | "payload">): 
 			.filter(Boolean)
 			.join(" · ")
 			.slice(0, 500);
-	const error = value.error;
+	const error = "error" in value ? value.error : undefined;
 	return (
 		typeof error === "string"
 			? error

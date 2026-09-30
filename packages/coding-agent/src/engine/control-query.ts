@@ -1137,7 +1137,8 @@ async function listEvents(runtime: EngineRuntime, attemptId: string, cursor: str
 
 async function getResult(runtime: EngineRuntime, attemptId: string): Promise<Record<string, unknown> | undefined> {
 	const event = await runtime.store.terminalEvent(attemptId);
-	if (!event) return undefined;
+	if (!event || (event.kind !== "completed" && event.kind !== "cancelled" &&
+		event.kind !== "failed" && event.kind !== "interrupted")) return undefined;
 	const attempt = await runtime.store.getAttempt(attemptId);
 	const binding = await runtime.store.getBinding(event.agentInstanceId);
 	const raw = typeof event.payload?.assistantFinal === "string" ? event.payload.assistantFinal : "";
@@ -1200,7 +1201,23 @@ async function listSessionHistory(
 	};
 }
 
-function publicEvent(event: EngineEvent): EngineEvent {
+function publicEvent(event: EngineEvent) {
+	switch (event.kind) {
+		case "tool_approval_requested":
+		case "spawn_approval_requested":
+		case "escalation_approval_requested":
+		case "consultant_approval_requested":
+		case "tool_approval_resolved":
+		case "spawn_approval_resolved":
+		case "escalation_approval_resolved":
+		case "consultant_approval_resolved":
+		case "approval_escalated":
+		case "approval_timed_out":
+		case "executor_route_changed": {
+			const bounded = boundedRecord(event.payload);
+			return bounded === event.payload ? event : { ...event, payload: bounded };
+		}
+	}
 	const payload = event.payload;
 	if (!payload) return event;
 	switch (event.kind) {

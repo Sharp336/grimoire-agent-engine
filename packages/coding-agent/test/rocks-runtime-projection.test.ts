@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
+import type { EngineEvent, EngineOrdinaryEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { nativeEntry, nativeScope } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
@@ -139,18 +139,18 @@ function fixture(): Rows {
 		input_revision: 0,
 		message_revision: 0,
 		tool_revision: 0,
-		profile_route_state: null,
+		executor_route_state: null,
 	});
 	return rows;
 }
 async function append(
 	tx: RuntimeTransaction,
-	kind: EngineEvent["kind"],
+	kind: EngineOrdinaryEvent["kind"],
 	payload: Record<string, unknown>,
 	eventId = 1,
 ): Promise<EngineEvent> {
 	const { commandId, ...eventTarget } = target;
-	const event: EngineEvent = {
+	const event: EngineOrdinaryEvent = {
 		...eventTarget,
 		causationCommandId: commandId,
 		eventId,
@@ -338,7 +338,10 @@ describe("Rocks runtime atomic public projections", () => {
 				attemptId: next.attemptId!,
 				bindingId: "binding-explicit",
 				engineAgentId: "native-a",
-				profileDigest: "read-profile",
+				executionDigest: "sha256:execution",
+				continuationDigest: "sha256:continuation",
+				dispatchRef: "gctx:dispatch",
+				dispatchHash: "sha256:dispatch",
 				state: "running",
 				engineGeneration: 1,
 				bindingGeneration: 2,
@@ -492,7 +495,7 @@ describe("Rocks runtime atomic public projections", () => {
 			),
 		).rejects.toThrow("exact revision");
 		await settleRuntimeMessages(tx, target, "settled", async (batch, _target, event) =>
-			append(batch, event.kind, event.payload ?? {}, 2),
+			append(batch, "message_updated", event.payload ?? {}, 2),
 		);
 		const message = await tx.get<{ value: Record<string, unknown> }>(
 			"projection",

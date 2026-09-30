@@ -1,4 +1,4 @@
-import { type ApprovalRequest, type EngineEvent, EngineTargetError } from "./contracts";
+import { type EngineEvent, EngineTargetError } from "./contracts";
 import {
 	type RuntimeAccess,
 	type RuntimeChange,
@@ -42,9 +42,9 @@ export function boundedItems<T>(items: T[], maxBytes: number, maxItems: number):
 }
 
 export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
-	const payload = event.payload ?? {};
-	if (event.kind.endsWith("_approval_requested")) {
-		const approval = payload as unknown as ApprovalRequest;
+	if (event.kind === "tool_approval_requested" || event.kind === "spawn_approval_requested" ||
+		event.kind === "escalation_approval_requested" || event.kind === "consultant_approval_requested") {
+		const approval = event.payload;
 		return {
 			kind: "approval",
 			inputId: approval.id,
@@ -57,6 +57,9 @@ export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 				: ["approve", "approve_always", "deny"],
 		};
 	}
+	if (event.kind !== "input_requested")
+		throw new EngineTargetError("invalid_request", "Input body requires a requested input event");
+	const payload = event.payload ?? {};
 	return {
 		kind: "question",
 		inputId: String(payload.inputId),

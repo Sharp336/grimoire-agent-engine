@@ -72,13 +72,28 @@ it.skipIf(process.platform !== "win32")(
 		const rows = new Map<string, unknown>([["metadata:restore-workspace", descriptor]]);
 		const agentInstanceId = "restored-agent";
 		const sessionFile = "native:family/generation";
-		const binding = {
+		const binding: RocksBinding = {
+			agent_instance_id: agentInstanceId,
 			binding_id: "old-binding",
+			command_id: "start-command",
+			execution_id: "execution",
+			attempt_id: "attempt",
+			engine_agent_id: "native-agent",
 			session_file: sessionFile,
-			profile_digest: "old-profile",
-			conversation_identity_digest: "old-identity",
+			execution_schema: 2,
+			execution_digest: "sha256:execution",
+			continuation_digest: "sha256:continuation",
+			dispatch_ref: "gctx:dispatch",
+			dispatch_hash: "sha256:dispatch",
+			state: "running",
+			engine_generation: 1,
+			binding_generation: 1,
 			authority_generation: 1,
-		} as RocksBinding;
+			manual_hold: 0,
+			intent_revision: 0,
+			intent_command_id: null,
+			updated_at: 1,
+		};
 		rows.set(`binding:${agentInstanceId}`, binding);
 		const tx = {
 			get: async (kind: string, id: string) => rows.get(`${kind}:${id}`) ?? null,
@@ -159,7 +174,16 @@ it.skipIf(process.platform !== "win32")(
 			process.env.GRIMOIRE_ENGINE_WORK_ROOT = firstRoot;
 			rows.set(`binding:${agentInstanceId}`, { ...binding, binding_id: "other-binding" });
 			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
+			rows.set(`binding:${agentInstanceId}`, { ...binding, execution_digest: "sha256:changed" });
+			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
+			rows.set(`binding:${agentInstanceId}`, { ...binding, continuation_digest: "sha256:changed" });
+			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
+			rows.set(`binding:${agentInstanceId}`, { ...binding, dispatch_hash: "sha256:changed" });
+			await expect(completeRestoreRebind(tx, receipt)).rejects.toThrow("receipt changed");
 			rows.set(`binding:${agentInstanceId}`, binding);
+			await expect(completeRestoreRebind(tx, {
+				...receipt, oldContinuationDigest: "sha256:forged",
+			})).rejects.toThrow("receipt changed");
 			await completeRestoreRebind(tx, receipt);
 			expect(
 				(await resolveRestoreWorkspace(store, agentInstanceId, sessionFile, reboundHeader, reboundPosition))

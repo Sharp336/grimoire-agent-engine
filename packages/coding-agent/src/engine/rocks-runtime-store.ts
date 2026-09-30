@@ -207,7 +207,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			if (stored[key] !== event[key]) return false;
 		}
 		for (const key of ["action", "queueId", "revision", "sourceEventId"] as const) {
-			if (stored.payload?.[key] !== event.payload?.[key]) return false;
+			if (stored.payload?.[key] !== event.payload[key]) return false;
 		}
 		// Legacy query/tool mutation IDs also occur in retained outbox events. Only actual
 		// admitted commands have hosted receipts; never infer that distinction from ID shape.

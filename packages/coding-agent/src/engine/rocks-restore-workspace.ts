@@ -46,8 +46,10 @@ export interface RestoreWorkspaceReceipt {
 	oldThroughSeq: number;
 	oldHeaderHash: string;
 	newHeaderHash: string;
-	oldProfileDigest: string;
-	oldIdentityDigest: string | null;
+	oldExecutionDigest: string;
+	oldContinuationDigest: string;
+	oldDispatchRef: string;
+	oldDispatchHash: string;
 	oldBindingId: string;
 	authorityGeneration: number;
 }
@@ -292,8 +294,10 @@ export async function beginRestoreRebind(
 			oldThroughSeq: position.throughSeq,
 			oldHeaderHash: digest(header),
 			newHeaderHash: digest(nextHeader),
-			oldProfileDigest: binding.profile_digest,
-			oldIdentityDigest: binding.conversation_identity_digest,
+			oldExecutionDigest: binding.execution_digest,
+			oldContinuationDigest: binding.continuation_digest,
+			oldDispatchRef: binding.dispatch_ref,
+			oldDispatchHash: binding.dispatch_hash,
 			oldBindingId: binding.binding_id,
 			authorityGeneration: binding.authority_generation,
 		};
@@ -311,12 +315,20 @@ export async function completeRestoreRebind(tx: RuntimeTransaction, receipt: Res
 		current.schema !== receipt.schema ||
 		current.oldHeaderHash !== receipt.oldHeaderHash ||
 		current.newHeaderHash !== receipt.newHeaderHash ||
+		current.oldBindingId !== receipt.oldBindingId ||
+		current.oldExecutionDigest !== receipt.oldExecutionDigest ||
+		current.oldContinuationDigest !== receipt.oldContinuationDigest ||
+		current.oldDispatchRef !== receipt.oldDispatchRef ||
+		current.oldDispatchHash !== receipt.oldDispatchHash ||
+		current.authorityGeneration !== receipt.authorityGeneration ||
 		current.state !== "pending" ||
 		!binding ||
 		binding.binding_id !== receipt.oldBindingId ||
 		binding.session_file !== receipt.sessionFile ||
-		binding.profile_digest !== receipt.oldProfileDigest ||
-		binding.conversation_identity_digest !== receipt.oldIdentityDigest ||
+		binding.execution_digest !== receipt.oldExecutionDigest ||
+		binding.continuation_digest !== receipt.oldContinuationDigest ||
+		binding.dispatch_ref !== receipt.oldDispatchRef ||
+		binding.dispatch_hash !== receipt.oldDispatchHash ||
 		binding.authority_generation !== receipt.authorityGeneration
 	)
 		fail("Restore workspace receipt changed before Attempt admission");
