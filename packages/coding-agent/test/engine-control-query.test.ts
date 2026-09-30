@@ -4,7 +4,11 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type Candidate, type EngineBindingSnapshot, type ExecutorChoice, EngineTargetError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import {
+	type EngineBindingSnapshot,
+	type EngineOrdinaryEvent,
+	EngineTargetError,
+} from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 	ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS,
@@ -20,8 +24,8 @@ import type { EngineTransitionEvent } from "@oh-my-pi/pi-coding-agent/engine/sto
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { bindTestsToStorageWorker, storageWorkerUnavailable } from "./helpers/storage-worker-fixture";
-import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
-import { type AdmissionRequest, candidateIdentity } from "../src/engine/routing-admission";
+import { admittedExecutionFixture, choiceFrom, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import { type AdmissionRequest } from "../src/engine/routing-admission";
 
 describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	bindTestsToStorageWorker();
@@ -46,7 +50,11 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	}
 
 	/** Complete a running Attempt on a durable native transcript: the owner settles completion only with one. */
-	async function completeNative(runtime: EngineRuntime, binding: EngineBindingSnapshot, event: EngineTransitionEvent) {
+	async function completeNative(
+		runtime: EngineRuntime,
+		binding: EngineBindingSnapshot,
+		event: EngineTransitionEvent<EngineOrdinaryEvent>,
+	) {
 		const familyId = `family-${binding.attemptId}`;
 		const client = runtime.store.storageClient;
 		await client.write({
@@ -88,7 +96,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 		const modulePath = path.join(tempDir, "probe.exe");
 		fs.writeFileSync(modulePath, "");
 		for (const pass of [0, 1]) {
-			const runtime = await EngineRuntime.create({ databasePath });
+			const runtime = await EngineRuntime.create({ databasePath, deviceId: "device-one" });
 			const server = await startEngineControlQueryServer({
 				runtimeDir: tempDir, runtime, deviceId: "device-one", engineId: "engine-one",
 			});
@@ -124,7 +132,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 
 	it("stages and removes message-owned attachment chunks through the authenticated native transport", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-upload-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite"), deviceId: "control-upload" });
 		const server = await startEngineControlQueryServer({
 			runtimeDir: tempDir,
 			runtime,
@@ -637,7 +645,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	}, 120_000);
 	it("serves an exact paused tool baseline through the native request validator", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite"), deviceId: "control-tools" });
 		const agentInstanceRef = "grimoire://tasks/grimoire/control-tools/agents/agent";
 		await runtime.store.registerAgent({
 			agentInstanceId: "control-tools",
@@ -660,42 +668,29 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			authorityGeneration: 1,
 			bindingGeneration: 1,
 		};
-		const candidate: Candidate = {
-			model_id: "fixture-model", route_ref: "gctx:bbbbbbbbbbbbbbbb", account_ref: "gctx:cccccccccccccccc",
-			effort: "none", service_tier: "standard", billing_pool_id: "fixture-pool", billing_pool_basis: "expected",
-			tier: 0, provider_id: "fixture", quota_window_ids: [], shadow_cost: null, price_source: "unknown",
-			estimated: false, record_revisions: {},
-		};
+		const execution = admittedExecutionFixture(target.bindingSnapshot.taskRef!);
+		const candidate = execution.config.routes.routes[0]!;
 		const admission: AdmissionRequest = {
 			principalId: "owner", deviceId: "device", engineGeneration: runtime.engineGeneration,
 			commandId: target.commandId, agentInstanceRef, attemptId: target.attemptId,
-			dispatchId: "fixture-dispatch", dispatchRef: target.dispatchRef, dispatchHash: target.dispatchHash,
-			originReceiptId: "fixture-origin", authContextId: "fixture-auth", bindingSnapshot: target.bindingSnapshot,
-			executionKind: "ordinary", rosterRevision: `sha256:${"d".repeat(64)}`, expectedRevisions: {},
-			limits: { scopes: [{ scope_ref: target.bindingSnapshot.taskRef!, agents: 1, by_tier: [], consultations: null }],
-				accounts: { [candidate.account_ref]: 1 }, providers: { fixture: 1 } },
+			dispatchId: execution.config.dispatch.dispatch_id,
+			dispatchRef: target.dispatchRef, dispatchHash: execution.dispatchHash,
+			originReceiptId: `origin:${target.commandId}`, authContextId: "fixture-auth", bindingSnapshot: target.bindingSnapshot,
+			executionKind: execution.config.dispatch.execution_kind,
+			rosterRevision: execution.config.roster_revision, expectedRevisions: execution.config.record_revisions,
+			limits: execution.config.routingLimits,
 			candidates: [candidate], callerAttemptId: null, frozen: false,
 		};
-		const preview = await runtime.store.previewRouting(admission);
-		if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
-		const choice: ExecutorChoice = {
-			schema: "grimoire.executor_choice.v1", dispatch_hash: target.dispatchHash, preset_ref: null,
-			effective_requirement: {
-				min_tier: 0, required: [], required_tags: [], preferred_tags: [], models: null,
-				exclude: { models: [], families: [], agent_instances: [] }, min_context: null, min_output: null,
-				latency_ceiling_ms: null, min_effort: null, service_tier: "standard", downgrade: "forbidden", pin: null,
-				require_trusted_provider: false, fallback_mode: "none",
-			},
-			scope_revision: `sha256:${"d".repeat(64)}`, candidates: [candidate], filtered_counts: {},
-			selected: { ...candidateIdentity(candidate), basis: "rank", order_match: null }, execution_digest: target.executionDigest,
-			shadow_cost_estimate: null, rules: [], skills: [], transitions: [], actual_cost: null, grants_used: [],
-		};
+		// The routing lease pins to its admitted Start command: admit before previewing and committing.
 		await runtime.store.admitCommand(engineCommandIdentity({
 			schema: "grimoire.engine.command.v1", op: "start", commandId: target.commandId, deviceId: "device", engineId: "engine",
 			engineGeneration: runtime.engineGeneration, agentInstanceId: target.agentInstanceId, agentInstanceRef,
 			bindingSnapshot: target.bindingSnapshot, executionId: target.executionId, attemptId: target.attemptId,
 			authorityGeneration: 1, principalId: "owner", issuedAt: 1, payload: {},
 		}), runtime.engineGeneration);
+		const preview = await runtime.store.previewRouting(admission);
+		if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
+		const choice = choiceFrom(execution, preview.status === "admitted" ? preview.frozen : [candidate], target);
 		await runtime.store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
 			requireNew: true, settleCommandId: target.commandId, routingAdmission: { request: admission, preview },
 			execution: { execution_schema: 2, execution_digest: target.executionDigest, continuation_digest: target.continuationDigest,
@@ -750,7 +745,7 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 	});
 	it("survives a native client disconnect while its durable response is ready to write", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-cancel-${Snowflake.next()}-`));
-		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite"), deviceId: "control-cancel" });
 		const agentInstanceRef = "grimoire://tasks/grimoire/control-cancel/agents/agent";
 		await runtime.store.registerAgent({
 			agentInstanceId: "control-cancel",
@@ -903,16 +898,25 @@ it("distinguishes explicit Core origin refusal from unknown bridge transport", a
 	const rpc = new HostedGrimoireRpc({ serverUrl: "https://core.example/mcp", token: "test", clientId: "test" });
 	const fetchOriginal = globalThis.fetch;
 	try {
-		globalThis.fetch = async () => new Response(JSON.stringify({
-			error: { code: "private_origin_required", message: "Start origin identity differs" },
-		}), { status: 403 });
+		globalThis.fetch = Object.assign(
+			async () => new Response(JSON.stringify({
+				error: { code: "private_origin_required", message: "Start origin identity differs" },
+			}), { status: 403 }),
+			{ preconnect: fetchOriginal.preconnect },
+		);
 		await assert.rejects(rpc.call("verify_origin_receipt", { commandId: "cmd" }), { code: "stale_target" });
-		globalThis.fetch = async () => new Response(null, { status: 503 });
+		globalThis.fetch = Object.assign(
+			async () => new Response(null, { status: 503 }),
+			{ preconnect: fetchOriginal.preconnect },
+		);
 		await assert.rejects(rpc.call("verify_origin_receipt", { commandId: "cmd" }),
 			(error: unknown) => error instanceof HostedBridgeUnavailableError);
-		globalThis.fetch = async () => Response.json({
-			result: { structuredContent: { verified: true }, content: [], isError: false },
-		});
+		globalThis.fetch = Object.assign(
+			async () => Response.json({
+				result: { structuredContent: { verified: true }, content: [], isError: false },
+			}),
+			{ preconnect: fetchOriginal.preconnect },
+		);
 		assert.deepEqual(await rpc.call("verify_origin_receipt", { commandId: "cmd" }), { verified: true });
 	} finally {
 		globalThis.fetch = fetchOriginal;

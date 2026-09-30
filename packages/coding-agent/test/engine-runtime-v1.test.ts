@@ -3,8 +3,7 @@ import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, ty
 import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
 import type { RocksEngineStore } from "../src/engine/rocks-runtime-store";
-import type { RocksEffect } from "../src/engine/rocks-runtime-rows";
-import { type EngineApprovalRow, EngineCommandConflictError } from "../src/engine/store";
+import { EngineCommandConflictError } from "../src/engine/store";
 import {
 	RUNTIME_PROTOCOL_HASH,
 	type RuntimeScope,
@@ -14,7 +13,9 @@ import {
 import type { StoragePayload } from "../src/session/storage-protocol";
 import {
 	active,
+	admittedExecutionFixture,
 	binding,
+	choiceFrom,
 	command,
 	eventsRequest,
 	identity,
@@ -126,8 +127,30 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				issuedAt: 1, payload: { expectedIntentRevision: 0 },
 			};
 			await store.admitCommand(engineCommandIdentity(start), 1);
+			const execution = admittedExecutionFixture(snapshot.taskRef!);
+			const route = execution.config.routes.routes[0]!;
+			const admission = {
+				principalId, deviceId: "device", engineGeneration: 1,
+				commandId: target.commandId, agentInstanceRef, attemptId: target.attemptId,
+				dispatchId: execution.config.dispatch.dispatch_id,
+				dispatchRef: target.dispatchRef, dispatchHash: execution.dispatchHash,
+				originReceiptId: `origin:${target.commandId}`, authContextId: "approval-delivery-auth",
+				bindingSnapshot: snapshot, executionKind: execution.config.dispatch.execution_kind,
+				rosterRevision: execution.config.roster_revision, expectedRevisions: execution.config.record_revisions,
+				limits: execution.config.routingLimits,
+				candidates: [route], callerAttemptId: null, frozen: false,
+			};
+			const preview = await store.previewRouting(admission);
+			if (preview.status !== "admitted") throw new Error("Fixture route admission was not available");
 			await store.commitAttemptTransition(target, "running", [{ kind: "running" }], {
 				requireNew: true, settleCommandId: start.commandId,
+				routingAdmission: { request: admission, preview },
+				execution: {
+					execution_schema: 2, execution_digest: target.executionDigest, continuation_digest: target.continuationDigest,
+					dispatch_ref: target.dispatchRef, dispatch_hash: execution.dispatchHash,
+					executor_choice: choiceFrom(execution, preview.status === "admitted" ? preview.frozen : [route], target),
+					lease_id: `slot-lease:${target.attemptId}`, queue_id: null,
+				},
 			});
 			const hash = `sha256:${"a".repeat(64)}`;
 			const request: ApprovalRequest = {
@@ -140,24 +163,14 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				expires_at: null, address_revision: 1, decision_revision: 0, status: "waiting_human_paused",
 				timeout_seconds: 300, settings_revision: 0, settings_hash: hash,
 			};
-			// Seed the retained paused effect, not a provider or a mock approval implementation.
-			const effect: RocksEffect = {
-				effect_id: request.effect_id, command_id: start.commandId, agent_instance_id: agentInstanceId,
-				execution_id: target.executionId, attempt_id: target.attemptId, binding_id: target.bindingId,
-				engine_generation: 1, binding_generation: 1, authority_generation: 1,
-				effect_kind: "tool", tool_call_id: "call", tool_name: "bash", input_hash: hash, policy: "permit",
-				assistant_message_id: null, assistant_block_id: null, state: "planned", outcome: null,
-				created_at: 1, updated_at: 1, runtime_event_id: 0,
-			};
-			await store.mutation(agentInstanceId, async tx => {
-				await tx.put("effect", effect.effect_id, effect);
-				await tx.put("approval", request.id, {
-					approval_id: request.id, effect_id: request.effect_id, state: "pending", decision: null,
-					decision_record: null, timed_out_attempt_ids: [], request, updated_at: 1,
-				} satisfies EngineApprovalRow);
-			});
-			await store.appendEvent({ ...target, causationCommandId: start.commandId,
-				kind: "tool_approval_requested", payload: request });
+			// Stage the retained paused effect and its approval through the store's own guarded admission path.
+			await store.requestToolApproval(target, {
+				effectId: request.effect_id,
+				toolCallId: "call",
+				toolName: "bash",
+				policy: "permit",
+				inputHash: hash,
+			}, request);
 			await store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
 			const inputRevision = (await store.getAttempt(target.attemptId))!.input_revision;
 			const decision: ApprovalDecision = {
@@ -185,9 +198,10 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			await restarted.mutation(agentInstanceId, async tx => {
 				const nativeBinding = await tx.get<Record<string, unknown>>("binding", agentInstanceId);
 				const nativeAttempt = await tx.get<Record<string, unknown>>("attempt", target.attemptId);
+				const nativeEffect = await tx.get<Record<string, unknown>>("effect", request.effect_id);
 				await tx.put("binding", agentInstanceId, { ...nativeBinding, engine_generation: generation });
 				await tx.put("attempt", target.attemptId, { ...nativeAttempt, engine_generation: generation });
-				await tx.put("effect", effect.effect_id, { ...effect, engine_generation: generation });
+				await tx.put("effect", request.effect_id, { ...nativeEffect, engine_generation: generation });
 			});
 			const foreign = reopen();
 			foreign.verifyInstallation(`install_${"b".repeat(32)}`, principalId);
@@ -199,14 +213,20 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 					.rejects.toMatchObject({ code: "stale_target" });
 				await expect(restarted.approvalDelivery(original, { ...decision, expected_address_revision: 2 }, inputRevision, generation))
 					.rejects.toMatchObject({ code: "stale_target" });
-				await restarted.mutation(agentInstanceId, tx => tx.put("effect", effect.effect_id, {
-					...effect, engine_generation: generation, state: "unknown", outcome: "unknown",
-				}));
+				await restarted.mutation(agentInstanceId, async tx => {
+					const nativeEffect = await tx.get<Record<string, unknown>>("effect", request.effect_id);
+					await tx.put("effect", request.effect_id, {
+						...nativeEffect, engine_generation: generation, state: "unknown", outcome: "unknown",
+					});
+				});
 				await expect(restarted.approvalDelivery(original, decision, inputRevision, generation))
 					.rejects.toMatchObject({ code: "stale_target" });
-				await restarted.mutation(agentInstanceId, tx => tx.put("effect", effect.effect_id, {
-					...effect, engine_generation: generation,
-				}));
+				await restarted.mutation(agentInstanceId, async tx => {
+					const nativeEffect = await tx.get<Record<string, unknown>>("effect", request.effect_id);
+					await tx.put("effect", request.effect_id, {
+						...nativeEffect, engine_generation: generation,
+					});
+				});
 				expect(await restarted.approvalDelivery(original, decision, inputRevision, generation)).toEqual({ status: "absent" });
 				await expect(store.admitCommand(original, 1)).rejects.toMatchObject({ code: "stale_target" });
 				await expect(restarted.admitCommand(original, generation)).rejects.toMatchObject({ code: "stale_target" });
@@ -679,6 +699,18 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			});
 			revisions.push(event.eventId);
 		}
+		const approvalHash = `sha256:${"f".repeat(64)}`;
+		const permitRequest: ApprovalRequest = {
+			schema: "grimoire.approval_request.v1", id: "effect-permit", effect_id: "effect-permit",
+			principal_id: "owner", requester_agent_ref: agent.agentInstanceRef,
+			requester_attempt_id: target.attemptId, requester_binding_revision: target.bindingSnapshot!.bindingRevision,
+			dispatch_hash: target.dispatchHash, kind: "tool", name: "write",
+			subject: { tool_name: "write", call_hash: approvalHash, ceiling_hash: approvalHash },
+			requires_human: true, reason: "fixture permit", created_at: "2026-09-30T00:00:00Z",
+			addressed_to: { kind: "human", principal_id: "owner" }, addressed_at: "2026-09-30T00:00:00Z",
+			expires_at: null, address_revision: 1, decision_revision: 0, status: "waiting_human_paused",
+			timeout_seconds: 300, settings_revision: 0, settings_hash: approvalHash,
+		};
 		await store.requestToolApproval(target, {
 			effectId: "effect-permit",
 			toolCallId: "tool-permit",
@@ -686,7 +718,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			policy: "permit",
 			inputHash: "sha256:approval",
 			origin: { messageId: "assistant_permission", blockId: "block_1" },
-		});
+		}, permitRequest);
 		const snapshot = await store.runtimeSnapshot(scope, request);
 		const detail = snapshot.agents[0];
 		const tools = detail.tools as Array<{ toolCallId: string; revision: number; phase: string }>;
@@ -767,7 +799,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				value: { toolCallId: "tool-19", phase: "finished" },
 			},
 		]);
-		await store.resolveToolApproval(target, "effect-permit", "deny");
+		await store.resolveApproval(target, "effect-permit", "deny", null);
 		const live = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId, scope));
 		expect(live.changes.some(change => change.kind === "tool" && change.value.phase === "denied")).toBeTrue();
 		expect(
@@ -936,7 +968,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		expect(await store.getEffect("effect-invalid")).toBeUndefined();
 	});
 
-	it("projects profile route facts through exact Attempt detail without changing app summaries", async () => {
+	it("projects executor route facts through exact Attempt detail without changing app summaries", async () => {
 		let store = await createStore();
 		const target = await active(store);
 		const agentInstanceRef = identity("root").agentInstanceRef;
@@ -949,36 +981,31 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		const request = { principalId: "owner", agentInstanceRef, attemptId: target.attemptId };
 		const before = await store.runtimeSnapshot(scope, request);
 		const summary = (await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary;
-		const profileRef = "gctx:2222222222222222",
-			primaryRouteRef = "gctx:3333333333333333",
-			routeRef = "gctx:4444444444444444";
 		for (const phase of ["loading", "active", "exhausted"] as const) {
-			const state = { profileRef, primaryRouteRef, routeRef, fallback: true, phase };
-			const event = await store.commitAttemptProfileRoute(target, state);
-			expect(event).toBeDefined();
+			const state = {
+				dispatchHash: target.dispatchHash,
+				selected: null,
+				pending: null,
+				fallback: false,
+				phase,
+				eventSeq: 0,
+			};
+			await store.commitExecutorRouteState(target, state);
 			const page = await store.runtimeSnapshot(scope, request);
-			expect(page.agents[0].profileRoute).toMatchObject({
+			expect(page.agents[0].executorRoute).toMatchObject({
 				state,
-				eventSeq: event!.seq,
 				target: {
 					agentInstanceId: target.agentInstanceId,
 					attemptId: target.attemptId,
 					runtimeBindingId: target.bindingId,
 				},
 			});
-			const changes = await store.runtimeEvents(eventsRequest(before.epoch, event!.eventId - 1, scope));
-			expect(changes.changes.find(change => change.kind === "state")?.value.profileRoute).toEqual(
-				page.agents[0].profileRoute,
-			);
-			expect(
-				changes.changes.some(change => change.kind === "invalidate" && change.value.resource === "context"),
-			).toBeTrue();
 			expect((await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary).toEqual(summary);
 		}
 		await expect(store.runtimeSnapshot(scope, { ...request, principalId: "other" })).rejects.toThrow();
 		store = reopen();
-		expect((await store.runtimeSnapshot(scope, request)).agents[0].profileRoute).toMatchObject({
-			state: { phase: "exhausted", routeRef },
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].executorRoute).toMatchObject({
+			state: { phase: "exhausted" },
 		});
 		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, { kind: "catalog" }));
 		expect(catalog.changes).toEqual([]);
@@ -1222,8 +1249,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		const child = identity("child", root.agentInstanceId);
 		await store.registerAgent(child);
 		expect((await store.intent(child.agentInstanceId)).holds[0]?.sourceAgentInstanceId).toBe(root.agentInstanceId);
+		// A held child cannot even open a model effect: the guarded admission path refuses before any effect row.
 		await expect(
-			store.startModelEffect(binding("child"), {
+			store.startModelEffect({ ...binding("child"), engineGeneration: 1 }, {
 				effectId: "effect-child",
 				modelCallId: "model-child",
 				inputHash: "hash",
