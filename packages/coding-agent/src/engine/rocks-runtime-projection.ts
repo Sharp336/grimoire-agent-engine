@@ -1,4 +1,6 @@
 import type { StorageRuntimeIndex, StorageRuntimeKey } from "../session/storage-protocol";
+import type { SessionDurabilityCheckpoint } from "../session/session-manager";
+import { canonicalRuntimeJson } from "./runtime-protocol.mjs";
 import {
 	type EngineEvent,
 	type EngineBindingGate,
@@ -54,6 +56,7 @@ const summaryEvents = new Set([
 	"reconciled",
 	"input_requested",
 	"input_resolved",
+	"request_waiting",
 	"tool_approval_requested",
 	"tool_approval_resolved",
 	"inbox_changed",
@@ -180,6 +183,14 @@ export function eventReadKeys(
 		);
 	return keys;
 }
+export interface RequestConsumption {
+	input_revision: number;
+	tool_call_id: string;
+	tool_result_entry_id: string;
+	result_hash: string;
+	checkpoint: Pick<SessionDurabilityCheckpoint, "sessionId" | "leafEntryId" | "native">;
+}
+
 export interface RocksProjection {
 	subtype: string;
 	agent_instance_id: string;
@@ -188,10 +199,24 @@ export interface RocksProjection {
 	value: Record<string, unknown>;
 	resolved?: boolean;
 	body?: Record<string, unknown>;
+	result?: Record<string, unknown>;
+	result_consumption?: RequestConsumption;
+	continuation_claimed?: boolean;
 	/** Set when `body` is the preview of an oversized input. */
 	parts?: InputParts;
 	/** Base64 bytes of one input part. */
 	part?: string;
+}
+
+export function requestResultHash(result: Record<string, unknown>): string {
+	const value = { status: result.status, ...(Object.hasOwn(result, "result") ? { result: result.result } : {}) };
+	return `sha256:${new Bun.CryptoHasher("sha256").update(canonicalRuntimeJson(value)).digest("hex")}`;
+}
+
+export function requestConsumptionMatches(row: RocksProjection): boolean {
+	const proof = row.result_consumption;
+	return proof !== undefined && row.resolved === true && row.result !== undefined &&
+		proof.input_revision === row.value.revision && proof.result_hash === requestResultHash(row.result);
 }
 export type ProjectedEvent = RocksEvent & {
 	projection_principal: string;
@@ -663,9 +688,17 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			);
 		} else {
 			const previous = await tx.get<RocksProjection>("projection", id);
-			if (previous && event.kind.endsWith("resolved"))
-				await tx.put("projection", id, { ...previous, resolved: true });
-			else if (previous && (event.kind === "approval_escalated" || event.kind === "approval_timed_out")) {
+			if (previous && event.kind.endsWith("resolved")) {
+				const approval = event.kind === "input_resolved" ? undefined : await tx.get<EngineApprovalRow>("approval", inputId);
+				const { result_consumption: _oldProof, ...unconsumed } = previous;
+				await tx.put("projection", id, { ...unconsumed, resolved: true,
+					value: { ...previous.value, revision: event.eventId },
+					result: event.kind === "input_resolved"
+						? { status: payload?.status ?? "answered", ...(payload?.result ? { result: payload.result } : {}) }
+						: { status: payload?.outcome, result: { decision: approval?.decision,
+							...(approval?.decision_record?.reason ? { reason: approval.decision_record.reason } : {}) } },
+				});
+			} else if (previous && (event.kind === "approval_escalated" || event.kind === "approval_timed_out")) {
 				const approval = await tx.get<EngineApprovalRow>("approval", inputId);
 				if (!approval) throw new EngineTargetError("stale_target", "Readdressed approval lost its request");
 				const body = runtimeInputBody({ ...event, kind: `${approval.request.kind}_approval_requested`, payload: approval.request });

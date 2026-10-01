@@ -137,6 +137,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				addressed_to: { kind: "human", principal_id: principalId }, addressed_at: "2026-09-30T00:00:00Z",
 				expires_at: null, address_revision: 1, decision_revision: 0, status: "waiting_human_paused",
 				timeout_seconds: 300, settings_revision: 0, settings_hash: hash,
+				handling: "blocking",
 			};
 			// Stage the retained paused effect and its approval through the store's own guarded admission path.
 			await store.requestToolApproval(target, {
@@ -727,6 +728,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			addressed_to: { kind: "human", principal_id: "owner" }, addressed_at: "2026-09-30T00:00:00Z",
 			expires_at: null, address_revision: 1, decision_revision: 0, status: "waiting_human_paused",
 			timeout_seconds: 300, settings_revision: 0, settings_hash: approvalHash,
+			handling: "blocking",
 		};
 		await store.requestToolApproval(target, {
 			effectId: "effect-permit",

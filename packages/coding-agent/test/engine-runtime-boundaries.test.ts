@@ -676,7 +676,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		fs.writeFileSync(path.join(env.cwd, "authority.txt"), "must remain approval-fenced");
 		const verify = env.options.verifyOriginReceipt!;
 		env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
-			approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("authority-deadline") } });
+			approvalSettings: { timeout_seconds: 1, max_frozen_candidates: 8, settings_revision: 1, settings_hash: hash("authority-deadline") } });
 		let available = false;
 		let lookups = 0;
 		let parent: EngineStartResult | undefined;
@@ -799,7 +799,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		if (action === "approval-fifo") {
 			const verify = env.options.verifyOriginReceipt!;
 			env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
-				approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("nested-deadline") } });
+				approvalSettings: { timeout_seconds: 1, max_frozen_candidates: 8, settings_revision: 1, settings_hash: hash("nested-deadline") } });
 		}
 		let runtime: EngineRuntime;
 		const requestFor = (name: string, selected: AdmittedExecutionFixture, parent?: { agentInstanceId: string; agentInstanceRef: string; attemptId: string }) =>
@@ -901,7 +901,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 					expect((await runtime.store.records.get("metadata", waitingMiddle.routing!.queue_id!)).value)
 						.toMatchObject({ status: "cancelled" });
 					expect((await runtime.store.records.get("command", command.commandId)).value).toMatchObject({ state: "received", receipt: null });
-					const approval = (await runtime.store.durableApprovalPause(leaf.attemptId))![0]!;
+					const approval = (await runtime.store.durableRequestWait(leaf.attemptId))![0]!;
 					const binding = (await runtime.store.getBinding(leaf.agentInstanceId))!;
 					const decision = approvalDecisionFor(leafExecution, { ...binding, principalId: "owner" },
 						"nested-late-approval", approval, "approve");
@@ -1066,7 +1066,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 		env.executions.push(execution);
 		const verify = env.options.verifyOriginReceipt!;
 		env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
-			approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("one-second") } });
+			approvalSettings: { timeout_seconds: 1, max_frozen_candidates: 8, settings_revision: 1, settings_hash: hash("one-second") } });
 		await env.runtime.dispose();
 		let runtime = await open(env.options);
 		const find = spyOn(env.registry, "find").mockImplementation((provider, id) =>
@@ -1132,7 +1132,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			fs.writeFileSync(path.join(env.cwd, "effect.txt"), "one retained tool execution");
 			const verify = env.options.verifyOriginReceipt!;
 			env.options.verifyOriginReceipt = async identity => ({ ...await verify(identity),
-				approvalSettings: { timeout_seconds: 1, settings_revision: 1, settings_hash: hash("usage-deadline") } });
+				approvalSettings: { timeout_seconds: 1, max_frozen_candidates: 8, settings_revision: 1, settings_hash: hash("usage-deadline") } });
 			await env.runtime.dispose();
 			let runtime = await open(env.options);
 			try {
@@ -1152,7 +1152,7 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 				expect((await runtime.store.attemptToolEffects(started.attemptId))
 					.filter(effect => effect.effect_kind === "model").map(effect => [effect.state, effect.outcome]))
 					.toEqual([["settled", "completed"]]);
-				expect(await runtime.store.durableApprovalPause(started.attemptId)).toBeDefined();
+				expect(await runtime.store.durableRequestWait(started.attemptId)).toBeDefined();
 				expect(mock.calls).toHaveLength(2);
 				await withTimeout(runtime.dispose(), 5_000, "Paused approval disposal did not quiesce");
 				expect(mock.calls).toHaveLength(2);

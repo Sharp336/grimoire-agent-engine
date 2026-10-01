@@ -76,6 +76,7 @@ const QuestionItem = arkType({
 
 const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	"handling?": "'blocking' | 'nonblocking'",
 });
 
 export type AskToolInput = typeof askSchema.infer;
@@ -110,6 +111,7 @@ export interface QuestionResult {
 }
 
 export interface AskToolDetails {
+	requestId?: string;
 	question?: string;
 	options?: string[];
 	multi?: boolean;
@@ -872,7 +874,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
 		const timeoutSeconds = this.session.settings.get("ask.timeout");
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
-		const timeout = planModeEnabled ? null : settingsTimeout;
+		const handling = this.session.engineMode ? params.handling ?? "blocking" : "blocking";
+		const timeout = planModeEnabled || handling === "nonblocking" ? null : settingsTimeout;
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
@@ -901,13 +904,16 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{ timeout: timeout ?? undefined, signal, handling },
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {
 					context.abort();
 					throw new ToolAbortError("Ask tool was cancelled by the user");
 				}
+				if (richResult.kind === "pending")
+					return { content: [{ type: "text", text: JSON.stringify(richResult) }],
+						details: { requestId: richResult.requestId } };
 				if (richResult.kind === "chat") {
 					const questionText = params.questions.map(q => q.question).join("\n");
 					return {

@@ -272,6 +272,8 @@ describe("ProviderAdmissionClient", () => {
 			return Response.json({ allowed: true, status: "within_weekly_ceiling" });
 		};
 		const authStorage = {
+			listOAuthAccounts: () => [{ credentialId: 7 }],
+			getOAuthCredential: () => ({ type: "oauth", access: "claimed", refresh: "claimed", expires: Date.now() + 60_000 }),
 			invalidateUsageCache: async () => {
 				invalidations += 1;
 			},
@@ -839,6 +841,63 @@ describe("ProviderAdmissionClient", () => {
 			{ ordinal: 2, state: "responded" },
 		]);
 	});
+	it.each(["anthropic", "cursor"] as const)("uses one fresh exact-account %s report to gate egress", async provider => {
+		let accountId = "acct-1";
+		let exhausted = true;
+		let reads = 0;
+		let sent = 0;
+		const fetchedAt = Date.now();
+		const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+		const auth = {
+			listOAuthAccounts: () => [{ credentialId: 7 }],
+			getOAuthCredential: () => ({ type: "oauth", access: `${encode({ alg: "none" })}.${encode({ sub: accountId })}.sig`,
+				refresh: "private", expires: Date.now() + 60_000 }),
+			fetchCredentialUsageReport: async () => {
+				reads++;
+				return { provider, fetchedAt, metadata: provider === "cursor" ? {} : { accountId },
+					limits: [{ id: `${provider}:window`, status: exhausted ? "exhausted" : "ok",
+						amount: { remainingFraction: exhausted ? 0 : 0.6 }, window: { durationMs: 18_000_000 } }],
+					raw: { accessToken: "must-not-cross-boundary" } } as UsageReport;
+			},
+			invalidateUsageCache: async () => {},
+		} as unknown as AuthStorage;
+		const before: Array<Record<string, unknown>> = [];
+		const client = new ProviderAdmissionClient("http://admission.invalid", "fixture", async (_url, init) => {
+			const body = JSON.parse(String(init?.body));
+			if (body.phase !== "before") return Response.json({ allowed: true });
+			before.push(body);
+			const observations = body.usageObservations?.observations as Array<{ metric: string; value: number }> | undefined;
+			return Response.json({ allowed: !observations?.some(row => row.metric === "exhausted" && row.value === 1),
+				status: "quota_exhausted" });
+		});
+		const selected = { ...model(), provider };
+		const wrapped = client.createHook({
+			...identity(), providerId: provider,
+			providerKind: provider === "cursor" ? "cursor_subscription" : "anthropic_subscription",
+		}, auth, "https://provider.invalid", [], { accountId: "acct-1", credentialId: 7 }, undefined, {
+			provider_id: provider, external_id: "acct-1", pools: [],
+			quota_windows: [{ window_id: `${provider}:window`, window_seconds: 18_000 }],
+		}).wrapFetch(selected, async () => { sent++; return new Response("ok"); });
+		const invoke = () => withProviderObservationContext({ effectId: `effect-${reads}`, modelCallId: `model-${reads}` },
+			() => wrapped("https://provider.invalid/model"), undefined, recorder().record);
+		await expect(invoke()).rejects.toMatchObject({ code: "quota_exhausted" });
+		expect(sent).toBe(0);
+		exhausted = false;
+		expect((await invoke()).status).toBe(200);
+		expect(sent).toBe(1);
+		expect(before[1]?.usageObservations).toMatchObject({ accountId: "acct-1",
+			observedAt: new Date(fetchedAt).toISOString(), observations: [expect.objectContaining({
+				metric: "quota_remaining", value: 0.6, observed_at: new Date(fetchedAt).toISOString(),
+			})] });
+		accountId = "foreign";
+		await invoke();
+		expect(before[2]?.usageObservations).toBeUndefined();
+		expect(before[2]?.usageStatus).toBe("unavailable");
+		expect(reads).toBe(3);
+		expect(JSON.stringify(before)).not.toContain("must-not-cross-boundary");
+		expect(before.every(row => row.usageReport === undefined)).toBeTrue();
+	});
+
 });
 
 function identity(): ProviderAdmissionIdentity {

@@ -74,8 +74,10 @@ function validProjection(name, value) {
   }
   if (name === 'selectedExecutor' && (value.basis === 'order') !== (value.order_match !== null)) return false;
   if (name === 'approvalDecision' && value.decided_by.kind === 'human' && value.decision === 'approve_always') return false;
-  if (name === 'approvalRequest' && value.status === 'waiting_human_paused'
-    && (value.addressed_to.kind !== 'human' || value.expires_at !== null)) return false;
+  // A paused human wait belongs to a blocking request; a human-pending one to a nonblocking request.
+  if (name === 'approvalRequest' && ['waiting_human_paused', 'waiting_human_pending'].includes(value.status)
+    && (value.addressed_to.kind !== 'human' || value.expires_at !== null
+      || value.handling !== (value.status === 'waiting_human_paused' ? 'blocking' : 'nonblocking'))) return false;
   if (name === 'executorChoice') {
     const identities = ['route_ref', 'account_ref', 'model_id', 'effort', 'service_tier', 'billing_pool_id', 'billing_pool_basis'];
     if (!identities.every(key => value.candidates[0][key] === value.selected[key])) return false;

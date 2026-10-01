@@ -6,6 +6,7 @@ const lifecycleKinds = {
 	paused: ["paused", "Paused"],
 	resumed: ["running", "Resumed"],
 	input_requested: ["waiting", "Needs input"],
+	request_waiting: ["waiting", "Waiting for retained requests"],
 	input_resolved: ["running", "Input received"],
 	retry_scheduled: ["waiting", "Retry scheduled"],
 	retry_settled: ["settled", "Retry settled"],

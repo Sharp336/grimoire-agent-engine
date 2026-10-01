@@ -12,6 +12,7 @@ import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import { ProviderExecutionError, parseBillingPoolProposal, type BillingPoolProposal, type ProviderExecutionIdentity } from "./provider-execution";
 import type { ModelRequestState } from "./store";
+import { BUILTIN_PROVIDERS, sameUsageAccount, usageObservations, type UsageAccount } from "./usage-observations";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -237,11 +238,12 @@ export class ProviderAdmissionClient {
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[] = [],
 		localCredential?: { accountId: string; credentialId: number },
 		onBillingPoolChanged?: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>,
+		usageAccount?: UsageAccount,
 	): Required<ProviderRequestHook> {
 		const admitted = <T>(model: Model, url: string, signal: AbortSignal | undefined,
 			send: (selected: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) => Promise<T>) =>
 			this.#admitted(identity, authStorage, baseUrl, apiKeyRoutes, localCredential, onBillingPoolChanged,
-				model, url, signal, send);
+				usageAccount, model, url, signal, send);
 		return {
 			wrapFetch: (model, fetch) => (input, init) =>
 				admitted(model, requestUrl(input), init?.signal ?? undefined, selected =>
@@ -281,6 +283,7 @@ export class ProviderAdmissionClient {
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[],
 		localCredential: { accountId: string; credentialId: number } | undefined,
 		onBillingPoolChanged: ((proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>) | undefined,
+		usageAccount: UsageAccount | undefined,
 		model: Model,
 		url: string,
 		signal: AbortSignal | undefined,
@@ -305,19 +308,30 @@ export class ProviderAdmissionClient {
 				try {
 					report = await raceWithSignal(authStorage.fetchCredentialUsageReport(identity.providerId,
 						localCredential.credentialId, { baseUrl, signal: admissionSignal }), admissionSignal) ?? undefined;
-					if (report?.metadata?.accountId !== localCredential.accountId) report = undefined;
+					const accounts = authStorage.listOAuthAccounts(identity.providerId);
+					const credential = authStorage.getOAuthCredential(identity.providerId);
+					if (!report || !credential || accounts.length !== 1 ||
+						accounts[0]?.credentialId !== localCredential.credentialId ||
+						!sameUsageAccount(identity.providerId, report, credential, localCredential.accountId)) report = undefined;
 				} catch (error) {
 					if (signal?.aborted) throw error;
 					// Usage endpoint availability is telemetry, not a denial of an admitted effect.
 				}
 				markProviderLatency("usage_refresh_done");
 			}
+			const builtinId = Object.keys(BUILTIN_PROVIDERS).find(id => BUILTIN_PROVIDERS[id] === selected.providerId);
+			const normalized = report && usageAccount && localCredential && builtinId
+				? { builtinId, accountId: localCredential.accountId, observedAt: new Date(report.fetchedAt).toISOString(),
+					observations: usageObservations(report, usageAccount) }
+				: undefined;
 			const before = () => ({
 				phase: "before",
 				...selected,
 				modelId: model.id,
 				...(selected === identity
-					? report ? { usageReport: withoutRaw(report) } : { usageStatus: "unavailable" }
+					? identity.providerId === "openai-codex" && report
+						? { usageReport: withoutRaw(report) }
+						: normalized ? { usageObservations: normalized } : { usageStatus: "unavailable" }
 					: {}),
 			});
 			const reask = async (proposal: BillingPoolProposal | undefined): Promise<void> => {

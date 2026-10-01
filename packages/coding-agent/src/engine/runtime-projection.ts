@@ -51,7 +51,7 @@ export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 			revision: event.eventId,
 			requestedAt: approval.created_at,
 			prompt: approval.reason,
-			request: approval,
+			request: { ...approval, handling: approval.handling ?? "blocking" },
 			options: approval.requires_human || !["tool", "spawn"].includes(approval.kind)
 				? ["approve", "deny"]
 				: ["approve", "approve_always", "deny"],
@@ -64,6 +64,7 @@ export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {
 		kind: "question",
 		inputId: String(payload.inputId),
 		revision: event.eventId,
+		handling: payload.handling ?? "blocking",
 		requestedAt: new Date(event.createdAt).toISOString(),
 		questions: runtimeInputQuestions(payload),
 	};
@@ -103,6 +104,7 @@ export function runtimeInputQuestions(payload: Record<string, unknown>): Array<R
 				kind: "question",
 				inputId: String(payload.inputId),
 				revision: 0,
+				handling: payload.handling ?? "blocking",
 				questions: [{ ...question, options }],
 			});
 	}

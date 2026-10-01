@@ -577,6 +577,7 @@ export interface CreateAgentSessionOptions {
 	recoverPendingApprovalTools?: boolean;
 	/** Optional host-owned tracking/approval boundary around native tool execution. */
 	toolExecutionHook?: ToolExecutionHook;
+	engineRequest?: ToolSession["engineRequest"];
 	/** Engine-only conscious child profile dispatcher. */
 	engineChildLauncher?: EngineChildLauncher;
 	/** Engine-owned durable inbox exposed through the native hub tool. */
@@ -1796,6 +1797,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			engineInbox: options.engineInbox,
 			engineHistory: options.engineHistory,
 			engineMode: options.engineMode,
+			engineRequest: options.engineRequest,
 			get cwd() {
 				return sessionManager.getCwd();
 			},

@@ -275,6 +275,8 @@ export class EngineExecutionResolver {
 					if (!billingPoolChanged) throw new Error("Billing transition is not bound to the admitted Attempt");
 					await billingPoolChanged(proposal, signal);
 				},
+				{ provider_id: primary.provider, external_id: localOAuth?.accountId ?? null,
+					pools: primary.billing_pools, quota_windows: primary.quota_windows },
 			);
 			// Every physical request rechecks live Engine admission and current Core ACL/credential/pool fences.
 			// A changed descriptor refuses before anything is sent.

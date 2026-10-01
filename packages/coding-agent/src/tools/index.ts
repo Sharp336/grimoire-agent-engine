@@ -9,6 +9,7 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import type { EngineInboxItem } from "../engine/contracts";
+import { EngineRequestTool, type EngineRequestController } from "../engine/request-tool";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { PreparedExtension } from "../extensibility/extensions/types";
@@ -181,6 +182,7 @@ export interface EngineInboxController {
 export interface ToolSession {
 	/** Rootless multi-session Engine path: disables ambient process-global routing fallbacks. */
 	engineMode?: boolean;
+	engineRequest?: EngineRequestController;
 	/** Engine-mode child dispatch through Grimoire AgentInstance/Attempt identities. */
 	engineChildLauncher?: EngineChildLauncher;
 	/** Engine-owned durable inbox exposed through the native hub tool. */
@@ -489,6 +491,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
 	ask: AskTool.createIf,
+	request: s => s.engineMode && s.engineRequest ? new EngineRequestTool(s) : null,
 	debug: DebugTool.createIf,
 	eval: s => new EvalTool(s),
 	github: GithubTool.createIf,
@@ -633,6 +636,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "security_scan") return session.settings.get("security.enabled");
 		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return session.settings.get("ask.enabled");
+		if (name === "request") return session.engineMode === true && session.engineRequest !== undefined;
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "computer") return session.settings.get("computer.enabled");
 		if (name === "checkpoint" || name === "rewind")

@@ -19,6 +19,7 @@ import {
 	type EngineTarget,
 	EngineTargetError,
 	sameSemanticBinding,
+	USAGE_PROBE_MAX_TIMEOUT_MS,
 } from "./contracts";
 import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
@@ -258,7 +259,17 @@ export class EngineControlQueryClient {
 			method,
 			params,
 		};
-		return await requestOnce(engineControlQueryEndpoint(this.#runtimeDir), request, this.#timeoutMs);
+		let timeoutMs = this.#timeoutMs;
+		if (method === "usage_probe.run" && params?.kind === "module") {
+			const binding = await this.request("usage_probe_binding.get", {
+				principalId: params.principalId, accountRef: params.accountRef,
+			}) as { timeoutMs: number };
+			if (!Number.isSafeInteger(binding.timeoutMs) || binding.timeoutMs < 1 ||
+				binding.timeoutMs > USAGE_PROBE_MAX_TIMEOUT_MS)
+				throw new Error("Engine returned an invalid usage probe timeout");
+			timeoutMs = Math.max(timeoutMs, binding.timeoutMs + 5_000);
+		}
+		return await requestOnce(engineControlQueryEndpoint(this.#runtimeDir), request, timeoutMs);
 	}
 }
 
@@ -288,6 +299,7 @@ function serveSocket(
 	admission: { ordinary: number; control: number },
 ): void {
 	let buffered = Buffer.alloc(0);
+	let inFlight = 0;
 	const cancellation = new AbortController();
 	socket.on("end", () => cancellation.abort());
 	socket.on("close", () => cancellation.abort());
@@ -298,7 +310,11 @@ function serveSocket(
 		// Keep unexpected socket failures visible; only disconnect errors belong to this request.
 		if (!isSocketDisconnect(error)) throw error;
 	});
-	socket.setTimeout(30_000, () => socket.destroy());
+	// Idle connections close; an in-flight request (e.g. a configured probe deadline beyond 30 s)
+	// keeps its socket, and disconnect still cancels it.
+	socket.setTimeout(30_000, () => {
+		if (inFlight === 0) socket.destroy();
+	});
 	socket.on("data", chunk => {
 		buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
 		if (buffered.byteLength > ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES && !buffered.includes(10)) {
@@ -324,10 +340,14 @@ function serveSocket(
 				continue;
 			}
 			admission[lane]++;
+			inFlight++;
 			void handleFrame(frame, token, options, cancellation.signal)
 				.then(response => writeResponse(socket, response, runtimeResponseBytes(method)))
 				.catch(() => socket.destroy())
-				.finally(() => admission[lane]--);
+				.finally(() => {
+					admission[lane]--;
+					inFlight--;
+				});
 		}
 	});
 }
@@ -379,7 +399,12 @@ async function dispatchRequest(
 			const normalized = modulePath === null ? null : path.normalize(modulePath);
 			if (normalized !== null && !(await fs.stat(normalized).catch(() => null))?.isFile())
 				throw new EngineTargetError("invalid_request", "Usage module path must name an existing regular file");
-			return options.runtime.store.setUsageProbeBinding(principal, options.deviceId, account, expectedRevision, normalized);
+			const timeoutMs = params.timeoutMs;
+			if (timeoutMs !== undefined &&
+				(!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 || Number(timeoutMs) > USAGE_PROBE_MAX_TIMEOUT_MS))
+				throw new EngineTargetError("invalid_request", `Usage probe timeoutMs must be an integer 1..${USAGE_PROBE_MAX_TIMEOUT_MS}`);
+			return options.runtime.store.setUsageProbeBinding(principal, options.deviceId, account, expectedRevision, normalized,
+				timeoutMs as number | undefined);
 		}
 		case "usage_probe.run":
 			return runUsageProbe(options.runtime.store, options.deviceId, params, signal);
@@ -487,7 +512,7 @@ async function dispatchRequest(
 				(inputRevision === undefined || requiredInteger(params, "expectedInputRevision") !== inputRevision))
 				throw new EngineTargetError("stale_target", "Approval input revision changed");
 			if (request.method === "approval.authorize" &&
-				(!["pending", "waiting_human_paused"].includes(approvalRequest.status) ||
+				(!["pending", "waiting_human_paused", "waiting_human_pending"].includes(approvalRequest.status) ||
 					(local && approval?.state !== "pending")))
 				throw new EngineTargetError("too_late", "Approval request is no longer pending");
 			let ceiling_hash = "ceiling_hash" in approvalRequest.subject
@@ -1296,10 +1321,10 @@ function publicEvent(event: EngineEvent) {
 
 function controlReadiness(state: EngineAttemptState) {
 	return {
-		steer: state === "running",
-		pause: state === "running",
+		steer: state === "running" || state === "waiting_request",
+		pause: state === "running" || state === "waiting_request",
 		resume: state === "paused",
-		cancel: ["running", "pause_requested", "paused", "waiting_input"].includes(state),
+		cancel: ["running", "waiting_request", "pause_requested", "paused", "waiting_input"].includes(state),
 	};
 }
 
@@ -1670,7 +1695,14 @@ function requestOnce(endpoint: string, request: EngineControlQueryRequest, timeo
 		socket.destroy();
 		reject(error);
 	};
-	socket.setTimeout(timeoutMs, () => fail(new Error("Engine Control + Query request timed out")));
+	const deadline = Date.now() + timeoutMs;
+	const armTimeout = () => {
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) return fail(new Error("Engine Control + Query request timed out"));
+		socket.setTimeout(Math.min(remaining, USAGE_PROBE_MAX_TIMEOUT_MS));
+	};
+	socket.on("timeout", armTimeout);
+	armTimeout();
 	socket.once("error", fail);
 	socket.once("close", () => fail(new Error("Engine Control + Query connection closed before response")));
 	socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));

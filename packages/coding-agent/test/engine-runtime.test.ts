@@ -1073,6 +1073,198 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("freezes the captured reachable limit from the full roster and never resizes it on Resume", async () => {
+		const release = Promise.withResolvers<boolean>();
+		const entered = Promise.withResolvers<void>();
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const first = execution.config.routes.routes[0]!;
+		for (let index = 1; index < 14; index++) execution.config.routes.routes.push({
+			...structuredClone(first), route_ref: `gctx:${String(index).padStart(16, "0")}`,
+		});
+		first.account_ref = "gctx:0000000000000000";
+		execution.config.routingLimits.accounts[first.account_ref] = 0;
+		let maximum = 11;
+		const verify = execution.optionsFor({}).verifyOriginReceipt!;
+		const { runtime, cwd } = await createRuntime(execution, async () => {
+			entered.resolve();
+			return await release.promise;
+		}, { verifyOriginReceipt: async identity => ({ ...await verify(identity),
+			approvalSettings: { timeout_seconds: 300, max_frozen_candidates: maximum, settings_revision: 1,
+				settings_hash: `sha256:${"7".repeat(64)}` } }) });
+		try {
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "roster-limit-start", agentInstanceId: "roster-limit-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/roster/agents/one",
+				executionId: "roster-limit-execution", attemptId: "roster-limit-attempt",
+			}, { cwd, principalId: "owner", input: "use the whole roster" }));
+			await entered.promise;
+			const original = (await runtime.store.getAttempt(started.attemptId))!.execution!.executor_choice;
+			expect(original.candidates.map(route => route.route_ref)).toEqual(
+				execution.config.routes.routes.slice(1, 12).map(route => route.route_ref));
+			validateRuntimeValue("executorChoice", original);
+			maximum = 1;
+			await runtime.pause({ ...started, commandId: "pause-roster-limit", initiator: { kind: "human" } });
+			await runtime.resume({ ...started, commandId: "resume-roster-limit", initiator: { kind: "human" } });
+			expect((await runtime.store.getAttempt(started.attemptId))!.execution!.executor_choice).toEqual(original);
+			release.resolve(true);
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		} finally {
+			release.resolve(true);
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("retains Q1 across Q2, drain and restart until its native request.read result is checkpointed", async () => {
+		const independent = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const questions = [{ id: "choice", question: "Choose", options: [{ label: "Yes" }, { label: "No" }] }];
+		let phase = 0;
+		let readQ1 = false;
+		let q1 = "";
+		const mock = createMockModel({ handler: async () => {
+			if (phase++ === 0) return { content: [{ type: "toolCall" as const, id: "ask-q1", name: "ask",
+				arguments: { questions, handling: "nonblocking" } }] };
+			if (phase === 2) {
+				independent.resolve();
+				await release.promise;
+				return { content: [{ type: "toolCall" as const, id: "ask-q2", name: "ask",
+					arguments: { questions, handling: "nonblocking" } }] };
+			}
+			if (readQ1) {
+				readQ1 = false;
+				return { content: [{ type: "toolCall" as const, id: "read-q1", name: "request",
+					arguments: { action: "read", requestId: q1 } }] };
+			}
+			return { content: ["Independent work finished; retain the requests."] };
+		} });
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["ask", "request"], restrictToolNames: true },
+		});
+		const created = await createRuntime(execution);
+		let runtime = created.runtime;
+		try {
+			const first = nextEngineEvent(runtime, "input_requested");
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "q1-q2-start", agentInstanceId: "q1-q2-agent",
+				agentInstanceRef: "grimoire://tasks/grimoire/requests/agents/questions",
+				executionId: "q1-q2-execution", attemptId: "q1-q2-attempt",
+			}, { cwd: created.cwd, principalId: "owner", input: "Ask without blocking independent work" }));
+			const firstEvent = await first;
+			q1 = String(firstEvent.payload?.inputId);
+			await independent.promise;
+			const second = nextEngineEvent(runtime, "input_requested");
+			await runtime.resolveInput({ ...started, commandId: "answer-q1", inputId: q1,
+				expectedInputRevision: firstEvent.eventId,
+				result: { kind: "submit", results: [{ id: "choice", selectedOptionIndexes: [1] }] } });
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+			expect((await runtime.store.requestProjection(started, q1))?.result_consumption).toBeUndefined();
+			release.resolve();
+			const secondEvent = await second;
+			const q2 = String(secondEvent.payload?.inputId);
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+			expect((await runtime.store.retainedRequestInputs(started)).map(row => row.value.inputId).sort()).toEqual([q1, q2].sort());
+			expect((await runtime.store.requestProjection(started, q1))?.result).toEqual({
+				status: "answered", result: { kind: "submit", results: [{ id: "choice", selectedOptionIndexes: [1] }] },
+			});
+			expect((await runtime.store.runtimeCommand(started.commandId, { principalId: "owner" })).lease).toMatchObject({ held: true });
+			await runtime.pause({ ...started, commandId: "pause-questions", initiator: { kind: "human" } });
+			await runtime.dispose();
+			runtime = await openRuntime(created.options);
+			const restored = runtime.getBinding(started.agentInstanceId)!;
+			expect(restored.attemptId).toBe(started.attemptId);
+			expect((await runtime.store.requestProjection(restored, q1))?.result_consumption).toBeUndefined();
+			readQ1 = true;
+			await runtime.resume({ ...restored, commandId: "resume-questions", initiator: { kind: "human" } });
+			await runtime.drain();
+			const consumed = await runtime.store.requestProjection(restored, q1);
+			expect(consumed?.result_consumption).toMatchObject({ input_revision: consumed?.value.revision, tool_call_id: "read-q1" });
+			const history = await nativeSession(runtime, restored.sessionFile!);
+			expect(history.getEntry(consumed!.result_consumption!.tool_result_entry_id)).toMatchObject({
+				type: "message", message: { role: "toolResult", toolCallId: "read-q1", toolName: "request", isError: false },
+			});
+			expect((await runtime.store.retainedRequestInputs(restored)).map(row => row.value.inputId)).toEqual([q2]);
+			await runtime.cancel({ ...restored, commandId: "stop-questions" });
+			await runtime.drain();
+			await expect(runtime.resolveInput({ ...restored, commandId: "late-q2", inputId: q2,
+				result: { kind: "submit", results: [{ id: "choice", selectedOptionIndexes: [0] }] } }))
+				.rejects.toMatchObject({ code: "too_late" });
+		} finally {
+			release.resolve();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("keeps a nonblocking permit planned after approval and continues its original effect exactly once", async () => {
+		const independent = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let phase = 0;
+		let requestId = "";
+		let revisions: { decisionRevision: number; inputRevision: number } | undefined;
+		const mock = createMockModel({ handler: async context => {
+			switch (phase++) {
+				case 0: return { content: [{ type: "toolCall" as const, id: "submit-protected", name: "request",
+					arguments: { action: "submit", handling: "nonblocking",
+						operation: { toolName: "write", arguments: { path: "protected.txt", content: "once" } } } }] };
+				case 1:
+					independent.resolve();
+					await release.promise;
+					return { content: [{ type: "toolCall" as const, id: "independent-read", name: "read",
+						arguments: { path: "independent.txt" } }] };
+				case 2: return { content: [{ type: "toolCall" as const, id: "read-decision", name: "request",
+					arguments: { action: "read", requestId } }] };
+				case 3: {
+					const result = context.messages.findLast(message => message.role === "toolResult" && message.toolCallId === "read-decision");
+					if (!result || result.role !== "toolResult") throw new Error("Decision was not delivered to the model");
+					const text = result.content.filter(block => block.type === "text").map(block => block.text).join("");
+					revisions = JSON.parse(text);
+					return { content: [{ type: "toolCall" as const, id: "different-continue-id", name: "request",
+						arguments: { action: "continue", requestId, expectedDecisionRevision: revisions!.decisionRevision,
+							expectedInputRevision: revisions!.inputRevision } }] };
+				}
+				case 4: return { content: [{ type: "toolCall" as const, id: "duplicate-continue", name: "request",
+					arguments: { action: "continue", requestId, expectedDecisionRevision: revisions!.decisionRevision,
+						expectedInputRevision: revisions!.inputRevision } }] };
+				default: return { content: ["done"] };
+			}
+		} });
+		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
+			toolNames: ["request", "read", "write"], restrictToolNames: true, toolPolicies: { write: "permit" }, tools_permit: ["write"],
+		} });
+		const { runtime, cwd } = await createRuntime(execution);
+		fs.writeFileSync(path.join(cwd, "independent.txt"), "authorized work");
+		try {
+			const requested = nextEngineEvent(runtime, "tool_approval_requested");
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "request-permit-start", agentInstanceId: "request-permit",
+				agentInstanceRef: "grimoire://tasks/grimoire/requests/agents/permit",
+				executionId: "request-permit-execution", attemptId: "request-permit-attempt",
+			}, { cwd, principalId: "owner", input: "Submit an approval and continue independent work" }));
+			const event = await requested;
+			if (event.kind !== "tool_approval_requested") throw new Error("Missing permit request");
+			requestId = event.payload.id;
+			await independent.promise;
+			const decision = approvalDecisionFor(execution, started, "approve-request-permit", event.payload, "approve");
+			await runtime.resolveApproval({ ...started, commandId: decision.command_id, approvalDecision: decision });
+			expect(fs.existsSync(path.join(cwd, "protected.txt"))).toBeFalse();
+			expect((await runtime.store.getEffect(requestId))?.state).toBe("planned");
+			release.resolve();
+			await runtime.drain();
+			expect(fs.readFileSync(path.join(cwd, "protected.txt"), "utf8")).toBe("once");
+			expect(toolResultOf(mock, "duplicate-continue")?.isError).toBeTrue();
+			expect((await runtime.store.getEffect(requestId))?.state).toBe("settled");
+			expect((await runtime.store.pendingEvents()).filter(event =>
+				event.kind === "tool_started" && event.payload?.invocationId === requestId)).toHaveLength(1);
+			expect((await runtime.store.getApproval(requestId))?.request.submitted_operation?.tool_call_id).not.toBe("different-continue-id");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		} finally {
+			release.resolve();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
 	it("waits for a validated rich Ask answer and resumes the same Attempt", async () => {
 		const questions = [
 			{
@@ -1118,6 +1310,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			inputId,
 			inputKind: "ask",
 			questions,
+			handling: "blocking",
+			requesterAttemptId: started.attemptId,
 			attemptState: "waiting_input",
 			controlReadiness: { pause: false, resume: false, steer: false, cancel: true, resolveInput: true },
 		});
@@ -2055,7 +2249,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it.each(["manual", "automatic"] as const)("records %s remote compaction through its actual body parser", async mode => {
 		const mock = createMockModel({
 			baseUrl: "https://compact.invalid/v1",
-			handler: { content: ["answer ".repeat(1_000)], usage: { input: 10_000, output: 20, totalTokens: 10_020 } },
+			handler: { content: [Array.from({ length: 1_000 }, (_, index) =>
+				crypto.createHash("sha256").update(`remote-${index}`).digest("hex").slice(0, 6)).join("\n")],
+				usage: { input: 10_000, output: 20, totalTokens: 10_020 } },
 		});
 		// The remote adapter family differs from the mock transport, which Model<"mock"> cannot type.
 		Object.assign(mock.model, { remoteCompaction: {
@@ -2131,7 +2327,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 30_000);
 
 	it("compacts a terminal session locally without resolving credentials or reopening provider work", async () => {
-		const mock = createMockModel({ handler: { content: ["retained answer ".repeat(2_000)] }, input: ["text", "image"] });
+		const mock = createMockModel({ handler: { content: [Array.from({ length: 2_000 }, (_, index) =>
+			crypto.createHash("sha256").update(`local-${index}`).digest("hex").slice(0, 15)).join("\n")] }, input: ["text", "image"] });
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {}, [], {
 			"compaction.enabled": false,

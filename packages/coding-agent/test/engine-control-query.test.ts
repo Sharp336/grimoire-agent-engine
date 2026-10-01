@@ -42,7 +42,8 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 				verified: true,
 				commandHash: `sha256:${Bun.SHA256.hash(storageCanonicalJson({ ...command, payload }), "hex")}`,
 				authContextId: "control-query-test",
-				approvalSettings: null,
+				approvalSettings: { timeout_seconds: 600, max_frozen_candidates: 8, settings_revision: 0,
+					settings_hash: `sha256:${Bun.SHA256.hash("control-query-settings", "hex")}` },
 				specialApproval: null,
 			};
 		};
@@ -103,11 +104,12 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 			try {
 				expect(await client.request("usage_probe_binding.get", params)).toEqual({
 					accountRef: params.accountRef, modulePath: pass ? modulePath : null, revision: pass,
+					timeoutMs: pass ? 45_000 : 30_000,
 				});
 				if (!pass) {
 					expect(await client.request("usage_probe_binding.set", {
-						...params, expectedRevision: 0, modulePath,
-					})).toEqual({ accountRef: params.accountRef, modulePath, revision: 1 });
+						...params, expectedRevision: 0, modulePath, timeoutMs: 45_000,
+					})).toEqual({ accountRef: params.accountRef, modulePath, revision: 1, timeoutMs: 45_000 });
 					expect(await client.request("usage_probe_binding.set", {
 						...params, expectedRevision: 0, modulePath: null,
 					}).then(() => null, (error: unknown) => error)).toMatchObject({ code: "stale_target" });
@@ -120,7 +122,15 @@ describe.skipIf(storageWorkerUnavailable)("Engine Control + Query", () => {
 						credential: null,
 					})).toEqual({ status: "probe_unconfigured", observations: [] });
 					expect(await client.request("usage_probe_binding.get", { ...params, principalId: "other" }))
-						.toEqual({ accountRef: params.accountRef, modulePath: null, revision: 0 });
+						.toEqual({ accountRef: params.accountRef, modulePath: null, revision: 0, timeoutMs: 30_000 });
+					for (const timeoutMs of [0, -1, 1.5, 2_147_483_648])
+						await expect(client.request("usage_probe_binding.set", {
+							...params, expectedRevision: 1, modulePath, timeoutMs,
+						})).rejects.toMatchObject({ code: "invalid_request" });
+				} else {
+					expect(await client.request("usage_probe_binding.set", {
+						...params, expectedRevision: 1, modulePath: null,
+					})).toEqual({ accountRef: params.accountRef, modulePath: null, revision: 2, timeoutMs: 45_000 });
 				}
 			} finally {
 				await server.close();

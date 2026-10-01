@@ -224,7 +224,10 @@ export function admittedExecution(
 				verified: true, dispatchHash: command.op === "start" ? String(command.payload.dispatchHash) : undefined,
 				bindingSnapshot: command.bindingSnapshot,
 				commandHash: hash({ ...command, payload }),
-				authContextId: "engine-runtime-test-auth", approvalSettings: null, specialApproval: null,
+				authContextId: "engine-runtime-test-auth",
+				approvalSettings: { timeout_seconds: 600, max_frozen_candidates: 8,
+					settings_revision: 0, settings_hash: hash({ approval_timeout_seconds: 600, max_frozen_candidates: 8, rule_change_mode: "confirm" }) },
+				specialApproval: null,
 			};
 		},
 		verifyApprovalReceipt: async identity => {

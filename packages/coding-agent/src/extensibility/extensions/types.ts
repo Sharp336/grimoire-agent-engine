@@ -174,6 +174,9 @@ export interface ExtensionAskDialogChatResult {
 
 export type ExtensionAskDialogResult = ExtensionAskDialogSubmitResult | ExtensionAskDialogChatResult;
 
+/** Managed Engine question handle, never a fabricated user answer. */
+export interface ExtensionAskPendingResult { kind: "pending"; requestId: string }
+
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
 }
@@ -271,8 +274,8 @@ export interface ExtensionUIContext {
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(
 		questions: ExtensionAskDialogQuestion[],
-		dialogOptions?: ExtensionUIDialogOptions,
-	): Promise<ExtensionAskDialogResult | undefined>;
+		dialogOptions?: ExtensionUIDialogOptions & { handling?: "blocking" | "nonblocking" },
+	): Promise<ExtensionAskDialogResult | ExtensionAskPendingResult | undefined>;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;

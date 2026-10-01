@@ -206,6 +206,7 @@ export async function admittedFixtureStart(
 		principalId, deviceId, engineGeneration: initial.engineGeneration,
 		commandId: initial.commandId, agentInstanceRef, attemptId: initial.attemptId,
 		dispatchId: execution.config.dispatch.dispatch_id,
+		maxFrozenCandidates: 8,
 		dispatchRef: execution.dispatchRef, dispatchHash: execution.dispatchHash,
 		originReceiptId: request.originReceiptId, authContextId: "runtime-v1-fixture-auth",
 		bindingSnapshot: request.bindingSnapshot, executionKind: execution.config.dispatch.execution_kind,

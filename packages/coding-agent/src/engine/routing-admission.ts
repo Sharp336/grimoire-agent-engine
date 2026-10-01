@@ -26,8 +26,6 @@ import type { RuntimeTransaction } from "./runtime-records";
 /** §6: heartbeat 30s, lease TTL 120s. */
 export const LEASE_TTL_MS = 120_000;
 export const LEASE_HEARTBEAT_MS = 30_000;
-/** Admitted fallback list: selected plus up to seven. */
-const FROZEN_CANDIDATES = 8;
 
 const sha256 = (value: string): `sha256:${string}` => `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 const isSha256 = (value: string): value is `sha256:${string}` => /^sha256:[a-f0-9]{64}$/.test(value);
@@ -291,6 +289,8 @@ export interface AdmissionRequest {
 	expectedRevisions: Record<string, number>;
 	/** Complete authorized roster (new Start) or the admitted frozen list (Resume), in policy order. */
 	candidates: readonly EngineExecutionRoute[];
+	/** Captured once by the original Start receipt; ignored when reacquiring a frozen Attempt. */
+	maxFrozenCandidates: number;
 	/** Awaiting caller Attempt whose lease stays held while this callee is pending. */
 	callerAttemptId: string | null;
 	/** Resume never grows its admitted list. */
@@ -321,9 +321,11 @@ export const candidateRef = (candidate: CandidateIdentity) =>
 
 /**
  * §6 Start eligible / capacity search and §6.1 cycle refusal, in one atomic owner mutation.
- * Returns admission (lease held, selected+up to 7 frozen) or FIFO queue; throws structured refusal.
+ * Returns admission with a captured-limit frozen roster, or FIFO queue; throws structured refusal.
  */
 export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionRequest): Promise<AdmissionOutcome> {
+	if (!Number.isSafeInteger(request.maxFrozenCandidates) || request.maxFrozenCandidates < 1)
+		throw new EngineTargetError("invalid_request", "Captured frozen candidate maximum must be a positive safe integer");
 	const current = await census(tx, request.principalId, request.deviceId);
 	const consultation = request.executionKind === "consultation";
 	if (current.leases.some(lease => lease.attempt_id === request.attemptId))
@@ -361,10 +363,10 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 	const selected = aheadEligible ? -1 : resources.findIndex(item => fits(demand(item, request.limits), now));
 	const edgeKey = tentative ? edgeId(tentative.caller_attempt_id, request.attemptId) : undefined;
 	if (selected >= 0) {
-		// Freeze only after actual selection: selected first, then up to 7 individually reachable members.
+		// Freeze only after actual selection, using reachable members of the full roster.
 		const frozen = [request.candidates[selected]];
 		for (const [index, candidate] of request.candidates.entries()) {
-			if (frozen.length === FROZEN_CANDIDATES || request.frozen) break;
+			if (frozen.length === request.maxFrozenCandidates || request.frozen) break;
 			if (index !== selected && fits(demand(resources[index], request.limits), proof.available)) frozen.push(candidate);
 		}
 		if (request.frozen) frozen.push(...request.candidates.filter((_, index) => index !== selected));

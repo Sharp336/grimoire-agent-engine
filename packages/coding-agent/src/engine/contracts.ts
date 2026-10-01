@@ -161,6 +161,7 @@ export type EngineAttemptState =
 	| "pause_requested"
 	| "paused"
 	| "waiting_input"
+	| "waiting_request"
 	| "cancel_requested"
 	| "completed"
 	| "cancelled"
@@ -178,6 +179,28 @@ export interface EngineRetryState {
 	scheduledAt?: number;
 	outcome?: EngineRetryOutcome;
 	error?: string;
+}
+
+/** Executable usage-probe deadline when a binding stores none (user decision: 30 s). */
+export const USAGE_PROBE_DEFAULT_TIMEOUT_MS = 30_000;
+/** Largest delay a platform timer represents; a documented bound, not a product cap. */
+export const USAGE_PROBE_MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Immutable Core receipt capture, not a second source of policy defaults. */
+export interface CapturedApprovalSettings {
+	timeout_seconds: number;
+	max_frozen_candidates: number;
+	settings_revision: number;
+	settings_hash: string;
+}
+
+export function requireApprovalSettings(value: CapturedApprovalSettings | null | undefined): CapturedApprovalSettings {
+	if (!value || !Number.isSafeInteger(value.timeout_seconds) || value.timeout_seconds < 1 ||
+		!Number.isSafeInteger(value.max_frozen_candidates) || value.max_frozen_candidates < 1 ||
+		!Number.isSafeInteger(value.settings_revision) || value.settings_revision < 0 ||
+		!/^sha256:[a-f0-9]{64}$/.test(value.settings_hash))
+		throw new EngineTargetError("source_unavailable", "Start requires its exact captured approval settings");
+	return Object.freeze({ ...value });
 }
 
 export const MAX_ENGINE_CHILD_ASSIGNMENT_BYTES = 32 * 1024;
@@ -501,6 +524,7 @@ export interface EngineOrdinaryEvent extends EngineEventBase {
 		| "steered"
 		| "input_requested"
 		| "input_resolved"
+		| "request_waiting"
 		| "tool_started"
 		| "tool_settled"
 		| "model_started"

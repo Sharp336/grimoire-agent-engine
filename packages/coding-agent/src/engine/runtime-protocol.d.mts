@@ -303,7 +303,7 @@ export type Candidate = {
 	"provider_id": string;
 	"quota_window_ids": Array<string>;
 	"shadow_cost": number | null;
-	"price_source": "account" | "list" | "tier_estimate" | "unknown";
+	"price_source": "account" | "list" | "unknown";
 	"estimated": boolean;
 	"record_revisions": RecordRevisions;
 };
@@ -377,12 +377,14 @@ export type UsageProbeBindingSet = {
 	"accountRef": string;
 	"expectedRevision": number;
 	"modulePath": string | null;
+	"timeoutMs"?: number;
 };
 
 export type UsageProbeBindingResult = {
 	"accountRef": string;
 	"modulePath": string | null;
 	"revision": number;
+	"timeoutMs": number;
 };
 
 export type UsageProbeRun = {
@@ -445,6 +447,8 @@ export type ExecutorGlobalSettings = {
 	"preset_mode": "off" | "on" | "auto";
 	"auto_max_tier_on": number;
 	"approval_timeout_seconds": number;
+	"rule_change_mode": "confirm" | "auto";
+	"max_frozen_candidates": number;
 	"dispatch_defaults": DispatchDefaults;
 	"revision": number;
 };
@@ -540,6 +544,19 @@ export type ConsultantApprovalSubject = {
 	"proposed_reselection_hash": Hash;
 };
 
+export type RequestHandling = "blocking" | "nonblocking";
+
+export type SubmittedOperation = {
+	"tool_name": string;
+	"tool_call_id": string;
+	"arguments_hash": Hash;
+	"transcript": {
+		"session_id": string;
+		"entry_id": string;
+		"leaf_id": string;
+	};
+};
+
 export type ApprovalRequest = {
 	"schema": "grimoire.approval_request.v1";
 	"id": string;
@@ -558,10 +575,12 @@ export type ApprovalRequest = {
 	"expires_at": string | null;
 	"address_revision": number;
 	"decision_revision": number;
-	"status": "pending" | "waiting_human_paused" | "approved" | "denied" | "cancelled";
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending" | "approved" | "denied" | "cancelled";
 	"timeout_seconds": number;
 	"settings_revision": number;
 	"settings_hash": Hash;
+	"handling": RequestHandling;
+	"submitted_operation"?: SubmittedOperation;
 	"kind": "tool";
 	"subject": ToolApprovalSubject;
 } | {
@@ -582,10 +601,12 @@ export type ApprovalRequest = {
 	"expires_at": string | null;
 	"address_revision": number;
 	"decision_revision": number;
-	"status": "pending" | "waiting_human_paused" | "approved" | "denied" | "cancelled";
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending" | "approved" | "denied" | "cancelled";
 	"timeout_seconds": number;
 	"settings_revision": number;
 	"settings_hash": Hash;
+	"handling": RequestHandling;
+	"submitted_operation"?: SubmittedOperation;
 	"kind": "spawn";
 	"subject": SpawnApprovalSubject;
 } | {
@@ -606,10 +627,12 @@ export type ApprovalRequest = {
 	"expires_at": string | null;
 	"address_revision": number;
 	"decision_revision": number;
-	"status": "pending" | "waiting_human_paused" | "approved" | "denied" | "cancelled";
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending" | "approved" | "denied" | "cancelled";
 	"timeout_seconds": number;
 	"settings_revision": number;
 	"settings_hash": Hash;
+	"handling": RequestHandling;
+	"submitted_operation"?: SubmittedOperation;
 	"kind": "escalation";
 	"subject": EscalationApprovalSubject;
 } | {
@@ -630,10 +653,12 @@ export type ApprovalRequest = {
 	"expires_at": string | null;
 	"address_revision": number;
 	"decision_revision": number;
-	"status": "pending" | "waiting_human_paused" | "approved" | "denied" | "cancelled";
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending" | "approved" | "denied" | "cancelled";
 	"timeout_seconds": number;
 	"settings_revision": number;
 	"settings_hash": Hash;
+	"handling": RequestHandling;
+	"submitted_operation"?: SubmittedOperation;
 	"kind": "consultant";
 	"subject": ConsultantApprovalSubject;
 };
@@ -700,7 +725,7 @@ export type EngineExecutionRoute = {
 	"provider_id": string;
 	"quota_window_ids": Array<string>;
 	"shadow_cost": number | null;
-	"price_source": "account" | "list" | "tier_estimate" | "unknown";
+	"price_source": "account" | "list" | "unknown";
 	"estimated": boolean;
 	"record_revisions": RecordRevisions;
 	"provider": string;
@@ -1241,7 +1266,7 @@ export type ApprovalEscalated = {
 export type ApprovalTimedOut = {
 	"request_id": string;
 	"address_revision": number;
-	"status": "pending" | "waiting_human_paused";
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending";
 };
 
 export type ApprovalEvent = {
@@ -1777,6 +1802,8 @@ export type ExecutorGlobalSettingsRequest = {
 	"preset_mode"?: "off" | "on" | "auto";
 	"auto_max_tier_on"?: number;
 	"approval_timeout_seconds"?: number;
+	"rule_change_mode"?: "confirm" | "auto";
+	"max_frozen_candidates"?: number;
 	"dispatch_defaults"?: DispatchDefaults;
 	"revision"?: number;
 };
@@ -2434,4 +2461,59 @@ export type ExecutorSettingsRequest = {
 	"expected_graph_hash": Hash;
 	"expected_policy_hash": Hash;
 	"expected_after_policy_hash": Hash;
+};
+
+export type RequestToolInput = {
+	"action": "submit";
+	"handling": RequestHandling;
+	"operation": {
+		"toolName": string;
+		"arguments": Record<string, unknown>;
+	};
+} | {
+	"action": "read";
+	"requestId": string;
+} | {
+	"action": "continue";
+	"requestId": string;
+	"expectedDecisionRevision": number;
+	"expectedInputRevision": number;
+};
+
+export type RequestToolPending = {
+	"requestId": string;
+	"effectId": string;
+	"status": "pending";
+	"handling": "nonblocking";
+};
+
+export type QuestionPending = {
+	"kind": "pending";
+	"requestId": Id;
+};
+
+export type RequestReadResult = {
+	"kind": "approval";
+	"requestId": string;
+	"status": "pending" | "waiting_human_paused" | "waiting_human_pending" | "approved" | "denied" | "cancelled";
+	"handling": RequestHandling;
+	"addressRevision": number;
+	"decisionRevision": number;
+	"inputRevision": number;
+	"result"?: {
+		"decision": "approve" | "approve_always" | "deny" | "cancelled";
+		"reason"?: string;
+	};
+} | {
+	"kind": "question";
+	"requestId": Id;
+	"status": "pending" | "answered" | "cancelled";
+	"handling": RequestHandling;
+	"inputRevision": number;
+	"result"?: {
+		"kind": "chat";
+	} | {
+		"kind": "submit";
+		"results": Array<IndexedQuestionAnswer>;
+	};
 };

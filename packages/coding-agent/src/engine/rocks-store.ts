@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { ExtensionAskDialogQuestion } from "../extensibility/extensions/types";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
-import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
+import type { StorageDependency, StoragePayload, StorageRuntimeIndex, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
@@ -31,7 +32,7 @@ import type {
 	ExecutorRouteState,
 	RoutingLimits,
 } from "./contracts";
-import { EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, sameSemanticBinding, validateSemanticBinding } from "./contracts";
+import { EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, sameSemanticBinding, USAGE_PROBE_DEFAULT_TIMEOUT_MS, validateSemanticBinding } from "./contracts";
 import type { BillingPoolProposal } from "./provider-execution";
 import {
 	completeRestoreRebind,
@@ -42,11 +43,16 @@ import {
 } from "./rocks-restore-workspace";
 import {
 	boundedReceipt,
+	INPUT_PART_BYTES,
+	inputPartId,
 	eventReadKeys,
 	nativeCommandReceipt,
 	projectionId,
 	projectedDetail,
 	type RocksProjection,
+	type RequestConsumption,
+	requestConsumptionMatches,
+	requestResultHash,
 	retainedInputPayload,
 	retainInputParts,
 	runtimeReceipt,
@@ -769,9 +775,12 @@ export class RocksEngineMutations {
 			.value as StorageUsageProbeBinding | null;
 		if (row && (row.principal_id !== principalId || row.device_id !== deviceId || row.account_ref !== accountRef))
 			throw new EngineTargetError("stale_target", "Usage binding owner differs");
-		return { accountRef, modulePath: row?.module_path ?? null, revision: row?.revision ?? 0 };
+		return { accountRef, modulePath: row?.module_path ?? null, revision: row?.revision ?? 0,
+			timeoutMs: row?.timeout_ms ?? USAGE_PROBE_DEFAULT_TIMEOUT_MS };
 	}
-	async setUsageProbeBinding(principalId: string, deviceId: string, accountRef: string, expectedRevision: number, modulePath: string | null) {
+	/** An omitted timeout keeps the stored explicit value, or the default on first binding. */
+	async setUsageProbeBinding(principalId: string, deviceId: string, accountRef: string, expectedRevision: number,
+		modulePath: string | null, timeoutMs?: number) {
 		const key = this.#usageProbeKey(principalId, deviceId, accountRef);
 		return this.mutation(key, async tx => {
 			const current = await tx.get<StorageUsageProbeBinding>("metadata", key);
@@ -779,11 +788,13 @@ export class RocksEngineMutations {
 				(current && (current.principal_id !== principalId || current.device_id !== deviceId || current.account_ref !== accountRef)))
 				throw new EngineTargetError("stale_target", "Usage binding revision changed");
 			const revision = expectedRevision + 1;
+			const effectiveTimeout = timeoutMs ?? current?.timeout_ms ?? USAGE_PROBE_DEFAULT_TIMEOUT_MS;
 			await tx.put("metadata", key, {
 				subtype: "usage_probe_binding", principal_id: principalId, device_id: deviceId,
-				account_ref: accountRef, module_path: modulePath, revision, updated_at: new Date().toISOString(),
+				account_ref: accountRef, module_path: modulePath, timeout_ms: effectiveTimeout,
+				revision, updated_at: new Date().toISOString(),
 			});
-			return { accountRef, modulePath, revision };
+			return { accountRef, modulePath, revision, timeoutMs: effectiveTimeout };
 		});
 	}
 
@@ -1002,6 +1013,96 @@ export class RocksEngineMutations {
 	}
 	async getApproval(id: string): Promise<EngineApprovalRow | undefined> {
 		return ((await this.records.get("approval", id)).value as unknown as EngineApprovalRow) ?? undefined;
+	}
+	async requestProjection(target: EventTarget, id: string): Promise<RocksProjection | undefined> {
+		const row = (await this.records.get("projection", projectionId("input", target.attemptId, id))).value as unknown as RocksProjection | undefined;
+		if (row && (row.agent_instance_id !== target.agentInstanceId || row.attempt_id !== target.attemptId))
+			throw new EngineTargetError("stale_target", "Request belongs to a different Attempt");
+		return row;
+	}
+
+	async requestQuestions(target: EventTarget, id: string): Promise<ExtensionAskDialogQuestion[]> {
+		const row = await this.requestProjection(target, id);
+		if (!row?.body || row.body.kind !== "question")
+			throw new EngineTargetError("stale_target", "Question projection is unavailable");
+		if (!row.parts) return row.body.questions as ExtensionAskDialogQuestion[];
+		const { hash, bytes } = row.parts;
+		const records = await this.records.getMany(Array.from({ length: Math.ceil(bytes / INPUT_PART_BYTES) },
+			(_, part) => ({ kind: "projection" as const, id: inputPartId(target.attemptId, hash, part) })));
+		const chunks = records.map(record => {
+			const part = (record.value as unknown as RocksProjection | undefined)?.part;
+			if (!part) throw new EngineTargetError("history_expired", "Question part is unavailable");
+			return Buffer.from(part, "base64");
+		});
+		const encoded = Buffer.concat(chunks);
+		if (encoded.length !== bytes || createHash("sha256").update(encoded).digest("hex") !== hash)
+			throw new EngineTargetError("stale_target", "Retained question content changed");
+		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded)) as ExtensionAskDialogQuestion[];
+	}
+
+	async retainedRequestInputs(target: EventTarget): Promise<RocksProjection[]> {
+		const retained: RocksProjection[] = [];
+		let cursor: string | undefined;
+		do {
+			const page = await this.records.query("projection_attempt" as StorageRuntimeIndex, ["input", target.attemptId], cursor);
+			for (const record of page.records) {
+				const row = record.value as unknown as RocksProjection;
+				if (row.agent_instance_id !== target.agentInstanceId || !row.body) continue;
+				const effect = row.body.kind === "approval" ? await this.getEffect(String(row.value.inputId)) : undefined;
+				const nonblocking = row.body.handling === "nonblocking" ||
+					(row.body.request as { handling?: string } | undefined)?.handling === "nonblocking";
+				if (!row.resolved || (nonblocking && !requestConsumptionMatches(row)) || effect?.state === "planned" || effect?.state === "started")
+					retained.push(row);
+			}
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		return retained;
+	}
+
+	async consumeRequest(target: EventTarget, id: string,
+		proof: Omit<RequestConsumption, "checkpoint">, checkpoint: SessionDurabilityCheckpoint): Promise<void> {
+		if (!checkpoint.native || !checkpoint.leafEntryId)
+			throw new EngineTargetError("source_unavailable", "Answer consumption requires its native tool result checkpoint");
+		await this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const key = projectionId("input", target.attemptId, id);
+			const row = await tx.get<RocksProjection>("projection", key);
+			if (!row || row.agent_instance_id !== target.agentInstanceId || !row.resolved ||
+				row.value.revision !== proof.input_revision)
+				throw new EngineTargetError("stale_target", "Answer revision changed before its durable consumption");
+			if (!row.result || requestResultHash(row.result) !== proof.result_hash)
+				throw new EngineTargetError("stale_target", "Resolved answer hash changed before its durable consumption");
+			if (requestConsumptionMatches(row)) return;
+			const inputHash = createHash("sha256").update(storageCanonicalJson({ action: "read", requestId: id })).digest("hex");
+			const effectId = `tool_${createHash("sha256").update(`${target.bindingId}\0${target.attemptId}\0${proof.tool_call_id}\0${inputHash}`).digest("hex").slice(0, 32)}`;
+			const effect = await tx.get<RocksEffect>("effect", effectId);
+			if (!effect || effect.tool_name !== "request" || effect.tool_call_id !== proof.tool_call_id ||
+				effect.input_hash !== inputHash || effect.agent_instance_id !== target.agentInstanceId ||
+				effect.attempt_id !== target.attemptId || effect.binding_id !== target.bindingId ||
+				effect.execution_id !== target.executionId ||
+				!(effect.state === "started" && this.sameFence(effect, target) ||
+					effect.state === "settled" && effect.outcome === "completed"))
+				throw new EngineTargetError("stale_target", "Answer consumption lacks its actual same-Attempt request.read effect");
+			await tx.put("projection", key, { ...row, result_consumption: { ...proof,
+				checkpoint: { sessionId: checkpoint.sessionId, leafEntryId: checkpoint.leafEntryId, native: checkpoint.native } } });
+		}, this.checkpointDependencies(checkpoint));
+	}
+
+	/** Answer a running nonblocking question without a fabricated running-to-running transition. */
+	async resolveQuestion(target: EventTarget, id: string, result: Record<string, unknown>,
+		commandId: string, expectedIntentRevision?: number, expectedInputRevision?: number): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			await this.checkIntent(tx, target.agentInstanceId, expectedIntentRevision);
+			const row = await tx.get<RocksProjection>("projection", projectionId("input", target.attemptId, id));
+			const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!row || row.resolved || row.body?.kind !== "question" || !attempt || terminal.has(attempt.state) ||
+				(expectedInputRevision !== undefined && row.value.revision !== expectedInputRevision))
+				throw new EngineTargetError("stale_target", "Question identity or revision changed");
+			await this.settle(tx, commandId, { outcome: "applied" });
+			return this.append(tx, target, { kind: "input_resolved",
+				causationCommandId: commandId, payload: { inputId: id, result } });
+		});
 	}
 	async getStartConversationIdentity(id: string): Promise<EngineCommandIdentity | undefined> {
 		return ((await this.records.get("command", id)).value as unknown as RocksCommand | null)?.identity;
@@ -1872,6 +1973,8 @@ export class RocksEngineMutations {
 		command?: string,
 		receipt: EngineCommandReceipt | "applied" | "rejected" = "applied",
 	): Promise<EngineEvent> {
+		if (event.kind === "input_requested" && event.payload)
+			await retainInputParts(this.records, target, event.payload);
 		return this.mutation(target.agentInstanceId, async tx => {
 			await this.eventReads(tx, target, event, true);
 			await this.assertFence(tx, target);
@@ -2688,9 +2791,9 @@ export class RocksEngineMutations {
 					record.expected_decision_revision !== request.decision_revision)
 			)
 				throw new EngineTargetError("stale_target", "Approval request revision changed");
-			const effect = request.kind === "tool" || request.kind === "spawn" || request.kind === "consultant"
-				? await tx.get<RocksEffect>("effect", request.effect_id) : undefined;
-			if (effect && (effect.state !== "planned" || !this.sameFence(effect, target)))
+			const effect = await tx.get<RocksEffect>("effect", request.effect_id);
+			if (effect && ((request.kind === "escalation" ? effect.state !== "started" : effect.state !== "planned") ||
+				!this.sameFence(effect, target)))
 				throw new EngineEffectConflictError(id);
 			await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision);
 			if (options.expectedInputRevision !== undefined) {
@@ -2727,7 +2830,8 @@ export class RocksEngineMutations {
 					payload: resolution,
 				}),
 			];
-			if (effect && status === "approved" && (await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "running") {
+			if (effect?.state === "planned" && status === "approved" && request.handling !== "nonblocking" &&
+				(await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "running") {
 				const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
 				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
 				if (!lease || !attempt?.execution || lease.attempt_id !== target.attemptId ||
@@ -2746,7 +2850,7 @@ export class RocksEngineMutations {
 								toolName: effect.tool_name, policy: effect.policy, inputHash: effect.input_hash,
 							},
 				}));
-			} else if (effect && status !== "approved")
+			} else if (effect && status !== "approved" && (request.kind !== "escalation" || request.handling === "nonblocking"))
 				events.push(
 					await this.effectSettle(
 						tx,
@@ -2761,7 +2865,8 @@ export class RocksEngineMutations {
 		});
 	}
 	/** Starts an approved parked effect only after the same Attempt reacquires its routing lease. */
-	async activateApprovedToolEffect(target: EventTarget, id: string): Promise<EngineEvent> {
+	async activateApprovedToolEffect(target: EventTarget, id: string,
+		continuation?: { decisionRevision: number; inputRevision: number }): Promise<EngineEvent> {
 		return this.mutation(target.agentInstanceId, async tx => {
 			await this.assertFence(tx, target);
 			await this.checkIntent(tx, target.agentInstanceId, undefined, true);
@@ -2769,8 +2874,17 @@ export class RocksEngineMutations {
 			const effect = await tx.get<RocksEffect>("effect", id);
 			const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
 			const lease = await tx.get<RocksSlotLease>("metadata", leaseId(target.attemptId));
+			const inputKey = projectionId("input", target.attemptId, id);
+			const input = continuation ? await tx.get<RocksProjection>("projection", inputKey) : undefined;
+			if (continuation && (!input || input.continuation_claimed ||
+				approval?.request.decision_revision !== continuation.decisionRevision ||
+				attempt?.input_revision !== continuation.inputRevision || !approval.decision_record?.origin_receipt_id ||
+				approval.request.requester_attempt_id !== target.attemptId || !approval.request.submitted_operation))
+				throw new EngineTargetError("stale_target", "Continuation requires the original unclaimed request and exact decision/input revisions");
 			if (approval?.state !== "resolved" || approval.request.status !== "approved" ||
-				!effect || effect.state !== "planned" || !this.sameFence(effect, target) ||
+				!effect || !(effect.state === "planned" ||
+					(continuation && approval.request.kind === "escalation" && effect.state === "started")) ||
+				!this.sameFence(effect, target) ||
 				attempt?.state !== "running" || !attempt.execution ||
 				!lease || lease.attempt_id !== target.attemptId ||
 				lease.engine_generation !== target.engineGeneration ||
@@ -2778,6 +2892,7 @@ export class RocksEngineMutations {
 				lease.expires_at <= Date.now() ||
 				lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
 				throw new EngineTargetError("stale_target", "Approved tool effect requires the resumed Attempt's live routing lease");
+			if (input) await tx.put("projection", inputKey, { ...input, continuation_claimed: true });
 			await tx.put("effect", id, { ...effect, state: "started", updated_at: Date.now() });
 			return this.append(tx, target, {
 				kind: effect.effect_kind === "model" ? "model_started" : "tool_started",
@@ -2806,7 +2921,9 @@ export class RocksEngineMutations {
 				!approval.request.expires_at || Date.parse(approval.request.expires_at) > Date.now()) return [];
 			const from = approval.request.addressed_to;
 			const now = new Date().toISOString();
-			const status = to.kind === "human" ? "waiting_human_paused" : "pending";
+			const status = to.kind === "human"
+				? approval.request.handling === "nonblocking" ? "waiting_human_pending" : "waiting_human_paused"
+				: "pending";
 			const request = {
 				...approval.request,
 				addressed_to: to,
@@ -3566,14 +3683,18 @@ export class RocksEngineMutations {
 			(approval.state === "pending" || approval.request.status === "approved");
 	}
 
-	/** A settled pause survives only when every open effect has its exact pending or decided approval. */
-	async durableApprovalPause(attemptId: string): Promise<ApprovalRequest[] | undefined> {
+	/** Quiescent request waits survive only with native history and no unaccounted open effect. */
+	async durableRequestWait(attemptId: string): Promise<ApprovalRequest[] | undefined> {
 		const attempt = await this.getAttempt(attemptId);
-		if (attempt?.state !== "paused" || attempt.cause !== "approval_deadline" || !attempt.execution ||
+		if (!attempt || !["paused", "waiting_request"].includes(attempt.state) || !attempt.execution ||
 			!attempt.transcript_native) return undefined;
 		const binding = await this.getBinding(attempt.agent_instance_id);
 		if (binding?.attemptId !== attemptId || binding.state !== "running" ||
 			!binding.sessionFile?.startsWith("native:")) return undefined;
+		const inputs = await this.retainedRequestInputs(binding);
+		const nonblocking = inputs.some(input => input.body?.handling === "nonblocking" ||
+			(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
+		if (attempt.state === "paused" && attempt.cause !== "approval_deadline" && !nonblocking) return undefined;
 		const effects = [
 			...(await this.records.query("effect_attempt", [attemptId, "planned"], undefined, 1_000)).records,
 			...(await this.records.query("effect_attempt", [attemptId, "started"], undefined, 1_000)).records,
@@ -3584,9 +3705,10 @@ export class RocksEngineMutations {
 			const effect = row.value as unknown as RocksEffect;
 			const approval = await this.getApproval(effect.effect_id);
 			if (!this.retainedApproval(effect, approval, attemptId)) return undefined;
+			if ((await this.requestProjection(binding, effect.effect_id))?.continuation_claimed) return undefined;
 			approvals.push(approval!.request);
 		}
-		if (!effects.length) {
+		if (!effects.length && !nonblocking) {
 			const marker = (await this.records.get("metadata", `approval-recovery:${attemptId}`)).value as
 				{ request_id?: string } | null;
 			const approval = marker?.request_id ? await this.getApproval(marker.request_id) : undefined;
@@ -3598,9 +3720,9 @@ export class RocksEngineMutations {
 		return approvals;
 	}
 
-	/** Transfer only the paused Attempt's fence; never re-admit its Start or rewrite its effect ledger. */
-	async recoverPausedApproval(attemptId: string, generation: number): Promise<EngineBindingSnapshot | undefined> {
-		const approvals = await this.durableApprovalPause(attemptId);
+	/** Transfer the proven quiescent Attempt; reacquire a lost generation's lease through the same FIFO. */
+	async recoverRequestWait(attemptId: string, generation: number): Promise<EngineBindingSnapshot | undefined> {
+		const approvals = await this.durableRequestWait(attemptId);
 		if (!approvals) return undefined;
 		const attempt = await this.getAttempt(attemptId);
 		if (!attempt) return undefined;
@@ -3608,7 +3730,7 @@ export class RocksEngineMutations {
 			const current = await tx.get<RocksAttempt>("attempt", attemptId);
 			const binding = await tx.get<RocksBinding>("binding", attempt.agent_instance_id);
 			const engine = await tx.get<{ generation: number }>("metadata", "engine");
-			if (!current || current.state !== "paused" || current.cause !== "approval_deadline" ||
+			if (!current || current.state !== attempt.state || current.cause !== attempt.cause ||
 				binding?.attempt_id !== attemptId || engine?.generation !== generation ||
 				current.engine_generation >= generation || binding.engine_generation !== current.engine_generation)
 				return undefined;
@@ -3619,8 +3741,10 @@ export class RocksEngineMutations {
 			for (const effect of effects)
 				if (!this.retainedApproval(effect, await tx.get<EngineApprovalRow>("approval", effect.effect_id), attemptId))
 					return undefined;
+			if (current.state === "waiting_request") await stageRelease(tx, attemptId);
 			await tx.put("binding", attempt.agent_instance_id, { ...binding, engine_generation: generation });
-			await tx.put("attempt", attemptId, { ...current, engine_generation: generation });
+			await tx.put("attempt", attemptId, { ...current, engine_generation: generation,
+				...(current.state === "waiting_request" ? { state: "paused", cause: "request_recovery" } : {}) });
 			for (const effect of effects)
 				await tx.put("effect", effect.effect_id, { ...effect, engine_generation: generation });
 			return { ...bindingSnapshot(binding), engineGeneration: generation };
@@ -3660,7 +3784,7 @@ export class RocksEngineMutations {
 			attempts.sort((a, b) => a.created_at - b.created_at || a.attempt_id.localeCompare(b.attempt_id));
 			const durable = new Set<string>();
 			for (const attempt of attempts)
-				if (await this.durableApprovalPause(attempt.attempt_id)) durable.add(attempt.attempt_id);
+				if (await this.durableRequestWait(attempt.attempt_id)) durable.add(attempt.attempt_id);
 			const onlyDurable = durable.size > 0 && durable.size === attempts.length;
 			let held = false;
 			const ensureHold = async () => {

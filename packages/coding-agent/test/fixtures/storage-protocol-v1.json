@@ -3237,8 +3237,7 @@
           "items": {
             "$ref": "#/$defs/candidate"
           },
-          "minItems": 1,
-          "maxItems": 8
+          "minItems": 1
         },
         "filtered_counts": {
           "type": "object",
@@ -3629,6 +3628,58 @@
       ],
       "additionalProperties": false
     },
+    "requestHandling": {
+      "enum": [
+        "blocking",
+        "nonblocking"
+      ]
+    },
+    "submittedOperation": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "transcript": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "entry_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "leaf_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "session_id",
+            "entry_id",
+            "leaf_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "tool_name",
+        "tool_call_id",
+        "arguments_hash",
+        "transcript"
+      ],
+      "additionalProperties": false
+    },
     "approvalRequest": {
       "oneOf": [
         {
@@ -3710,6 +3761,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -3727,6 +3779,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "tool"
@@ -3841,6 +3899,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -3858,6 +3917,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "spawn"
@@ -3972,6 +4037,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -3989,6 +4055,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "escalation"
@@ -4103,6 +4175,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -4120,6 +4193,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "consultant"
@@ -5245,7 +5324,8 @@
           ]
         },
         "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-        "updated_at": { "type": "string", "minLength": 1 }
+        "updated_at": { "type": "string", "minLength": 1 },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       }
     },
     "routingReceipt": {

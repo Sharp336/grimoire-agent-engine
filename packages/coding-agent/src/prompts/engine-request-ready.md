@@ -1,0 +1,1 @@
+This same Attempt has resumed with retained requests. Read your pending question or approval handles with the request tool. Continue an approved protected operation only with the exact revisions returned by read. Independent authorized work may continue. Do not resubmit the original operation.

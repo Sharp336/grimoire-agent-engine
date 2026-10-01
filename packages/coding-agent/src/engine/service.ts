@@ -103,7 +103,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 							commandHash?: string;
 							bindingSnapshot?: EngineSemanticBindingSnapshot;
 							authContextId: string;
-							approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string } | null;
+							approvalSettings: { timeout_seconds: number; max_frozen_candidates: number; settings_revision: number; settings_hash: string } | null;
 							specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null;
 						};
 					}

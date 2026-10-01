@@ -307,13 +307,14 @@
             { "type": "string" },
             { "type": "null" }
           ]
-        }
+        },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       }
     },
     "usageProbeBindingResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["accountRef", "modulePath", "revision"],
+      "required": ["accountRef", "modulePath", "revision", "timeoutMs"],
       "properties": {
         "accountRef": { "type": "string", "minLength": 1 },
         "modulePath": {
@@ -322,7 +323,8 @@
             { "type": "null" }
           ]
         },
-        "revision": { "type": "integer", "minimum": 0 }
+        "revision": { "type": "integer", "minimum": 0 },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
       }
     },
     "usageProbeRun": {
@@ -3049,7 +3051,8 @@
         "failed",
         "interrupted",
         "queued",
-        "waiting_children"
+        "waiting_children",
+        "waiting_request"
       ]
     },
     "actionTarget": {
@@ -3744,12 +3747,16 @@
             "question",
             "approval"
           ]
+        },
+        "handling": {
+          "$ref": "#/$defs/requestHandling"
         }
       },
       "required": [
         "inputId",
         "revision",
-        "kind"
+        "kind",
+        "handling"
       ],
       "additionalProperties": false
     },
@@ -5200,13 +5207,17 @@
               },
               "maxItems": 32,
               "minItems": 1
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
             }
           },
           "required": [
             "kind",
             "inputId",
             "revision",
-            "questions"
+            "questions",
+            "handling"
           ],
           "additionalProperties": false
         }
@@ -7669,7 +7680,6 @@
           "enum": [
             "account",
             "list",
-            "tier_estimate",
             "unknown"
           ]
         },
@@ -8119,8 +8129,7 @@
           "items": {
             "$ref": "#/$defs/candidate"
           },
-          "minItems": 1,
-          "maxItems": 8
+          "minItems": 1
         },
         "filtered_counts": {
           "type": "object",
@@ -8304,6 +8313,17 @@
           "minimum": 1,
           "maximum": 9007199254740991
         },
+        "rule_change_mode": {
+          "enum": [
+            "confirm",
+            "auto"
+          ]
+        },
+        "max_frozen_candidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
         "dispatch_defaults": {
           "$ref": "#/$defs/dispatchDefaults"
         },
@@ -8319,6 +8339,8 @@
         "preset_mode",
         "auto_max_tier_on",
         "approval_timeout_seconds",
+        "rule_change_mode",
+        "max_frozen_candidates",
         "dispatch_defaults",
         "revision"
       ],
@@ -8841,6 +8863,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -8858,6 +8881,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "tool"
@@ -8888,6 +8917,7 @@
             "timeout_seconds",
             "settings_revision",
             "settings_hash",
+            "handling",
             "kind",
             "subject"
           ],
@@ -8972,6 +9002,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -8989,6 +9020,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "spawn"
@@ -9019,6 +9056,7 @@
             "timeout_seconds",
             "settings_revision",
             "settings_hash",
+            "handling",
             "kind",
             "subject"
           ],
@@ -9103,6 +9141,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -9120,6 +9159,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "escalation"
@@ -9150,6 +9195,7 @@
             "timeout_seconds",
             "settings_revision",
             "settings_hash",
+            "handling",
             "kind",
             "subject"
           ],
@@ -9234,6 +9280,7 @@
               "enum": [
                 "pending",
                 "waiting_human_paused",
+                "waiting_human_pending",
                 "approved",
                 "denied",
                 "cancelled"
@@ -9251,6 +9298,12 @@
             },
             "settings_hash": {
               "$ref": "#/$defs/hash"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "submitted_operation": {
+              "$ref": "#/$defs/submittedOperation"
             },
             "kind": {
               "const": "consultant"
@@ -9281,6 +9334,7 @@
             "timeout_seconds",
             "settings_revision",
             "settings_hash",
+            "handling",
             "kind",
             "subject"
           ],
@@ -9604,7 +9658,6 @@
           "enum": [
             "account",
             "list",
-            "tier_estimate",
             "unknown"
           ]
         },
@@ -10004,8 +10057,7 @@
           "items": {
             "$ref": "#/$defs/candidate"
           },
-          "minItems": 1,
-          "maxItems": 8
+          "minItems": 1
         },
         "selected": {
           "$ref": "#/$defs/selectedExecutor"
@@ -12507,7 +12559,8 @@
         "status": {
           "enum": [
             "pending",
-            "waiting_human_paused"
+            "waiting_human_paused",
+            "waiting_human_pending"
           ]
         }
       },
@@ -13122,6 +13175,328 @@
         "originReceiptId"
       ],
       "additionalProperties": false
+    },
+    "requestHandling": {
+      "enum": [
+        "blocking",
+        "nonblocking"
+      ]
+    },
+    "submittedOperation": {
+      "type": "object",
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "transcript": {
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "entry_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "leaf_id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "session_id",
+            "entry_id",
+            "leaf_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "tool_name",
+        "tool_call_id",
+        "arguments_hash",
+        "transcript"
+      ],
+      "additionalProperties": false
+    },
+    "requestToolInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "submit"
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "operation": {
+              "type": "object",
+              "properties": {
+                "toolName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "arguments": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "toolName",
+                "arguments"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "action",
+            "handling",
+            "operation"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "read"
+            },
+            "requestId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "requestId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "action": {
+              "const": "continue"
+            },
+            "requestId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expectedDecisionRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedInputRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "action",
+            "requestId",
+            "expectedDecisionRevision",
+            "expectedInputRevision"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "requestToolPending": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "const": "pending"
+        },
+        "handling": {
+          "const": "nonblocking"
+        }
+      },
+      "required": [
+        "requestId",
+        "effectId",
+        "status",
+        "handling"
+      ],
+      "additionalProperties": false
+    },
+    "questionPending": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "pending"
+        },
+        "requestId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "kind",
+        "requestId"
+      ],
+      "additionalProperties": false
+    },
+    "requestReadResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "approval"
+            },
+            "requestId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "waiting_human_paused",
+                "waiting_human_pending",
+                "approved",
+                "denied",
+                "cancelled"
+              ]
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "addressRevision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "decisionRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "inputRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "result": {
+              "type": "object",
+              "properties": {
+                "decision": {
+                  "enum": [
+                    "approve",
+                    "approve_always",
+                    "deny",
+                    "cancelled"
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "decision"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "status",
+            "handling",
+            "addressRevision",
+            "decisionRevision",
+            "inputRevision"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "question"
+            },
+            "requestId": {
+              "$ref": "#/$defs/id"
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "answered",
+                "cancelled"
+              ]
+            },
+            "handling": {
+              "$ref": "#/$defs/requestHandling"
+            },
+            "inputRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "result": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "chat"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "submit"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/indexedQuestionAnswer"
+                      },
+                      "maxItems": 100
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "results"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "status",
+            "handling",
+            "inputRevision"
+          ],
+          "additionalProperties": false
+        }
+      ]
     },
     "engineResolveApprovalPayload": {
       "type": "object",
@@ -15539,6 +15914,17 @@
           "maximum": 9007199254740991
         },
         "approval_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "rule_change_mode": {
+          "enum": [
+            "confirm",
+            "auto"
+          ]
+        },
+        "max_frozen_candidates": {
           "type": "integer",
           "minimum": 1,
           "maximum": 9007199254740991

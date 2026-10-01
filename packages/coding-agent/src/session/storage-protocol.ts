@@ -11,7 +11,7 @@ export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
 export const STORAGE_PROTOCOL_REVISION = 21 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:a46f984c890354101af6866059e76149c434572c815b7e943a229ebf62f09d0e" as const;
+	"sha256:0dffd4bc4d79586dcdc57c0824e43ab8ba443152aa74fb935ae2c632bcc45667" as const;
 
 export type StorageOperation =
 	| "write"
@@ -511,6 +511,8 @@ export interface StorageUsageProbeBinding {
 	device_id: string;
 	account_ref: string;
 	module_path: string | null;
+	/** Absent on rows written before storage21; reads treat it as the 30 s default without rewriting. */
+	timeout_ms?: number;
 	revision: number;
 	updated_at: string;
 }

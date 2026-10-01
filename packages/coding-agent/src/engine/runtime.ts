@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type AgentMessage, AgentPauseGate } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, type AgentToolResult, AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import {
 	type AssistantMessage,
@@ -37,6 +37,7 @@ import { withSettingsScope } from "../config/settings";
 import {
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
+	type ExtensionAskPendingResult,
 	noOpUIContext,
 	type ToolExecutionHook,
 	type ToolExecutionHookCall,
@@ -155,6 +156,11 @@ import {
 	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules,
 } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { type CapturedApprovalSettings, requireApprovalSettings } from "./contracts";
+import { EngineRequestPending, type EngineRequestInput, type EngineRequestDispatch } from "./request-tool";
+import type { SubmittedOperation } from "./runtime-protocol.mjs";
+import engineRequestReadyPrompt from "../prompts/engine-request-ready.md" with { type: "text" };
+import { requestConsumptionMatches, requestResultHash } from "./rocks-runtime-projection";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
 	EngineAttemptConflictError,
@@ -310,7 +316,7 @@ function terminalYield(
 interface LiveBinding extends EngineBindingSnapshot {
 	previousInboxSessionId?: string;
 	principalId: string;
-	approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string };
+	approvalSettings: CapturedApprovalSettings;
 	pendingInboxSourceSessionId?: string;
 	uncommittedForkSessionFile?: string;
 	manualHold: boolean;
@@ -379,6 +385,10 @@ interface LiveBinding extends EngineBindingSnapshot {
 	respondedRequests: Map<string, { ordinal: number; executionDigest: string }>;
 	/** Uploads of direct Start/steer/resume messages by clientMessageId, consumed once the user entry is durable. */
 	directUploads: Map<string, EngineMessageAttachments>;
+	submittedCalls: Map<string, { operation: SubmittedOperation; handling: "blocking" | "nonblocking"; wrapperCallId: string; continuing?: boolean }>;
+	requestReads: Map<string, { requestId: string; inputRevision: number; resultHash: string }>;
+	requestNotices: Set<string>;
+	requestTurnDrained?: boolean;
 	pendingInput?: PendingInput;
 }
 
@@ -420,6 +430,9 @@ interface ToolInvocationRecord {
 	toolName: string;
 	inputHash: string;
 	origin?: EngineToolEffectInput["origin"];
+	submittedOperation?: SubmittedOperation;
+	requestHandling?: "blocking" | "nonblocking";
+	wrapperCallId?: string;
 	target: EngineBindingSnapshot;
 	done: Promise<void>;
 	resolveDone: () => void;
@@ -440,8 +453,9 @@ interface PendingToolApproval {
 
 interface PendingInput {
 	inputId: string;
+	handling: "blocking" | "nonblocking";
 	questions: ExtensionAskDialogQuestion[];
-	resolve: (result: ExtensionAskDialogResult | undefined) => void;
+	resolve?: (result: ExtensionAskDialogResult | undefined) => void;
 }
 
 type HistoryDispatchKind = "prompt" | "continue" | "continue_after_assistant" | "resume_queued" | "pending_tool";
@@ -518,7 +532,7 @@ export interface EngineRuntimeOptions {
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string; approvalSettings: { timeout_seconds: number; settings_revision: number; settings_hash: string } | null; specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null }>;
+	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string; approvalSettings: CapturedApprovalSettings | null; specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null }>;
 	verifyApprovalReceipt?: (receipt: {
 		originReceiptId: string;
 		commandId: string;
@@ -795,6 +809,7 @@ export class EngineRuntime {
 			authContextId: origin.authContextId, bindingSnapshot: binding.bindingSnapshot,
 			executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
 			rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
+			maxFrozenCandidates: binding.approvalSettings.max_frozen_candidates,
 			candidates: [{ ...candidate, billing_pool_id: current.billing_pool_id,
 				billing_pool_basis: current.billing_pool_basis }], callerAttemptId: null, frozen: true,
 		};
@@ -1009,8 +1024,9 @@ export class EngineRuntime {
 			}
 			if (binding.steerCommandSet.has(request.commandId)) return this.#controlResult(binding);
 			await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision, true);
-			const steerableState = binding.attemptState === "running";
-			if (binding.state !== "running" || !steerableState || binding.manualHold || !binding.session.isStreaming) {
+			const waiting = binding.attemptState === "waiting_request";
+			const steerableState = binding.attemptState === "running" || waiting;
+			if (binding.state !== "running" || !steerableState || binding.manualHold || (!waiting && !binding.session.isStreaming)) {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is not streaming`);
 			}
 			const item = queued ? await this.store.getInboxItem(binding.session.sessionId, request.queueId!) : undefined;
@@ -1036,7 +1052,7 @@ export class EngineRuntime {
 				: undefined;
 			const images = preparedAttachments?.images;
 			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
-			if (binding.state !== "running" || !binding.session.isStreaming)
+			if (binding.state !== "running" || (!waiting && !binding.session.isStreaming))
 				throw new EngineTargetError(
 					"too_late",
 					"The Attempt stopped streaming while attachments were being prepared",
@@ -1051,7 +1067,7 @@ export class EngineRuntime {
 			);
 			if (references && !item?.attachments) binding.directUploads.set(request.clientMessageId!, references);
 			try {
-				await binding.session.steer(
+				await binding.session[waiting ? "acceptEngineQueuedInput" : "steer"](
 					item?.deliveryPayload ?? request.message ?? "",
 					images,
 					{
@@ -1093,6 +1109,7 @@ export class EngineRuntime {
 						...(routingResume ? { routingResume } : {}),
 						settleCommandId: request.commandId,
 						settleCommandReceipt: { outcome: "applied", detail: result },
+						...(waiting ? { transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint() } : {}),
 						...(item
 							? {
 									inboxSessionId: binding.session.sessionId,
@@ -1120,6 +1137,10 @@ export class EngineRuntime {
 			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
 			if (evicted) binding.steerCommandSet.delete(evicted);
 			if (previousState === "paused") binding.pauseGate.resume();
+			if (waiting) {
+				binding.requestTurnDrained = false;
+				this.#trackRun(this.#runPrompt(binding, "", undefined, "resume_queued"));
+			}
 			this.#signalInboxWake();
 			return result;
 		});
@@ -1378,7 +1399,7 @@ export class EngineRuntime {
 					if ((binding.attemptState === "paused" || binding.attemptState === "pause_requested") && binding.approvalPauseCause) {
 						if (binding.attemptState === "pause_requested")
 							throw new EngineBindingPendingError("Branch Resume awaits its retained approval pause");
-						const approvals = await this.store.durableApprovalPause(binding.attemptId);
+						const approvals = await this.store.durableRequestWait(binding.attemptId);
 						if (!approvals || approvals.some(approval =>
 							approval.status !== "approved" && approval.status !== "denied"))
 							throw new EngineBindingPendingError("Branch Resume awaits its retained approval decision");
@@ -1386,7 +1407,7 @@ export class EngineRuntime {
 					const previous = resumedIntent || (recoveringAcceptedMessage && agentId === request.agentInstanceId)
 						? (await this.store.getAttemptTarget(binding.attemptId))?.state ?? binding.attemptState
 						: binding.attemptState;
-					binding.attemptState = binding.pendingInput ? "waiting_input" : "running";
+					binding.attemptState = binding.pendingInput?.handling === "blocking" ? "waiting_input" : "running";
 					if (previous !== binding.attemptState && !["completed", "cancelled", "failed", "interrupted"].includes(previous)) {
 						try {
 							await this.#commitAttemptTransition(
@@ -1422,6 +1443,10 @@ export class EngineRuntime {
 							this.#pendingToolApprovals.delete(id);
 							pending.resolve({ decision: "approve",
 								receiptId: (await this.store.getApproval(id))?.decision_record?.origin_receipt_id });
+						}
+						if (binding.requestTurnDrained) {
+							binding.requestTurnDrained = false;
+							this.#trackRun(this.#runPrompt(binding, engineRequestReadyPrompt, undefined, "continue_after_assistant"));
 						}
 					}
 				}
@@ -1604,6 +1629,10 @@ export class EngineRuntime {
 			this.#notifyEvents(events);
 			clearTimeout(this.#approvalTimers.get(decision.request_id));
 			this.#approvalTimers.delete(decision.request_id);
+			if (approval.request.handling === "nonblocking") {
+				if (live) await this.#wakeWaitingRequest(live);
+				return;
+			}
 			const paused = live
 				? live.attemptState === "paused" || live.attemptState === "pause_requested"
 				: (await this.store.getAttempt(binding.attemptId))?.state === "paused";
@@ -1612,7 +1641,7 @@ export class EngineRuntime {
 					this.#trackRun(this.#resumeApprovedTool(live, decision.request_id));
 				if (!live && !(await this.store.intent(binding.agentInstanceId)).manualHold)
 					this.#trackRun(this.#inLane(binding.agentInstanceId, async () => {
-						const reopened = await this.#rehydratePausedApproval(binding);
+						const reopened = await this.#rehydrateRequestWait(binding);
 						this.#trackRun(this.#resumeApprovedTool(reopened, decision.request_id));
 					}).catch(error => this.#retryPausedRecovery(binding, error)));
 				return;
@@ -1644,11 +1673,30 @@ export class EngineRuntime {
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			const pending = binding.pendingInput;
-			if (!pending || pending.inputId !== request.inputId || binding.attemptState !== "waiting_input") {
+			const projection = await this.store.requestProjection(this.#snapshot(binding), request.inputId);
+			const pending: PendingInput | undefined = binding.pendingInput ??
+				(projection?.body?.kind === "question" && !projection.resolved
+					? { inputId: request.inputId, handling: projection.body.handling === "nonblocking" ? "nonblocking" : "blocking",
+						questions: await this.store.requestQuestions(this.#snapshot(binding), request.inputId) }
+					: undefined);
+			if (!pending || pending.inputId !== request.inputId || TERMINAL_ATTEMPT_STATES.has(binding.attemptState) ||
+				(pending.handling === "blocking" && binding.attemptState !== "waiting_input")) {
 				throw new EngineTargetError("too_late", `Input ${request.inputId} is no longer pending`);
 			}
 			const result = validateInputResult(request.result, pending.questions);
+			if (pending.handling === "nonblocking") {
+				const indexed = result.kind === "chat" ? result : { kind: "submit", results: result.results.map((answer, index) => ({
+					id: answer.id,
+					selectedOptionIndexes: answer.selectedOptions.map(label => pending.questions[index].options.findIndex(option => option.label === label)),
+					...(answer.customInput !== undefined ? { customInput: answer.customInput } : {}),
+					...(answer.note !== undefined ? { note: answer.note } : {}),
+				})) };
+				this.#notifyEvents([await this.store.resolveQuestion(this.#snapshot(binding), request.inputId, indexed,
+					request.commandId, request.expectedIntentRevision, request.expectedInputRevision)]);
+				binding.pendingInput = undefined;
+				await this.#wakeWaitingRequest(binding);
+				return;
+			}
 			const compactResult =
 				request.result.kind === "submit" && request.result.results.some(item => "selectedOptionIndexes" in item);
 			binding.attemptState = "running";
@@ -1685,7 +1733,7 @@ export class EngineRuntime {
 			}
 			if (binding.pendingInput !== pending) return;
 			binding.pendingInput = undefined;
-			pending.resolve(result);
+			pending.resolve?.(result);
 		});
 	}
 
@@ -2510,6 +2558,7 @@ export class EngineRuntime {
 			toolNames ? normalizeToolNames(toolNames).includes("read") : restrictToolNames !== true,
 			originals,
 		);
+		const approvalSettings = requireApprovalSettings(origin.approvalSettings);
 		const admission: AdmissionRequest = {
 			principalId: request.principalId,
 			deviceId: this.#deviceId,
@@ -2528,6 +2577,7 @@ export class EngineRuntime {
 			rosterRevision: config.roster_revision,
 			expectedRevisions: config.record_revisions,
 			candidates: roster,
+			maxFrozenCandidates: approvalSettings.max_frozen_candidates,
 			callerAttemptId: request.bindingSnapshot.parentAttemptId,
 			frozen: false,
 		};
@@ -2693,7 +2743,7 @@ export class EngineRuntime {
 			binding = await this.#openBinding(
 				request, openingExecution, continuationDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
-				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, origin.approvalSettings ?? undefined,
+				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, approvalSettings,
 			);
 			this.#assertAttachmentSupport(binding.session, images, originals);
 			if (preparedHistory?.pendingInboxSourceSessionId)
@@ -2927,9 +2977,10 @@ export class EngineRuntime {
 		preparedSessionManager?: SessionManager,
 		pendingStartSignal?: AbortSignal,
 		audit?: LatencyAudit,
-		approvalSettings?: { timeout_seconds: number; settings_revision: number; settings_hash: string },
+		approvalSettings?: CapturedApprovalSettings,
 		recoverSession = false,
 	): Promise<LiveBinding> {
+		const capturedApprovalSettings = requireApprovalSettings(approvalSettings);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager = preparedSessionManager;
@@ -3158,6 +3209,10 @@ export class EngineRuntime {
 				preloadedCustomToolPaths: [],
 				interactivePrompts: true,
 				toolExecutionHook,
+				engineRequest: { invoke: (callId, input, dispatch, signal) => {
+					if (!liveBinding) throw new Error("Request has no admitted Engine binding");
+					return this.#invokeRequest(liveBinding, callId, input, dispatch, signal);
+				} },
 				recoverPendingApprovalTools: recoverSession,
 				engineChildLauncher,
 				engineInbox: {
@@ -3364,10 +3419,7 @@ export class EngineRuntime {
 				bindingId: `${route}:${bindingGeneration}`,
 				commandId: request.commandId,
 				bindingSnapshot: request.bindingSnapshot,
-				approvalSettings: approvalSettings ?? {
-					timeout_seconds: 300, settings_revision: 0,
-					settings_hash: executionHash({ approval_timeout_seconds: 300 }),
-				},
+				approvalSettings: capturedApprovalSettings,
 				agentInstanceId: request.agentInstanceId,
 				executionId: request.executionId,
 				attemptId: request.attemptId,
@@ -3422,6 +3474,9 @@ export class EngineRuntime {
 				sideAttemptId: request.attemptId,
 				respondedRequests: new Map(),
 				directUploads: new Map(),
+				submittedCalls: new Map(),
+				requestReads: new Map(),
+				requestNotices: new Set(),
 			};
 			liveBinding = binding;
 			resolved.setBillingPoolChanged((proposal, signal) => this.#reconcileBillingPool(binding, proposal, signal));
@@ -3432,7 +3487,7 @@ export class EngineRuntime {
 			created.setToolUIContext(
 				{
 					...noOpUIContext,
-					askDialog: (questions, dialogOptions) => this.#requestInput(binding, questions, dialogOptions?.signal),
+					askDialog: (questions, dialogOptions) => this.#requestInput(binding, questions, dialogOptions?.signal, dialogOptions?.handling),
 				},
 				true,
 			);
@@ -3778,16 +3833,230 @@ export class EngineRuntime {
 	}
 
 
+	/** Called only in the Agent mutation lane; a decision never interrupts an active turn. */
+	async #wakeWaitingRequest(binding: LiveBinding): Promise<void> {
+		if (binding.attemptState !== "waiting_request" || binding.manualHold) return;
+		await this.store.assertIntent(binding.agentInstanceId, binding.intentRevision, true);
+		if (!await this.store.renewRouting(binding.attemptId, this.engineGeneration))
+			throw new EngineTargetError("stale_target", "Waiting request lost its live routing lease");
+		await this.#commitAttemptTransition(binding, "running", [{
+			kind: "resumed", payload: { cause: "request_answered" },
+		}], { expectedStates: ["waiting_request"], intentGuard: { expectedRevision: binding.intentRevision, requireUnheld: true } });
+		binding.attemptState = "running";
+		binding.requestTurnDrained = false;
+		for (const row of await this.store.retainedRequestInputs(this.#snapshot(binding)))
+			if (row.resolved) binding.requestNotices.add(`${row.value.inputId}:${row.value.revision}`);
+		this.#trackRun(this.#runPrompt(binding, engineRequestReadyPrompt, undefined, "continue_after_assistant"));
+	}
+
+	async #waitOnRetainedRequests(binding: LiveBinding): Promise<boolean> {
+		return this.#inLane(binding.agentInstanceId, async () => {
+			if (binding.attemptState !== "running" || this.#bindings.get(binding.agentInstanceId) !== binding) return false;
+			const requests = await this.store.retainedRequestInputs(this.#snapshot(binding));
+			if (!requests.length) return false;
+			const checkpoint = await this.#effectCheckpoint(binding);
+			await this.#commitAttemptTransition(binding, "waiting_request", [{
+				kind: "request_waiting", payload: { requestIds: requests.map(row => String(row.value.inputId)) },
+			}], { expectedStates: ["running"], transcriptCheckpoint: checkpoint });
+			binding.attemptState = "waiting_request";
+			binding.requestTurnDrained = true;
+			if (requests.some(row => row.resolved && !requestConsumptionMatches(row) &&
+				!binding.requestNotices.has(`${row.value.inputId}:${row.value.revision}`)))
+				await this.#wakeWaitingRequest(binding);
+			return true;
+		});
+	}
+
+	async #readRequest(binding: LiveBinding, requestId: string) {
+		const projection = await this.store.requestProjection(this.#snapshot(binding), requestId);
+		const attempt = await this.store.getAttempt(binding.attemptId);
+		if (!projection || !attempt) throw new EngineTargetError("stale_target", "Request is not owned by this Attempt");
+		const approval = await this.store.getApproval(requestId);
+		if (approval && (approval.request.requester_attempt_id !== binding.attemptId ||
+			approval.request.requester_agent_ref !== binding.bindingSnapshot?.agentInstanceRef ||
+			approval.request.principal_id !== binding.principalId))
+			throw new EngineTargetError("stale_target", "Approval result belongs to another requester");
+		const result: Record<string, unknown> = approval ? {
+			kind: "approval", requestId, status: approval.request.status,
+			handling: approval.request.handling ?? "blocking", addressRevision: approval.request.address_revision,
+			decisionRevision: approval.request.decision_revision, inputRevision: attempt.input_revision,
+			...(approval.decision ? { result: { decision: approval.decision,
+				...(approval.decision_record?.reason ? { reason: approval.decision_record.reason } : {}) } } : {}),
+		} : {
+			kind: "question", requestId, handling: projection.body?.handling ?? "blocking",
+			status: projection.resolved ? projection.result?.status ?? "cancelled" : "pending",
+			inputRevision: projection.value.revision,
+			...(projection.result?.result ? { result: projection.result.result } : {}),
+		};
+		validateRuntimeValue("requestReadResult", result);
+		return { projection, result };
+	}
+
+	/** Repair only a proven native read delivery, never an attempted read or transport ACK. */
+	async #reconcileRequestReads(binding: LiveBinding): Promise<void> {
+		const outstanding = await this.store.retainedRequestInputs(this.#snapshot(binding));
+		if (!outstanding.some(row => row.resolved && !requestConsumptionMatches(row))) return;
+		const manager = binding.session.sessionManager;
+		await manager.materializeHistory();
+		const branch = manager.getBranch();
+		const calls = new Map<string, { requestId: string; inputHash: string }>();
+		for (const entry of branch) {
+			if (entry.type !== "message") continue;
+			if (entry.message.role === "assistant") {
+				for (const block of entry.message.content) {
+					if (block.type !== "toolCall" || block.name !== "request") continue;
+					const args = block.arguments as EngineRequestInput;
+					if (args.action === "read" && typeof args.requestId === "string")
+						calls.set(block.id, { requestId: args.requestId, inputHash: sha256(stableStringifyJson(args)) });
+				}
+			} else if (entry.message.role === "toolResult" && entry.message.toolName === "request" && !entry.message.isError) {
+				const message = entry.message;
+				const source = calls.get(message.toolCallId);
+				if (!source || !outstanding.some(row => String(row.value.inputId) === source.requestId && row.resolved && !requestConsumptionMatches(row)))
+					continue;
+				const delivered = (message.details as { requestResult?: Record<string, unknown> } | undefined)?.requestResult;
+				if (!delivered) continue;
+				validateRuntimeValue("requestReadResult", delivered);
+				const { projection, result } = await this.#readRequest(binding, source.requestId);
+				// Approval collection revision can advance for a different request after this immutable decision.
+				const { inputRevision: _actualRevision, ...actual } = delivered;
+				const { inputRevision: _currentRevision, ...expected } = result;
+				if (executionHash(actual) !== executionHash(expected) ||
+					(result.kind === "question" && delivered.inputRevision !== projection.value.revision)) continue;
+				const effectId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${message.toolCallId}\0${source.inputHash}`).slice(0, 32)}`;
+				const effect = await this.store.getEffect(effectId);
+				if (!effect || effect.tool_name !== "request" || effect.attempt_id !== binding.attemptId ||
+					effect.binding_id !== binding.bindingId || effect.input_hash !== source.inputHash ||
+					effect.state !== "settled" || effect.outcome !== "completed") continue;
+				await this.store.consumeRequest(this.#snapshot(binding), source.requestId, {
+					input_revision: Number(projection.value.revision), tool_call_id: message.toolCallId,
+					tool_result_entry_id: entry.id, result_hash: requestResultHash(delivered),
+				}, await manager.flushAndCheckpoint());
+			}
+		}
+	}
+
+	async #invokeRequest(binding: LiveBinding, callId: string, input: EngineRequestInput,
+		dispatch: EngineRequestDispatch, signal?: AbortSignal): Promise<AgentToolResult<unknown>> {
+		signal?.throwIfAborted();
+		if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptState !== "running")
+			throw new EngineTargetError("stale_target", "Request requires its live running Attempt");
+		const target = this.#snapshot(binding);
+		const reply = (value: Record<string, unknown>): AgentToolResult<unknown> =>
+			({ content: [{ type: "text", text: JSON.stringify(value) }], details: { requestResult: value } });
+		if (input.action === "read") {
+			const { projection, result } = await this.#inLane(binding.agentInstanceId, () => this.#readRequest(binding, input.requestId));
+			if (projection.resolved) binding.requestReads.set(callId, {
+				requestId: input.requestId, inputRevision: Number(projection.value.revision),
+				resultHash: requestResultHash(result),
+			});
+			return reply(result);
+		}
+		let operation: SubmittedOperation;
+		let args: Record<string, unknown>;
+		let handling: "blocking" | "nonblocking";
+		let requestId: string;
+		if (input.action === "submit") {
+			args = dispatch.validate(input.operation.toolName, input.operation.arguments);
+			await this.#effectCheckpoint(binding);
+			const manager = binding.session.sessionManager;
+			const entry = manager.getContextBranch().findLast(entry => entry.type === "message" &&
+				entry.message.role === "assistant" && entry.message.content.some(block =>
+					block.type === "toolCall" && block.id === callId && block.name === "request"));
+			const leafId = manager.getLeafId();
+			if (!entry || entry.type !== "message" || entry.message.role !== "assistant" || !leafId)
+				throw new EngineTargetError("source_unavailable", "Request submit lacks its durable native tool call");
+			const source = entry.message.content.find(block => block.type === "toolCall" && block.id === callId);
+			if (!source || source.type !== "toolCall" || stableStringifyJson(source.arguments) !== stableStringifyJson(input))
+				throw new EngineTargetError("stale_target", "Submitted arguments differ from the durable native call");
+			const argumentsHash = `sha256:${sha256(stableStringifyJson(args))}` as const;
+			operation = { tool_name: input.operation.toolName,
+				tool_call_id: `request_${sha256(`${binding.attemptId}\0${callId}\0${argumentsHash}`)}`,
+				arguments_hash: argumentsHash,
+				transcript: { session_id: manager.getSessionId(), entry_id: entry.id, leaf_id: leafId } };
+			handling = input.handling;
+			requestId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${operation.tool_call_id}\0${argumentsHash.slice(7)}`).slice(0, 32)}`;
+		} else {
+			const approval = await this.store.getApproval(input.requestId);
+			const retained = approval?.request.submitted_operation;
+			if (!approval || !retained || approval.request.requester_attempt_id !== binding.attemptId ||
+				approval.request.requester_agent_ref !== binding.bindingSnapshot?.agentInstanceRef ||
+				approval.request.requester_binding_revision !== binding.bindingSnapshot?.bindingRevision ||
+				approval.request.dispatch_hash !== binding.dispatchHash || approval.request.status !== "approved" ||
+				!approval.decision_record?.origin_receipt_id)
+				throw new EngineTargetError("stale_target", "Continuation lacks the original approved operation and receipt");
+			const manager = binding.session.sessionManager;
+			let branch = manager.getContextBranch();
+			if (!branch.some(entry => entry.id === retained.transcript.entry_id) ||
+				!branch.some(entry => entry.id === retained.transcript.leaf_id)) {
+				await manager.materializeHistory();
+				branch = manager.getBranch();
+			}
+			const entry = branch.find(entry => entry.id === retained.transcript.entry_id);
+			if (manager.getSessionId() !== retained.transcript.session_id ||
+				!branch.some(entry => entry.id === retained.transcript.leaf_id) ||
+				!entry || entry.type !== "message" || entry.message.role !== "assistant")
+				throw new EngineTargetError("source_unavailable", "Original request transcript is unavailable on this Attempt");
+			let originalArgs: Record<string, unknown> | undefined;
+			for (const block of entry.message.content) {
+				if (block.type !== "toolCall" || block.name !== "request") continue;
+				const submitted = block.arguments as EngineRequestInput;
+				if (submitted.action !== "submit" || submitted.operation.toolName !== retained.tool_name) continue;
+				const candidate = dispatch.validate(retained.tool_name, submitted.operation.arguments);
+				const hash = `sha256:${sha256(stableStringifyJson(candidate))}`;
+				if (hash === retained.arguments_hash &&
+					`request_${sha256(`${binding.attemptId}\0${block.id}\0${hash}`)}` === retained.tool_call_id) {
+					originalArgs = candidate;
+					break;
+				}
+			}
+			if (!originalArgs) throw new EngineTargetError("stale_target", "Original operation name, arguments or call identity changed");
+			operation = retained;
+			args = originalArgs;
+			handling = approval.request.handling;
+			requestId = input.requestId;
+			if (approval.request.effect_id !== requestId ||
+				requestId !== `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${operation.tool_call_id}\0${operation.arguments_hash.slice(7)}`).slice(0, 32)}`)
+				throw new EngineTargetError("stale_target", "Approved operation has a different original effect identity");
+			signal?.throwIfAborted();
+			this.#notifyEvents([await this.store.activateApprovedToolEffect(target, requestId, {
+				decisionRevision: input.expectedDecisionRevision, inputRevision: input.expectedInputRevision,
+			})]);
+			if (approval.request.kind === "spawn")
+				binding.spawnApprovals.set(operation.tool_call_id, approval.decision_record.origin_receipt_id);
+		}
+		binding.submittedCalls.set(operation.tool_call_id, {
+			operation, handling, wrapperCallId: callId, continuing: input.action === "continue",
+		});
+		try {
+			let result: AgentToolResult<unknown> | undefined;
+			try { result = await dispatch.execute(operation.tool_name, operation.tool_call_id, args); }
+			catch (error) { if (!(error instanceof EngineRequestPending) || error.requestId !== requestId) throw error; }
+			const approval = await this.store.getApproval(requestId);
+			if (input.action === "submit" && approval?.request.handling === "nonblocking") {
+				const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
+				validateRuntimeValue("requestToolPending", pending);
+				return reply(pending);
+			}
+			if (!result) throw new EngineTargetError("source_unavailable", "Original operation did not return its outcome");
+			return result;
+		} finally {
+			binding.submittedCalls.delete(operation.tool_call_id);
+		}
+	}
+
 	async #requestInput(
 		binding: LiveBinding,
 		questions: ExtensionAskDialogQuestion[],
 		signal?: AbortSignal,
-	): Promise<ExtensionAskDialogResult | undefined> {
+		handling: "blocking" | "nonblocking" = "blocking",
+	): Promise<ExtensionAskDialogResult | ExtensionAskPendingResult | undefined> {
 		signal?.throwIfAborted();
 		const completion = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
 		const pending: PendingInput = {
 			inputId: `input_${crypto.randomUUID().replaceAll("-", "")}`,
 			questions,
+			handling,
 			resolve: completion.resolve,
 		};
 		// Reject an unusable input shape to the invoking tool before creating pending state.
@@ -3799,7 +4068,7 @@ export class EngineRuntime {
 				seq: 0,
 				causationCommandId: binding.commandId,
 				createdAt: Date.now(),
-				payload: { inputId: pending.inputId, questions },
+				payload: { inputId: pending.inputId, questions, handling, requesterAttemptId: binding.attemptId },
 			}),
 		);
 		await this.#inLane(binding.agentInstanceId, async () => {
@@ -3812,6 +4081,18 @@ export class EngineRuntime {
 			}
 			if (binding.pendingInput) throw new Error(`Attempt ${binding.attemptId} already has pending input`);
 			binding.pendingInput = pending;
+			if (handling === "nonblocking") {
+				try {
+					await this.#commitEvent(binding, "input_requested", {
+						inputId: pending.inputId, inputKind: "ask", questions, handling,
+						requesterAttemptId: binding.attemptId, attemptState: "running", controlReadiness: controlReadiness("running", true),
+					});
+				} catch (error) {
+					binding.pendingInput = undefined;
+					throw error;
+				}
+				return;
+			}
 			binding.attemptState = "waiting_input";
 			try {
 				await this.#commitAttemptTransition(
@@ -3824,6 +4105,7 @@ export class EngineRuntime {
 								inputId: pending.inputId,
 								inputKind: "ask",
 								questions,
+								handling, requesterAttemptId: binding.attemptId,
 								attemptState: "waiting_input",
 								controlReadiness: controlReadiness("waiting_input"),
 							},
@@ -3837,6 +4119,7 @@ export class EngineRuntime {
 				throw error;
 			}
 		});
+		if (handling === "nonblocking") return { kind: "pending", requestId: pending.inputId };
 		const abort = () => {
 			if (binding.pendingInput !== pending || binding.attemptState !== "waiting_input") return;
 			binding.attemptState = "running";
@@ -3878,7 +4161,7 @@ export class EngineRuntime {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		} finally {
-			pending.resolve(undefined);
+			pending.resolve?.(undefined);
 		}
 	}
 
@@ -3899,12 +4182,15 @@ export class EngineRuntime {
 			throw new Error(`Tool invocation ${invocationId} is already active`);
 		}
 		const done = Promise.withResolvers<void>();
+		const submitted = binding.submittedCalls.get(call.toolCallId);
 		const record: ToolInvocationRecord = {
 			invocationId,
 			policy,
 			toolCallId: call.toolCallId,
 			toolName: call.toolName,
 			inputHash,
+			...(submitted ? { submittedOperation: submitted.operation, requestHandling: submitted.handling,
+				wrapperCallId: submitted.wrapperCallId } : {}),
 			origin:
 				binding.toolOrigins?.attemptId === binding.attemptId
 					? binding.toolOrigins.blocks.get(call.toolCallId)
@@ -3915,6 +4201,17 @@ export class EngineRuntime {
 			settled: false,
 		};
 		this.#toolInvocations.set(invocationId, record);
+		if (submitted?.continuing) {
+			const effect = await this.store.getEffect(invocationId);
+			if (!effect || effect.state !== "started" || effect.tool_call_id !== call.toolCallId ||
+				effect.tool_name !== call.toolName || effect.input_hash !== inputHash ||
+				submitted.operation.arguments_hash !== `sha256:${inputHash}`) {
+				this.#toolInvocations.delete(invocationId);
+				record.resolveDone();
+				throw new EngineTargetError("stale_target", "Continued operation differs from the claimed original effect");
+			}
+			return { invocationId };
+		}
 		if (binding.recoveryCallIds?.includes(call.toolCallId)) {
 			const effect = await this.store.getEffect(invocationId);
 			const approval = await this.store.getApproval(invocationId);
@@ -4011,7 +4308,7 @@ export class EngineRuntime {
 				if (!events.length) return;
 				const updated = await this.store.getApproval(request.id);
 				if (!updated) return;
-				if (address.kind === "human") {
+				if (address.kind === "human" && updated.request.handling !== "nonblocking") {
 					const cause = { kind: "approval_deadline" as const,
 						request_id: request.id, address_revision: updated.request.address_revision };
 					binding.approvalPauseCause = cause;
@@ -4067,6 +4364,7 @@ export class EngineRuntime {
 			expires_at: new Date(now.getTime() + timeoutSeconds * 1_000).toISOString(),
 			address_revision: 1, decision_revision: 0, status: "pending",
 			timeout_seconds: timeoutSeconds,
+			handling: "blocking",
 			settings_revision: binding.approvalSettings.settings_revision,
 			settings_hash: binding.approvalSettings.settings_hash,
 		};
@@ -4155,8 +4453,18 @@ export class EngineRuntime {
 			timeout_seconds: timeoutSeconds,
 			settings_revision: binding.approvalSettings.settings_revision,
 			settings_hash: binding.approvalSettings.settings_hash,
+			handling: record.requestHandling ?? "blocking",
+			...(record.submittedOperation ? { submitted_operation: record.submittedOperation } : {}),
 		};
 		validateRuntimeValue("approvalRequest", approval);
+		if (approval.handling === "nonblocking") {
+			if (!existing) this.#notifyEvents([await this.store.requestStartedEffectApproval(
+				this.#snapshot(binding), record.invocationId, approval)]);
+			this.#armApprovalDeadline(binding, existing?.request ?? approval);
+			this.#toolInvocations.delete(record.invocationId);
+			record.resolveDone();
+			throw new EngineRequestPending(record.invocationId);
+		}
 		const pending = Promise.withResolvers<EngineApprovalDecision["approvalDecision"]>();
 		this.#pendingEscalations.set(record.invocationId, pending);
 		const abort = () => {
@@ -4243,6 +4551,8 @@ export class EngineRuntime {
 				timeout_seconds: timeoutSeconds,
 				settings_revision: binding.approvalSettings.settings_revision,
 				settings_hash: binding.approvalSettings.settings_hash,
+				handling: record.requestHandling ?? "blocking",
+				...(record.submittedOperation ? { submitted_operation: record.submittedOperation } : {}),
 			};
 			validateRuntimeValue("approvalRequest", request);
 			if (existing?.state === "pending" && existing.request.requester_attempt_id === binding.attemptId &&
@@ -4258,6 +4568,7 @@ export class EngineRuntime {
 				this.#notifyEvents([event]);
 				this.#armApprovalDeadline(binding, request);
 			}
+			if (request.handling === "nonblocking") throw new EngineRequestPending(record.invocationId);
 		} catch (error) {
 			this.#pendingToolApprovals.delete(record.invocationId);
 			this.#toolInvocations.delete(record.invocationId);
@@ -4297,13 +4608,29 @@ export class EngineRuntime {
 		binding.session.setMessagePersistedHandler(async message => {
 			if (message.role !== "toolResult") return;
 			// A device invocation (`<outer>:xd:<name>`) has no toolResult of its own: the outer result makes it durable.
+			const read = binding.requestReads.get(message.toolCallId);
+			if (read && !message.isError) {
+				const checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
+				const entry = binding.session.sessionManager.getContextBranch().findLast(entry =>
+					entry.type === "message" && entry.message.role === "toolResult" &&
+					entry.message.toolCallId === message.toolCallId && entry.message.toolName === "request");
+				const delivered = (message.details as { requestResult?: Record<string, unknown> } | undefined)?.requestResult;
+				if (delivered) validateRuntimeValue("requestReadResult", delivered);
+				if (!entry || !delivered || delivered.requestId !== read.requestId || requestResultHash(delivered) !== read.resultHash)
+					throw new EngineTargetError("stale_target", "Request answer differs from its native delivered tool result");
+				await this.store.consumeRequest(this.#snapshot(binding), read.requestId, {
+					input_revision: read.inputRevision, tool_call_id: message.toolCallId,
+					tool_result_entry_id: entry.id, result_hash: read.resultHash,
+				}, checkpoint);
+				binding.requestReads.delete(message.toolCallId);
+			}
 			const device = `${message.toolCallId}:xd:`;
 			const records = [...this.#toolInvocations.values()]
 				.filter(
 					candidate =>
 						candidate.target.bindingId === binding.bindingId &&
 						candidate.target.attemptId === binding.attemptId &&
-						(candidate.toolCallId === message.toolCallId || candidate.toolCallId.startsWith(device)),
+						(candidate.toolCallId === message.toolCallId || candidate.wrapperCallId === message.toolCallId || candidate.toolCallId.startsWith(device)),
 				)
 				// Devices settle before the call that ran them.
 				.sort((a, b) => Number(a.toolCallId === message.toolCallId) - Number(b.toolCallId === message.toolCallId));
@@ -4446,6 +4773,18 @@ export class EngineRuntime {
 			}
 			await this.#cancelPendingToolApproval(pending, reason, causationCommandId);
 		}
+		for (const input of await this.store.retainedRequestInputs(this.#snapshot(binding))) {
+			const id = String(input.value.inputId);
+			const approval = await this.store.getApproval(id);
+			if (!approval || approval.request.handling !== "nonblocking" || this.#toolInvocations.has(id)) continue;
+			if (approval.state === "pending")
+				this.#notifyEvents(await this.store.resolveApproval(this.#snapshot(binding), id, "cancelled", null, { causationCommandId }));
+			const effect = await this.store.getEffect(id);
+			if (effect && (effect.state === "planned" || effect.state === "started"))
+				this.#notifyEvents([await this.store.settleToolEffect(this.#snapshot(binding), id, "cancelled", { error: reason })]);
+			clearTimeout(this.#approvalTimers.get(id));
+			this.#approvalTimers.delete(id);
+		}
 	}
 
 	async #cancelPendingToolApproval(
@@ -4478,6 +4817,7 @@ export class EngineRuntime {
 			(binding.attemptState !== "running" &&
 				binding.attemptState !== "pause_requested" &&
 				binding.attemptState !== "paused" &&
+				binding.attemptState !== "waiting_request" &&
 				binding.attemptState !== "waiting_input")
 		) {
 			const cancelled = await this.store.cancelPendingStart(target, target.commandId);
@@ -5240,6 +5580,8 @@ export class EngineRuntime {
 				binding.recoveryCallIds = undefined;
 				await this.#dispatchModel(binding, "", undefined, "resume_queued");
 			} else await this.#dispatchModel(binding, input, identity, kind, images);
+			await this.#waitForAttemptQuiescence(binding, attemptId);
+			if (await this.#waitOnRetainedRequests(binding)) return;
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 				binding.streamAdmission?.check();
@@ -5256,6 +5598,7 @@ export class EngineRuntime {
 				);
 			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
+			if (await this.#waitOnRetainedRequests(binding)) return;
 			binding.streamAdmission?.check();
 			const yielded = terminalYield(
 				binding.session.messages,
@@ -5289,6 +5632,10 @@ export class EngineRuntime {
 		// Background side operations (speculative compaction, deferred handoff) never outlive the Attempt:
 		// they are cancelled and their effects settled before its terminal transition.
 		if (binding.attemptId === attemptId) await this.#drainSideRequests(binding);
+		if (binding.attemptId === attemptId && state !== "completed") {
+			await this.#cancelToolApprovals(binding, cause ?? state);
+			await this.#cancelPendingInput(binding, cause ?? state);
+		}
 		// A response that never reached message_end still owns its coalesced text.
 		if (binding.assistantStream) this.#flushAssistantStream(binding, binding.assistantStream);
 		await binding.traceWriteTail;
@@ -5971,8 +6318,8 @@ export class EngineRuntime {
 		const wasRunning = binding.state === "running";
 		// Released bindings admit no side request; running ones are awaited with the model calls below.
 		binding.sideAbort.abort(new EngineTargetError("cancelled", "Attempt binding was released"));
-		const retainApproval = cause === "engine_lost" && binding.attemptState === "paused" &&
-			(await this.store.durableApprovalPause(binding.attemptId)) !== undefined;
+		const retainApproval = cause === "engine_lost" &&
+			(await this.store.durableRequestWait(binding.attemptId)) !== undefined;
 		if (retainApproval) {
 			await binding.session.sessionManager.flushAndCheckpoint();
 			binding.session.sessionManager.seal();
@@ -6051,13 +6398,13 @@ export class EngineRuntime {
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} cleanup failed`);
 	}
 
-	async #discardBinding(binding: LiveBinding): Promise<void> {
+	async #discardBinding(binding: LiveBinding, retainRequests = false): Promise<void> {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
 		const errors: unknown[] = [];
 		await collectFailure(errors, () =>
-			this.#disposeBindingResources(binding, "Engine admission failed", "cancelled"),
+			this.#disposeBindingResources(binding, "Engine admission failed", "cancelled", undefined, retainRequests),
 		);
 		const uncommittedForkSessionFile = binding.uncommittedForkSessionFile;
 		if (uncommittedForkSessionFile) {
@@ -6092,7 +6439,8 @@ export class EngineRuntime {
 					pending.resolve({ decision: "cancelled", reason: "Engine stopped; approval remains durable" });
 				}
 		} else await collectFailure(errors, () => this.#cancelToolApprovals(binding, reason));
-		await collectFailure(errors, () => this.#cancelPendingInput(binding, reason, undefined, attemptState));
+		if (!retainApproval)
+			await collectFailure(errors, () => this.#cancelPendingInput(binding, reason, undefined, attemptState));
 		await collectFailure(errors, () =>
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId }),
 		);
@@ -6357,7 +6705,42 @@ export class EngineRuntime {
 		}
 	}
 
-	async #rehydratePausedApproval(target: EngineBindingSnapshot): Promise<LiveBinding> {
+	async #resumeRecoveredRequestWait(binding: LiveBinding): Promise<void> {
+		try {
+			await this.#inLane(binding.agentInstanceId, async () => {
+				if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding ||
+					binding.attemptState !== "paused" || binding.manualHold) return;
+				const route = await this.#resumeRouting(binding);
+				const inputs = await this.store.retainedRequestInputs(this.#snapshot(binding));
+				const state = inputs.length ? "waiting_request" : "running";
+				await this.#commitAttemptTransition(binding, state, [{
+					kind: "request_waiting", payload: { cause: "request_recovery" },
+				}], { expectedStates: ["paused"], routingResume: route,
+					intentGuard: { expectedRevision: binding.intentRevision, requireUnheld: true },
+					transcriptCheckpoint: await this.#effectCheckpoint(binding) });
+				binding.attemptState = state;
+				binding.pauseGate.resume();
+				if (inputs.some(input => input.resolved && !requestConsumptionMatches(input)))
+					await this.#wakeWaitingRequest(binding);
+				else if (!inputs.length) this.#trackRun(this.#settleAttempt(binding, binding.attemptId, 0, "completed"));
+			});
+		} catch (error) {
+			if (error instanceof EngineRoutingQueuedError && !this.#approvalRoutingWakes.has(binding.agentInstanceId)) {
+				this.#approvalRoutingWakes.add(binding.agentInstanceId);
+				this.#trackRun((async () => {
+					try { await waitForEngineWake(this.store.changeSignal(), 1_000); }
+					finally { this.#approvalRoutingWakes.delete(binding.agentInstanceId); }
+					if (!this.#disposed) await this.#resumeRecoveredRequestWait(binding);
+				})());
+				return;
+			}
+			await this.#commitEvent(this.#snapshot(binding), "paused", {
+				cause: "recovery_required", reason: safeEngineErrorDetail(error),
+			});
+		}
+	}
+
+	async #rehydrateRequestWait(target: EngineBindingSnapshot): Promise<LiveBinding> {
 		const current = await this.store.getBinding(target.agentInstanceId);
 		const attempt = await this.store.getAttempt(target.attemptId);
 		const identity = await this.store.getStartConversationIdentity(target.commandId);
@@ -6365,7 +6748,7 @@ export class EngineRuntime {
 			? JSON.parse(identity.serializedCommand) as EngineCommandEnvelope : undefined;
 		const payload = envelope?.payload;
 		if (!current || !attempt?.execution || attempt.state !== "paused" || !identity?.principalId ||
-			attempt.cause !== "approval_deadline" || !payload || envelope?.op !== "start" ||
+			!(await this.store.durableRequestWait(target.attemptId)) || !payload || envelope?.op !== "start" ||
 			current.engineGeneration !== this.engineGeneration ||
 			current.bindingId !== target.bindingId || attempt.engine_generation !== this.engineGeneration ||
 			!current.sessionFile || !this.#resolveExecution || !this.#verifyOriginReceipt ||
@@ -6437,8 +6820,24 @@ export class EngineRuntime {
 		binding.state = "running";
 		binding.pauseGate.pause();
 		try {
-			binding.recoveryCallIds = await this.#recoveryToolCallIds(binding);
-			const approvals = await this.store.durableApprovalPause(target.attemptId);
+			const approvals = await this.store.durableRequestWait(target.attemptId);
+			const inputs = await this.store.retainedRequestInputs(this.#snapshot(binding));
+			const requestWait = inputs.some(input => input.body?.handling === "nonblocking" ||
+				(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
+			if (requestWait) {
+				await this.#reconcileRequestReads(binding);
+				const retained = await this.store.retainedRequestInputs(this.#snapshot(binding));
+				binding.requestTurnDrained = true;
+				for (const input of retained) if (input.body?.kind === "question" && !input.resolved) {
+					if (binding.pendingInput) throw new EngineTargetError("stale_target", "Multiple pending questions in retained Attempt");
+					binding.pendingInput = { inputId: String(input.value.inputId), handling: "nonblocking",
+						questions: await this.store.requestQuestions(this.#snapshot(binding), String(input.value.inputId)) };
+				}
+				binding.modelCallSequence = binding.session.messages.filter(message => message.role === "assistant").length;
+				while (await this.store.getEffect(`model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0model-${binding.modelCallSequence + 1}`).slice(0, 32)}`))
+					binding.modelCallSequence++;
+				if (!binding.manualHold) this.#trackRun(this.#resumeRecoveredRequestWait(binding));
+			} else binding.recoveryCallIds = await this.#recoveryToolCallIds(binding);
 			for (const approval of approvals ?? []) {
 				if (approval.status === "waiting_human_paused")
 					binding.approvalPauseCause ??= {
@@ -6446,14 +6845,14 @@ export class EngineRuntime {
 						address_revision: approval.address_revision,
 					};
 				this.#armApprovalDeadline(binding, approval);
-				if (!binding.manualHold && (approval.status === "approved" || approval.status === "denied"))
+				if (!requestWait && !binding.manualHold && (approval.status === "approved" || approval.status === "denied"))
 					this.#trackRun(this.#resumeApprovedTool(binding, approval.id));
 			}
 			this.#retainedApprovals.delete(target.agentInstanceId);
 			return binding;
 		} catch (error) {
 			binding.session.sessionManager.seal();
-			await this.#discardBinding(binding);
+			await this.#discardBinding(binding, true);
 			throw error;
 		}
 	}
@@ -6489,7 +6888,7 @@ export class EngineRuntime {
 				if (this.#disposed || !this.#retainedApprovals.has(target.agentInstanceId) ||
 					this.#bindings.has(target.agentInstanceId)) return;
 				try {
-					await this.#rehydratePausedApproval(target);
+					await this.#rehydrateRequestWait(target);
 				} catch (reason) {
 					this.#retryPausedRecovery(target, reason);
 				}
@@ -6504,11 +6903,11 @@ export class EngineRuntime {
 		await this.store.interruptGeneration(this.engineGeneration, events => this.#notifyEvents(events),
 			id => retained.push(id));
 		for (const attemptId of retained) {
-			const target = await this.store.recoverPausedApproval(attemptId, this.engineGeneration);
+			const target = await this.store.recoverRequestWait(attemptId, this.engineGeneration);
 			if (!target) continue;
 			this.#retainedApprovals.set(target.agentInstanceId, target);
 			try {
-				await this.#rehydratePausedApproval(target);
+				await this.#rehydrateRequestWait(target);
 			} catch (error) {
 				this.#retryPausedRecovery(target, error);
 			}
@@ -7075,13 +7474,13 @@ function controlPayload(
 	};
 }
 
-function controlReadiness(state: EngineAttemptState): Record<string, boolean> {
+function controlReadiness(state: EngineAttemptState, pendingInput = false): Record<string, boolean> {
 	return {
-		pause: state === "running",
+		pause: state === "running" || state === "waiting_request",
 		resume: state === "paused",
-		steer: state === "running",
-		cancel: state === "running" || state === "pause_requested" || state === "paused" || state === "waiting_input",
-		resolveInput: state === "waiting_input",
+		steer: state === "running" || state === "waiting_request",
+		cancel: ["running", "waiting_request", "pause_requested", "paused", "waiting_input"].includes(state),
+		resolveInput: !TERMINAL_ATTEMPT_STATES.has(state) && (pendingInput || state === "waiting_request" || state === "waiting_input"),
 	};
 }
 
