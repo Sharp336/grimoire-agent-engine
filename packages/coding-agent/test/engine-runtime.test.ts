@@ -605,27 +605,29 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		const execution = admittedExecution(mock.model, modelRegistry, { scopeAgents: 1 });
 		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
-		const provider = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
+		const provider = mockProviderFetch("https://side-pause.invalid/", async () => {
 			sideEntered.resolve();
 			await releaseSide.promise;
 			return new Response("ok");
-		}, { preconnect: globalThis.fetch.preconnect }));
-		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
-			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
-				const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
-				const route = config.routes.routes[0]!;
-				resolved.options.providerRequestHook = new ProviderAdmissionClient(
-					"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
-				).createHook(undefined, auth, "", [{
-					...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
-					providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
-					credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
-					modelId: mock.model.id, baseUrl: mock.model.baseUrl,
-				}]);
-				return resolved;
-			},
 		});
+		let created: Awaited<ReturnType<typeof createRuntime>> | undefined;
 		try {
+			created = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
+				resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+					const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+					const route = config.routes.routes[0]!;
+					resolved.options.providerRequestHook = new ProviderAdmissionClient(
+						"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+					).createHook(undefined, auth, "", [{
+						...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+						providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+						credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+						modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+					}]);
+					return resolved;
+				},
+			});
+			const { runtime, cwd } = created;
 			const request = (id: string) => startRequest(execution, {
 				commandId: `${id}-start`, agentInstanceId: id, agentInstanceRef: `${execution.taskRef}/agents/${id}`,
 				executionId: `${id}-execution`, attemptId: `${id}-attempt`,
@@ -667,9 +669,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		} finally {
 			releasePrimary.resolve();
 			releaseSide.resolve();
-			await runtime.dispose();
-			gateObserver.mockRestore();
-			provider.mockRestore();
+			try {
+				await created?.runtime.dispose();
+			} finally {
+				gateObserver.mockRestore();
+				provider.mockRestore();
+			}
 		}
 	}, 30_000);
 
@@ -2066,8 +2071,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
 		let requests = 0;
-		const fetch = spyOn(globalThis, "fetch").mockImplementation((async input => {
-			expect(String(input)).toBe("https://compact.invalid/v1/responses/compact");
+		const provider = mockProviderFetch("https://compact.invalid/", async url => {
+			expect(url).toBe("https://compact.invalid/v1/responses/compact");
 			requests++;
 			return Response.json({
 				id: "remote-usage",
@@ -2075,28 +2080,30 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				usage: { input_tokens: 100, output_tokens: 0, total_tokens: 100,
 					input_tokens_details: { cached_tokens: 20 } },
 			});
-		}) as typeof globalThis.fetch);
-		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
-			await session.prompt(input);
-			if (mode === "manual") await session.compact(undefined, { mode: "remote" });
-			return true;
-		}, {
-			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
-				const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
-				resolved.options.settings = settings;
-				const route = config.routes.routes[0]!;
-				resolved.options.providerRequestHook = new ProviderAdmissionClient(
-					"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
-				).createHook(undefined, auth, "", [{
-					...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
-					providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
-					credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
-					modelId: mock.model.id, baseUrl: mock.model.baseUrl,
-				}]);
-				return resolved;
-			},
 		});
+		let created: Awaited<ReturnType<typeof createRuntime>> | undefined;
 		try {
+			created = await createRuntime(execution, async (session, input) => {
+				await session.prompt(input);
+				if (mode === "manual") await session.compact(undefined, { mode: "remote" });
+				return true;
+			}, {
+				resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+					const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+					resolved.options.settings = settings;
+					const route = config.routes.routes[0]!;
+					resolved.options.providerRequestHook = new ProviderAdmissionClient(
+						"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+					).createHook(undefined, auth, "", [{
+						...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+						providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+						credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+						modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+					}]);
+					return resolved;
+				},
+			});
+			const { runtime, cwd } = created;
 			const started = await admitRequest(runtime, startRequest(execution, {
 				commandId: `compact-${mode}`, agentInstanceId: `compact-${mode}`,
 				agentInstanceRef: `grimoire://tasks/grimoire/compact/agents/${mode}`,
@@ -2115,8 +2122,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			});
 			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 		} finally {
-			await runtime.dispose();
-			fetch.mockRestore();
+			try {
+				await created?.runtime.dispose();
+			} finally {
+				provider.mockRestore();
+			}
 		}
 	}, 30_000);
 
@@ -2179,37 +2189,39 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			});
 			const execution = admittedExecution(mock.model, modelRegistry);
 			const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
-			const provider = spyOn(globalThis, "fetch").mockImplementation(
-				Object.assign(async () => new Response("ok"), { preconnect: globalThis.fetch.preconnect }));
-			const { runtime, cwd } = await createRuntime(execution, async () => {
-				dispatchEntered.resolve();
-				return await finishPrompt.promise;
-			}, {
-				resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
-					const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
-					const route = config.routes.routes[0]!;
-					resolved.options.providerRequestHook = new ProviderAdmissionClient(
-						"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
-					).createHook(undefined, auth, "", [{
-						...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
-						providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
-						credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
-						modelId: mock.model.id, baseUrl: mock.model.baseUrl,
-					}]);
-					return resolved;
-				},
-			});
-			const settle = runtime.store.settleModelEffect.bind(runtime.store);
-			const delayed = spyOn(runtime.store, "settleModelEffect").mockImplementation(async (...args) => {
-				const effect = await runtime.store.getEffect(args[1].effectId);
-				if (effect?.requests?.length) {
-					settling.resolve();
-					await commit.promise;
-					if (mode === "write_failure") throw new Error("side settlement storage failed");
-				}
-				return await settle(...args);
-			});
+			const provider = mockProviderFetch("https://side.invalid/", async () => new Response("ok"));
+			let created: Awaited<ReturnType<typeof createRuntime>> | undefined;
+			let delayed: { mockRestore(): void } | undefined;
 			try {
+				created = await createRuntime(execution, async () => {
+					dispatchEntered.resolve();
+					return await finishPrompt.promise;
+				}, {
+					resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+						const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+						const route = config.routes.routes[0]!;
+						resolved.options.providerRequestHook = new ProviderAdmissionClient(
+							"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+						).createHook(undefined, auth, "", [{
+							...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+							providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+							credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+							modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+						}]);
+						return resolved;
+					},
+				});
+				const { runtime, cwd } = created;
+				const settle = runtime.store.settleModelEffect.bind(runtime.store);
+				delayed = spyOn(runtime.store, "settleModelEffect").mockImplementation(async (...args) => {
+					const effect = await runtime.store.getEffect(args[1].effectId);
+					if (effect?.requests?.length) {
+						settling.resolve();
+						await commit.promise;
+						if (mode === "write_failure") throw new Error("side settlement storage failed");
+					}
+					return await settle(...args);
+				});
 				const request = startRequest(execution, {
 					commandId: `side-${mode}`, agentInstanceId: `side-${mode}`,
 					agentInstanceRef: `grimoire://tasks/grimoire/side/agents/${mode}`,
@@ -2269,12 +2281,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			} finally {
 				commit.resolve();
 				finishPrompt.resolve(true);
-				delayed.mockRestore();
+				delayed?.mockRestore();
 				provider.mockRestore();
 				// The injected failure intentionally leaves an open effect for native recovery;
 				// shutdown may also reject its terminal transition, but must still close resources.
-				if (mode === "write_failure") await Promise.allSettled([runtime.dispose()]);
-				else await runtime.dispose();
+				if (mode === "write_failure") await Promise.allSettled([created?.runtime.dispose()]);
+				else await created?.runtime.dispose();
 			}
 		}, 30_000,
 	);
@@ -5099,4 +5111,16 @@ function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], atte
 		result.resolve(event);
 	});
 	return result.promise;
+}
+
+/** Answer only one mock provider origin; native runtime queries and all other traffic keep the real transport. */
+function mockProviderFetch(origin: string, respond: (url: string) => Promise<Response>) {
+	const original = globalThis.fetch;
+	return spyOn(globalThis, "fetch").mockImplementation(Object.assign(
+		(input: string | URL | Request, init?: RequestInit) => {
+			const url = input instanceof Request ? input.url : String(input);
+			return url.startsWith(origin) ? respond(url) : original(input, init);
+		},
+		{ preconnect: original.preconnect },
+	));
 }
