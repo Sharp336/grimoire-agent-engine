@@ -513,9 +513,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 				targetEngineGeneration: attempt.engine_generation,
 				bindingId: attempt.binding_id,
 				bindingGeneration: attempt.binding_generation,
-				...(expected !== undefined
-					? { startCommandId: attempt.command_id, startExpectedIntentRevision: expected }
-					: {}),
+				startCommandId: attempt.command_id,
+				...(expected !== undefined ? { startExpectedIntentRevision: expected } : {}),
 			};
 		} else {
 			const page = await this.records.query("command_agent_pending", [identity.agent_instance_id]);

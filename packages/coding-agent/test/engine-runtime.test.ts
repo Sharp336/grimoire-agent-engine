@@ -1758,9 +1758,24 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}, 30_000);
 	}
 
-	it.each([undefined, 0, 3])("projects original Start revision fields as an exact native target pair: %s", async expected => {
+	it.each([undefined, 0, 3])("projects the durable Start identity before binding without inventing browser CAS: %s", async expected => {
 		const execution = admittedExecution(createMockModel().model, modelRegistry);
-		const { runtime, cwd } = await createRuntime(execution, async () => true);
+		const resolve = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
+		let prebindingTarget: Record<string, unknown> | undefined;
+		const { runtime, cwd } = await createRuntime(execution, async () => true, {
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				prebindingTarget = await runtime.store.runtimeTarget({
+					principalId: attempt.expectedPrincipalId, agentInstanceRef: attempt.agentInstanceRef,
+					attemptId: attempt.attemptId,
+				});
+				validateRuntimeValue("nativeTarget", prebindingTarget);
+				expect(await runtime.store.getBinding(engineAgentInstanceId(attempt.agentInstanceRef))).toBeUndefined();
+				expect(await runtime.store.runtimeCommand("target-start", { principalId: "owner" })).toMatchObject({
+					attemptState: "running", lease: { held: true },
+				});
+				return resolve(config, frozen, attempt, resolverCwd, signal);
+			},
+		});
 		const agentInstanceRef = `${execution.taskRef}/agents/native-target`;
 		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
 		await runtime.store.registerAgent({ agentInstanceId, agentInstanceRef, principalId: "owner", authorityGeneration: 1 });
@@ -1779,11 +1794,20 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(pending.startExpectedIntentRevision).toBe(expected);
 		await admitRequest(runtime, request);
 		await runtime.drain();
+		expect(prebindingTarget).toMatchObject({
+			kind: "bound", attemptId: request.attemptId, startCommandId: request.commandId,
+		});
+		expect(prebindingTarget?.startExpectedIntentRevision).toBe(expected);
 		const bound = await runtime.store.runtimeTarget(params);
 		validateRuntimeValue("nativeTarget", bound);
 		expect(bound).toMatchObject({ kind: "bound", attemptId: request.attemptId });
-		expect(bound.startCommandId).toBe(expected === undefined ? undefined : request.commandId);
+		expect(bound.startCommandId).toBe(request.commandId);
 		expect(bound.startExpectedIntentRevision).toBe(expected);
+		if (expected !== undefined) {
+			const missingStart = { ...bound };
+			delete missingStart.startCommandId;
+			expect(() => validateRuntimeValue("nativeTarget", missingStart)).toThrow();
+		}
 		await runtime.dispose();
 	});
 

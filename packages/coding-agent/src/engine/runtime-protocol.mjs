@@ -124,7 +124,7 @@ function validProjection(name, value) {
   if (bound && encodedBytes(JSON.stringify(value)) > runtimeLimits[bound]) return false;
   if (name === 'nativeTargetRequest' && value.executionId !== undefined && value.attemptId === undefined) return false;
   if (name === 'nativeTarget' && value.kind === 'bound'
-    && Object.hasOwn(value, 'startCommandId') !== Object.hasOwn(value, 'startExpectedIntentRevision')) return false;
+    && Object.hasOwn(value, 'startExpectedIntentRevision') && !Object.hasOwn(value, 'startCommandId')) return false;
   if (name === 'nativeEventsRequest' && value.untilCursor !== undefined && value.untilCursor < value.afterCursor) return false;
   if (name === 'textSnapshot' || name === 'textAppend') {
     if (value.offset > value.endOffset || value.endOffset > value.totalBytes
