@@ -2290,7 +2290,8 @@ export class EngineRuntime {
 					if (binding.authorityGeneration !== request.authorityGeneration) {
 						throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
 					}
-					return { ...this.#snapshot(binding), executorChoice: binding.execution.choice, duplicate: true };
+					return { ...this.#snapshot(binding), executorChoice: binding.execution.choice, duplicate: true,
+						...await this.#acknowledgedQueueResult(request) };
 				}
 				throw new EngineTargetError(
 					"invalid_request",
@@ -2314,7 +2315,8 @@ export class EngineRuntime {
 				durableBinding.executionId === request.executionId &&
 				durableBinding.authorityGeneration === request.authorityGeneration
 			) {
-				return { ...durableBinding, executorChoice: priorAttempt.execution?.executor_choice, duplicate: true };
+				return { ...durableBinding, executorChoice: priorAttempt.execution?.executor_choice, duplicate: true,
+					...await this.#acknowledgedQueueResult(request) };
 			}
 			throw new EngineTargetError(
 				"too_late",
@@ -2569,7 +2571,7 @@ export class EngineRuntime {
 			intentCommandId: request.commandId,
 		};
 		const result = {
-			phase: queuedItem ? "consumed" : "applied",
+			phase: "applied",
 			manualHold: initial.manualHold,
 			intentRevision: initial.intentRevision,
 			executorChoice: choice,
@@ -2601,18 +2603,6 @@ export class EngineRuntime {
 				settleCommandReceipt: { outcome: "applied", detail: result },
 				...(restoreReceipt ? { restoreWorkspaceReceipt: restoreReceipt } : {}),
 				requireNew: true,
-				...(queuedItem
-					? {
-							inboxSessionId: queuedItem.sessionId,
-							inboxMutation: {
-								mutationId: request.mutationId!,
-								queueId: queuedItem.queueId,
-								expectedRevision: request.expectedRevision!,
-								op: "acknowledge" as const,
-							},
-							inboxMutationCausationCommandId: request.commandId,
-						}
-					: {}),
 			});
 			this.#notifyEvents(events);
 		let leaseError: unknown;
@@ -2633,6 +2623,7 @@ export class EngineRuntime {
 		}, LEASE_HEARTBEAT_MS);
 		heartbeat.unref?.();
 		let resolved: ResolvedEngineExecution | undefined;
+		let retainedQueuedBinding = false;
 		try {
 			if (binding) await this.#terminateBinding(binding, "requested");
 			const attempt: ExecutionAttemptIdentity = {
@@ -2671,13 +2662,30 @@ export class EngineRuntime {
 			binding.leaseHeartbeat = heartbeat;
 			await this.#commitAttemptTransition(binding, "running", [], {
 				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
-				inboxSessionId: binding.session.sessionId,
+				...(!queuedItem ? { inboxSessionId: binding.session.sessionId } : {}),
 			});
+			if (queuedItem) {
+				retainedQueuedBinding = true;
+				const identity = await this.#queuedInputIdentity(binding, request, queuedItem, preparedAttachments?.originalAttachments);
+				await this.#sendCommandContext(binding, request.context, request.commandId);
+				await binding.session.acceptEngineQueuedInput(queuedItem.deliveryPayload, images, identity);
+				await this.#commitAttemptTransition(binding, "running", [], {
+					transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
+					inboxSessionId: binding.session.sessionId,
+					inboxMutation: {
+						mutationId: request.mutationId!, queueId: queuedItem.queueId,
+						expectedRevision: request.expectedRevision!, op: "acknowledge",
+					},
+					inboxMutationCausationCommandId: request.commandId,
+				});
+			}
 		} catch (error) {
 			clearInterval(heartbeat);
+			const failedBinding = retainedQueuedBinding && binding?.attemptId === request.attemptId
+				? { ...this.#snapshot(binding), state: "released" as const } : initial;
 			if (binding?.attemptId === request.attemptId) await this.#discardBinding(binding);
 			else resolved?.dispose();
-			const events = await this.store.commitAttemptTransition(initial, "failed", [
+			const events = await this.store.commitAttemptTransition(failedBinding, "failed", [
 				{ kind: "failed", payload: { reason: safeEngineErrorDetail(error) } },
 			], { cause: safeEngineErrorDetail(error) });
 			this.#notifyEvents(events);
@@ -2709,14 +2717,14 @@ export class EngineRuntime {
 							? { clientMessageId: queuedItem.sourceEventId }
 							: {}),
 				},
-				preparedHistory?.dispatchKind ??
+				(queuedItem ? "resume_queued" : preparedHistory?.dispatchKind) ??
 					(explicitContinue &&
 					request.input === undefined &&
 					!queuedItem &&
 					!preparedAttachments?.originalAttachments.length
 						? "continue"
 						: undefined),
-				request.context,
+				queuedItem ? undefined : request.context,
 				{ agentInstanceRef: request.agentInstanceRef },
 				images,
 			);
@@ -2733,6 +2741,51 @@ export class EngineRuntime {
 			if (ownsPreparedSession && preparedSession)
 				await this.#discardPreparedSession(request.agentInstanceId, preparedSession);
 		}
+	}
+
+	async #acknowledgedQueueResult(request: EngineStartRequest): Promise<Pick<EngineStartResult, "queueId" | "queueRevision">> {
+		if (!request.queueId || request.expectedRevision === undefined) return {};
+		const item = await this.store.getInboxItemByQueueId(request.queueId);
+		return item?.disposition === "acknowledged" && item.attemptId === request.attemptId &&
+			item.revision === request.expectedRevision + 1
+			? { queueId: item.queueId, queueRevision: item.revision } : {};
+	}
+
+	async #queuedInputIdentity(
+		binding: LiveBinding,
+		request: EngineStartRequest,
+		item: EngineInboxItem,
+		originalAttachments?: SessionMessageIdentity["originalAttachments"],
+	): Promise<SessionMessageIdentity> {
+		const clientMessageId = request.clientMessageId ?? (item.sourceType === "user" ? item.sourceEventId : undefined);
+		let sourceCommandId = request.commandId;
+		let found = false;
+		for (const entry of binding.session.sessionManager.getContextBranch()) {
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			const sameClient = clientMessageId !== undefined && entry.clientMessageId === clientMessageId;
+			const command = entry.sourceCommandId ? await this.store.getStartConversationIdentity(entry.sourceCommandId) : undefined;
+			const payload = command?.serializedCommand
+				? (JSON.parse(command.serializedCommand) as { payload?: { queueId?: string; expectedRevision?: number } }).payload
+				: undefined;
+			if (command?.operation !== "start" || command.agentInstanceId !== binding.agentInstanceId ||
+				command.principalId !== binding.principalId || !command.bindingSnapshot ||
+				!sameSemanticBinding(command.bindingSnapshot, request.bindingSnapshot) ||
+				payload?.queueId !== item.queueId || payload.expectedRevision !== request.expectedRevision) {
+				if (sameClient) throw new EngineTargetError("stale_target", "Queued user identity belongs to another admission");
+				continue;
+			}
+			const attempt = command.attemptId ? await this.store.getAttempt(command.attemptId) : undefined;
+			if (found || !attempt || !TERMINAL_ATTEMPT_STATES.has(attempt.state) ||
+				!binding.session.agent.state.messages.includes(entry.message))
+				throw new EngineTargetError("stale_target", "Queued input does not have one recoverable native entry");
+			found = true;
+			sourceCommandId = entry.sourceCommandId!;
+		}
+		return this.#withLaunchSnapshot(binding, {
+			sourceCommandId,
+			...(clientMessageId !== undefined ? { clientMessageId } : {}),
+			...(originalAttachments ? { originalAttachments } : {}),
+		}, request.agentInstanceRef);
 	}
 
 	async #discardPreparedSession(agentInstanceId: string, sessionManager: SessionManager): Promise<void> {
@@ -4769,6 +4822,28 @@ export class EngineRuntime {
 		}
 	}
 
+	#withLaunchSnapshot(
+		binding: LiveBinding,
+		identity: SessionMessageIdentity,
+		agentInstanceRef?: string,
+	): SessionMessageIdentity {
+		return {
+			...identity,
+			launchSnapshot: {
+				schema: "engine.launch_snapshot.v2",
+				agentInstanceId: binding.agentInstanceId,
+				agentInstanceRef: agentInstanceRef ?? binding.bindingSnapshot!.agentInstanceRef,
+				executionId: binding.executionId,
+				attemptId: binding.attemptId,
+				dispatchRef: binding.dispatchRef,
+				dispatchHash: binding.dispatchHash,
+				executionDigest: binding.executionDigest,
+				continuationDigest: binding.continuationDigest,
+				selectedRouteRef: binding.execution.choice.selected.route_ref,
+			},
+		};
+	}
+
 	async #runAdmittedPrompt(
 		binding: LiveBinding,
 		input: string,
@@ -4781,23 +4856,8 @@ export class EngineRuntime {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
 		// The native user entry keeps the Attempt's immutable admitted execution, not a profile selection.
-		if (kind === "prompt" && identity?.sourceCommandId) {
-			identity = {
-				...identity,
-				launchSnapshot: {
-					schema: "engine.launch_snapshot.v2",
-					agentInstanceId: binding.agentInstanceId,
-					agentInstanceRef: selection?.agentInstanceRef ?? binding.bindingSnapshot!.agentInstanceRef,
-					executionId: binding.executionId,
-					attemptId,
-					dispatchRef: binding.dispatchRef,
-					dispatchHash: binding.dispatchHash,
-					executionDigest: binding.executionDigest,
-					continuationDigest: binding.continuationDigest,
-					selectedRouteRef: binding.execution.choice.selected.route_ref,
-				},
-			};
-		}
+		if (kind === "prompt" && identity?.sourceCommandId)
+			identity = this.#withLaunchSnapshot(binding, identity, selection?.agentInstanceRef);
 		try {
 			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
 			if (kind === "pending_tool") {

@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type {
 	EngineControlInitiator,
 	EngineEvent,
+	EngineInboxItem,
 	EngineOrdinaryEvent,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
@@ -356,7 +357,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("refuses missing or unsupported images before model dispatch and leaves failed queued delivery pending", async () => {
 		const mock = createMockModel({ handler: { content: ["must not run"] } });
 		const execution = admittedExecution(mock.model, modelRegistry);
-		const { runtime, cwd } = await createRuntime(execution, undefined);
+		const vision = createMockModel({ handler: { content: ["image accepted"] } });
+		vision.input.push("image");
+		const visionExecution = admittedExecution(vision.model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, undefined, {}, [visionExecution]);
 		const png = Buffer.from(
 			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
 			"base64",
@@ -405,8 +409,31 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		};
 		// The queued message owns its accepted image, so delivery fails on the route, not on the upload.
 		await expect(admitRequest(runtime, queuedRequest)).rejects.toMatchObject({ code: "attachment_requires_images" });
-		expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
+		expect(await runtime.store.getInboxItemByQueueId(queued.item.queueId)).toMatchObject({
+			disposition: "pending", sessionId: queued.item.sessionId, revision: queued.item.revision,
+		});
 		expect(mock.calls).toHaveLength(0);
+		expect(await admitRequest(runtime, queuedRequest)).not.toHaveProperty("queueRevision");
+		expect((await runtime.store.records.get("command", queuedRequest.commandId)).value).toMatchObject({
+			receipt: { outcome: "applied", detail: { phase: "applied" } },
+		});
+		const delivered = await admitRequest(runtime, startRequest(visionExecution, {
+			commandId: "queued-image-valid", attemptId: "queued-image-valid-attempt", executionId: "queued-image-valid-execution",
+			agentInstanceId: request.agentInstanceId, agentInstanceRef: request.agentInstanceRef,
+		}, {
+			cwd, principalId: "alice", queueId: queued.item.queueId, expectedRevision: queued.item.revision,
+			mutationId: "consume-valid-image", explicitContinue: true,
+			expectedIntentRevision: (await runtime.store.intent(request.agentInstanceId)).intentRevision,
+		}));
+		await runtime.drain();
+		expect(vision.calls).toHaveLength(1);
+		expect(await runtime.store.getInboxItemByQueueId(queued.item.queueId)).toMatchObject({
+			disposition: "acknowledged", revision: queued.item.revision + 1, attemptId: delivered.attemptId,
+		});
+		const imageHistory = await nativeSession(runtime, delivered.sessionFile!);
+		expect(imageHistory.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"))
+			.toMatchObject([{ clientMessageId: "image-message", sourceCommandId: "queued-image-valid",
+				originalAttachments: [{ name: "pixel.png" }] }]);
 	});
 
 	it("runs two independent roots on one shared runtime and disposes only the targeted root", async () => {
@@ -1609,6 +1636,121 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect((await runtime.store.getInboxItemByQueueId(queued!.queueId))?.disposition).toBe("acknowledged");
 		} finally { await runtime.dispose(); }
 	});
+
+	for (const sourceType of ["user", "agent"] as const) {
+		it(`retains ${sourceType} queued input across an ACK failure and reuses only its exact native entry`, async () => {
+			const mock = createMockModel({ handler: { content: ["delivered"] } });
+			const execution = admittedExecution(mock.model, modelRegistry);
+			const resolver = execution.optionsFor({}).resolveExecution!;
+			const setup = await createRuntime(execution, undefined, {
+				resolveExecution: (config, frozen, attempt, cwd, signal) => {
+					if (attempt.attemptId === "queued-seed-attempt" || attempt.attemptId === "queued-material-cut-attempt")
+						throw new Error("Material unavailable");
+					return resolver(config, frozen, attempt, cwd, signal);
+				},
+			});
+			let runtime = setup.runtime;
+			const agentInstanceId = `queued-recovery-${sourceType}`;
+			const agentInstanceRef = `${execution.taskRef}/agents/${agentInstanceId}`;
+			const release = async (commandId: string, item: EngineInboxItem) => startRequest(execution, {
+				commandId, agentInstanceId, agentInstanceRef, attemptId: `${commandId}-attempt`, executionId: `${commandId}-execution`,
+			}, {
+				cwd: setup.cwd, principalId: "owner", queueId: item.queueId, expectedRevision: item.revision,
+				mutationId: `${commandId}-consume`, explicitContinue: true,
+				expectedIntentRevision: (await runtime.store.intent(agentInstanceId)).intentRevision,
+			});
+			await expect(admitRequest(runtime, startRequest(execution, {
+				commandId: "queued-seed", agentInstanceId, agentInstanceRef,
+				attemptId: "queued-seed-attempt", executionId: "queued-seed-execution",
+			}, { cwd: setup.cwd, principalId: "owner", input: "seed" }))).rejects.toThrow("Material unavailable");
+			const first = await runtime.enqueueAgentInbox(agentInstanceId, {
+				sourceEventId: "queued-input-one", sourceType, sender: "peer", body: "identical queued text",
+			});
+			await expect(admitRequest(runtime, await release("queued-material-cut", first.item))).rejects.toThrow("Material unavailable");
+			expect(await runtime.store.getInboxItemByQueueId(first.item.queueId)).toMatchObject({
+				disposition: "pending", sessionId: first.item.sessionId, revision: first.item.revision,
+			});
+			const request = await release("queued-accept-a", first.item);
+			request.context = "QUEUED_START_CONTEXT_ONCE";
+			const commit = runtime.store.commitAttemptTransition.bind(runtime.store);
+			const cut = spyOn(runtime.store, "commitAttemptTransition").mockImplementation(async (...args) => {
+				if (args[3]?.inboxMutation?.queueId === first.item.queueId) throw new Error("ACK commit cut");
+				return commit(...args);
+			});
+			try {
+				await expect(admitRequest(runtime, request)).rejects.toThrow("ACK commit cut");
+			} finally { cut.mockRestore(); }
+			expect(mock.calls).toHaveLength(0);
+			expect(await runtime.store.getInboxItemByQueueId(first.item.queueId)).toMatchObject({
+				disposition: "pending", sessionId: first.item.sessionId, revision: first.item.revision,
+			});
+			const retained = (await runtime.store.getBinding(agentInstanceId))!;
+			const original = await nativeSession(runtime, retained.sessionFile!);
+			const users = original.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
+			expect(users).toHaveLength(1);
+			expect(users[0]).toMatchObject({ sourceCommandId: request.commandId, message: { attribution: "user" } });
+			if (sourceType === "agent") expect(users[0]).not.toHaveProperty("clientMessageId");
+			else expect(users[0]).toHaveProperty("clientMessageId", first.item.sourceEventId);
+			expect(await admitRequest(runtime, request)).not.toHaveProperty("queueRevision");
+			expect((await runtime.store.records.get("command", request.commandId)).value).toMatchObject({
+				receipt: { outcome: "applied", detail: { phase: "applied" } },
+			});
+			await runtime.dispose();
+			runtime = await openRuntime(setup.options);
+			expect((await runtime.store.intent(agentInstanceId)).manualHold).toBeTrue();
+			expect(mock.calls).toHaveLength(0);
+			if (sourceType === "agent") {
+				const commitReopened = runtime.store.commitAttemptTransition.bind(runtime.store);
+				const omitLoaded = spyOn(runtime.store, "commitAttemptTransition").mockImplementation(async (...args) => {
+					const events = await commitReopened(...args);
+					if (args[0].commandId === "queued-not-loaded" && args[3]?.transcriptCheckpoint && !args[3]?.inboxSessionId)
+						runtime.agentRegistry.get(args[0].engineAgentId)!.session!.agent.replaceMessages([]);
+					return events;
+				});
+				try {
+					await expect(admitRequest(runtime, await release("queued-not-loaded", first.item)))
+						.rejects.toMatchObject({ code: "stale_target" });
+				} finally { omitLoaded.mockRestore(); }
+				expect(await runtime.store.getInboxItemByQueueId(first.item.queueId)).toMatchObject({
+					disposition: "pending", sessionId: first.item.sessionId, revision: first.item.revision,
+				});
+				const unchanged = await nativeSession(runtime, (await runtime.store.getBinding(agentInstanceId))!.sessionFile!);
+				expect(unchanged.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"))
+					.toEqual(users);
+				expect(mock.calls).toHaveLength(0);
+			}
+			const accepted = await admitRequest(runtime, await release("queued-accept-b", first.item));
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(1);
+			const text = (message: (typeof mock.calls)[number]["context"]["messages"][number]) =>
+				typeof message.content === "string" ? message.content :
+					message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
+			expect(mock.calls[0].context.messages.filter(message => message.role === "user" && text(message) === first.item.deliveryPayload))
+				.toHaveLength(1);
+			expect(JSON.stringify(mock.calls[0].context.messages).split("QUEUED_START_CONTEXT_ONCE")).toHaveLength(2);
+			expect(await runtime.store.getInboxItemByQueueId(first.item.queueId)).toMatchObject({
+				disposition: "acknowledged", revision: first.item.revision + 1, attemptId: accepted.attemptId,
+			});
+			const restored = await nativeSession(runtime, accepted.sessionFile!);
+			expect(restored.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user")).toEqual(users);
+			const ack = (await runtime.store.pendingEvents()).filter(event =>
+				event.kind === "inbox_changed" && event.payload?.action === "acknowledge" && event.payload?.queueId === first.item.queueId);
+			expect(ack).toMatchObject([{ causationCommandId: "queued-accept-b", payload: { revision: first.item.revision + 1 } }]);
+			const second = await runtime.enqueueAgentInbox(agentInstanceId, {
+				sourceEventId: "queued-input-two", sourceType, sender: "peer", body: "identical queued text",
+			});
+			const secondAccepted = await admitRequest(runtime, await release("queued-accept-c", second.item));
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[1].context.messages.filter(message => message.role === "user" && text(message) === first.item.deliveryPayload))
+				.toHaveLength(2);
+			const final = await nativeSession(runtime, secondAccepted.sessionFile!);
+			const finalUsers = final.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
+			expect(finalUsers).toMatchObject([{ sourceCommandId: "queued-accept-a" }, { sourceCommandId: "queued-accept-c" }]);
+			if (sourceType === "agent") for (const entry of finalUsers) expect(entry).not.toHaveProperty("clientMessageId");
+			await runtime.dispose();
+		}, 30_000);
+	}
 
 	it.each([undefined, 0, 3])("projects original Start revision fields as an exact native target pair: %s", async expected => {
 		const execution = admittedExecution(createMockModel().model, modelRegistry);

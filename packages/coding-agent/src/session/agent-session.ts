@@ -5855,6 +5855,20 @@ export class AgentSession {
 		await this.#queueUserMessage(expandedText, images, "steer", identity, context, durableBeforeEnqueue);
 	}
 
+	/** Internal Engine inbox admission. Persists once without scheduling a provider turn. */
+	async acceptEngineQueuedInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		identity: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
+		context?: CustomMessagePayload,
+	): Promise<void> {
+		if (!identity.sourceCommandId || (!identity.clientMessageId && identity.originalAttachments?.length))
+			throw new Error("Engine queued input requires its original command and attachment identity");
+		if (text.startsWith("/")) this.#throwIfExtensionCommand(text);
+		await this.#queueUserMessage(expandPromptTemplate(text, [...this.#promptTemplates]),
+			images, "steer", identity, context, true, true);
+	}
+
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
@@ -5919,6 +5933,7 @@ export class AgentSession {
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
 		durableBeforeEnqueue = false,
+		engineQueuedInput = false,
 	): Promise<void> {
 		this.#userInterruptSuppressed = false;
 		const normalizedImages = await this.#normalizeImagesForModel(images);
@@ -5942,20 +5957,21 @@ export class AgentSession {
 		const message = {
 			role: "user" as const,
 			content,
-			...(mode === "steer" ? { steering: true as const } : {}),
+			...(mode === "steer" && !engineQueuedInput ? { steering: true as const } : {}),
 			attribution: "user" as const,
 			timestamp: Date.now(),
 		};
 		let alreadyDelivered = false;
 		if (durableBeforeEnqueue) {
-			if (!identity?.sourceCommandId || !identity.clientMessageId)
+			if (!identity?.sourceCommandId || (!engineQueuedInput && !identity.clientMessageId))
 				throw new Error("Durable steering requires exact command and user message identities");
 			const sourceCommandId = identity.sourceCommandId;
 			const clientMessageId = identity.clientMessageId;
 			const branch = this.sessionManager.getContextBranch();
 			const prior = branch.find(
 				entry => entry.type === "message" && entry.message.role === "user" &&
-					(entry.sourceCommandId === sourceCommandId || entry.clientMessageId === clientMessageId),
+					(entry.sourceCommandId === sourceCommandId ||
+						(clientMessageId !== undefined && entry.clientMessageId === clientMessageId)),
 			);
 			if (prior) {
 				if (
@@ -5970,8 +5986,13 @@ export class AgentSession {
 					throw new Error("Durable steering command identity conflicts with its retained user message");
 				identity = { ...identity, sourceCommandId: prior.sourceCommandId };
 				const sameMessage = (queued: AgentMessage) =>
-					queued.role === "user" && this.#messageIdentities.get(queued)?.clientMessageId === clientMessageId;
-				alreadyDelivered = this.agent.peekSteeringQueue().some(sameMessage) || this.agent.state.messages.some(sameMessage);
+					queued.role === "user" &&
+					((prior.sourceCommandId !== undefined && this.#messageIdentities.get(queued)?.sourceCommandId === prior.sourceCommandId) ||
+						(clientMessageId !== undefined && this.#messageIdentities.get(queued)?.clientMessageId === clientMessageId));
+				alreadyDelivered = this.agent.state.messages.includes(prior.message) ||
+					this.agent.peekSteeringQueue().some(sameMessage) || this.agent.state.messages.some(sameMessage);
+				if (engineQueuedInput && !alreadyDelivered)
+					throw Object.assign(new Error("Retained queued input is not in the loaded native context"), { code: "stale_target" });
 			}
 			if (!alreadyDelivered && contextMessage && !branch.some(entry =>
 				entry.type === "custom_message" &&

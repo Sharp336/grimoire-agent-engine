@@ -1047,7 +1047,7 @@ export async function dispatchEngineCommand(options: {
 				);
 				if (started.queueId && !started.executorChoice) throw new EngineRoutingQueuedError(started.queueId);
 				return {
-					phase: queued ? "consumed" : "applied",
+					phase: queued && started.queueRevision !== undefined ? "consumed" : "applied",
 					manualHold: started.manualHold ?? false,
 					intentRevision: started.intentRevision ?? 0,
 					...(started.historyEdit ? { historyEdit: started.historyEdit } : {}),

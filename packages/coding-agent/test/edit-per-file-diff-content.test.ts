@@ -163,8 +163,35 @@ describe("executeReplace — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "bar.txt"));
 		expect(result.details?.oldText).toBe(originalContent);
 		expect(result.details?.newText).toBe("line one\nline TWO\nline three\n");
+		expect(await fs.readFile(path.join(tempDir, "bar.txt"), "utf8")).toBe(result.details?.newText);
 		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
 		expect(text).toContain("[bar.txt]\n1:line one\n2:line TWO\n3:line three");
 		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
+	});
+
+	test("ordinary replace tool commits the bytes reported to its caller", async () => {
+		const target = path.join(tempDir, "ordinary.txt");
+		await fs.writeFile(target, "alpha\nbeta\n");
+		const tool = new EditTool(makeSession(tempDir), "replace");
+		const result = await tool.execute("ordinary-replace", { path: target, old_string: "beta", new_string: "gamma" });
+		expect(await fs.readFile(target, "utf8")).toBe("alpha\ngamma\n");
+		expect(result.details?.newText).toBe(await fs.readFile(target, "utf8"));
+	});
+
+	test("a denied replacement write neither reports an applied edit nor changes the file", async () => {
+		const target = path.join(tempDir, "denied.txt");
+		await fs.writeFile(target, "original\n");
+		const denied = Object.assign(new Error("Write denied"), { code: "EACCES" });
+		let applied = false;
+		await expect(executeReplace({
+			session: makeSession(tempDir), path: target,
+			params: { old_string: "original", new_string: "changed" },
+			allowFuzzy: false, fuzzyThreshold: DEFAULT_FUZZY_THRESHOLD,
+			writethrough: async () => { throw denied; },
+			beginDeferredDiagnosticsForPath: noopBeginDeferred,
+			onApplied: async () => { applied = true; },
+		})).rejects.toBe(denied);
+		expect(await fs.readFile(target, "utf8")).toBe("original\n");
+		expect(applied).toBe(false);
 	});
 });

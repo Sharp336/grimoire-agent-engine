@@ -25,7 +25,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import * as activeRepoContext from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
+import { logger, removeSyncWithRetries, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -1952,7 +1953,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
 			for (const name of [
 				"generate_image",
-				"tts",
 				"default_active_tool",
 				"default_inactive_tool",
 				"sdk_custom_tool",
@@ -1983,8 +1983,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// Explicit and force-included tools stay top-level. Ambient custom and
 			// extension capabilities mount through the device-only write transport.
 			const mountedNames = normal.getXdevToolEntries().map(entry => entry.name);
-			expect(mountedNames).toEqual(expect.arrayContaining(["tts", "default_active_tool", "sdk_custom_tool"]));
-			expect(activeToolNames).not.toContain("tts");
+			expect(mountedNames).toEqual(expect.arrayContaining(["default_active_tool", "sdk_custom_tool"]));
 			expect(activeToolNames).not.toContain("default_active_tool");
 			expect(activeToolNames).not.toContain("sdk_custom_tool");
 			expect(normal.getAllToolNames()).toEqual(
@@ -1992,7 +1991,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					"generate_image",
 					"read",
 					"yield",
-					"tts",
 					"default_active_tool",
 					"sdk_custom_tool",
 				]),
@@ -2242,16 +2240,16 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			let deactivation: Promise<void> | undefined;
 			try {
 				const handlers = await captureCursorExecHandlers(session, cursorModel);
-				const originalSetActiveToolPresentation = session.setActiveToolPresentation.bind(session);
-				vi.spyOn(session, "setActiveToolPresentation").mockImplementation(async (...args) => {
+				const resolveRepoContext = activeRepoContext.resolveActiveRepoContext;
+				vi.spyOn(activeRepoContext, "resolveActiveRepoContext").mockImplementation(async (...args) => {
 					rebuildStarted.resolve();
 					await releaseRebuild.promise;
-					return originalSetActiveToolPresentation(...args);
+					return resolveRepoContext(...args);
 				});
 
 				deactivation = session.setActiveToolsByName(["read"]);
 				try {
-					await rebuildStarted.promise;
+					await withTimeout(rebuildStarted.promise, 3_000, "Tool removal did not reach its prompt rebuild");
 					expect(session.getActiveToolNames()).toContain("write");
 					const revoked = await handlers.delete({
 						toolCallId: "sdk-write-revoked-during-rebuild",
@@ -2264,6 +2262,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				}
 				await deactivation;
 				expect(session.getActiveToolNames()).not.toContain("write");
+				await session.setActiveToolsByName(["read", "write"]);
+				const allowed = await handlers.delete({ toolCallId: "sdk-write-restored-after-rebuild", path: target } as never);
+				expect(allowed.isError).toBe(false);
+				expect(fs.existsSync(target)).toBe(false);
 			} finally {
 				releaseRebuild.resolve();
 				await deactivation?.catch(() => undefined);

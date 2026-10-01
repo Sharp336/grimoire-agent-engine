@@ -9,6 +9,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
+import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString, replaceText } from "../diff";
@@ -1181,8 +1182,16 @@ export async function executeReplace(
 		bom + restoreLineEndings(result.content, originalEnding),
 	);
 
-	// Route through ACP bridge when available; skips internal artifacts.
-	let diagnostics: FileDiagnosticsResult | undefined;
+	// The shared writer owns file persistence and any deferred LSP post-processing.
+	const diagnostics: FileDiagnosticsResult | undefined = await writethrough(
+		absolutePath,
+		finalContent,
+		signal,
+		Bun.file(absolutePath),
+		batchRequest,
+		dst => (dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined),
+	);
+	invalidateFsScanAfterWrite(absolutePath);
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
 	await onApplied?.({ path: absolutePath, prev: rawContent, next: finalContent });
 	const editResult = createEditResult({
