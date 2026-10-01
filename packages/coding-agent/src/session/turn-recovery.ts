@@ -1747,6 +1747,8 @@ export class TurnRecovery {
 		currentSelector: string,
 		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
 	): Promise<boolean> {
+		const generation = this.#host.promptGeneration();
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || options?.signal?.aborted) return false;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -1755,6 +1757,8 @@ export class TurnRecovery {
 		if (this.#turnRetryPolicy?.orderedRouteFallback &&
 			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
 			return false;
+		if (options?.signal?.aborted || this.#host.abortInProgress() || this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation) return false;
 		let apiKey = options?.apiKey;
 		if (apiKey === undefined) {
 			try {
@@ -1768,7 +1772,8 @@ export class TurnRecovery {
 			if (this.#turnRetryPolicy?.orderedRouteFallback) return false;
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return false;
+		if (options?.signal?.aborted || this.#host.abortInProgress() || this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation) return false;
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.

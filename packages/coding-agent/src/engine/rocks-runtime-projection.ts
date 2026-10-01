@@ -410,7 +410,7 @@ export async function projectedHolds(
 				work.value.materializedBytes += Buffer.byteLength(JSON.stringify(hold ?? null));
 				work.check();
 			}
-			if (hold)
+			if (hold && (hold.local_only !== true || current.agent_instance_id === identity.agent_instance_id))
 				holds.push({
 					sourceAgentInstanceRef: current.agent_instance_ref,
 					commandId: hold.command_id,

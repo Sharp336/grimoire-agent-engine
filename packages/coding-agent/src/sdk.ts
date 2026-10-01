@@ -1774,7 +1774,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			enableLsp,
 			lspReadOnly,
-			enableIrc: restrictToolNames ? false : options.enableIrc,
+			enableIrc: restrictToolNames && !normalizeToolNames(options.toolNames ?? []).includes("hub")
+				? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;

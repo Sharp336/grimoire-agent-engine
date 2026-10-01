@@ -1242,6 +1242,50 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		expect((await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).agents).toHaveLength(1);
 		await expect(store.runtimeEvents(eventsRequest("old-epoch", 0))).rejects.toThrow("epoch");
 	});
+	it.each(["pending", "dropped", "restart"] as const)(
+		"keeps edited inbox review local and durable through %s settlement", async outcome => {
+			const store = await createStore();
+			const parent = await active(store, "review-parent");
+			const childIdentity = identity("review-child", parent.agentInstanceId);
+			await store.registerAgent(childIdentity);
+			const child = await admittedFixtureStart(store, binding("review-child"), childIdentity.agentInstanceRef,
+				childIdentity.principalId, admittedExecutionFixture(childIdentity.bindingSnapshot.taskRef!));
+			const oldSession = "review-old-session";
+			const newSession = "review-new-session";
+			const queued = await store.enqueueInboxItem({ ...parent, sessionId: oldSession }, {
+				sourceEventId: "review-pending", sourceType: "user", body: "old context input", deliverAt: 0, wakeIntent: true,
+			});
+			await store.commitAttemptTransition(parent, "running", [], {
+				inboxSessionId: newSession, pendingInboxSourceSessionId: oldSession,
+			});
+			await store.commitAttemptTransition({ ...parent, state: "paused" }, "paused", [{ kind: "paused" }]);
+			expect(await store.nextInboxWakeAt(parent.engineGeneration)).toBeUndefined();
+			expect(await store.claimDueInboxWakes(parent.engineGeneration, Date.now() + 60_000)).toEqual([]);
+			expect(await store.getInboxItem(newSession, queued.item.queueId)).toMatchObject({
+				queueId: queued.item.queueId, position: queued.item.position, revision: queued.item.revision,
+				deliveryPayload: "old context input", disposition: "pending",
+			});
+			if (outcome === "dropped")
+				await store.mutateInboxItem({ ...parent, sessionId: newSession }, {
+					op: "drop", mutationId: "review-drop", queueId: queued.item.queueId, expectedRevision: queued.item.revision,
+				});
+			if (outcome === "restart") await store.interruptGeneration(await store.nextEngineGeneration());
+			else await store.commitAttemptTransition({ ...parent, state: "released" }, "cancelled", [{ kind: "cancelled" }]);
+			const intent = await store.intent(parent.agentInstanceId);
+			expect(intent.manualHold).toBe(outcome !== "dropped");
+			if (outcome === "pending") {
+				expect((await store.intent(child.agentInstanceId)).manualHold).toBe(false);
+				expect((await store.getAttempt(child.attemptId))?.state).toBe("running");
+				const effect = await store.startToolEffect(child, {
+					effectId: "review-child-effect", toolCallId: "review-child-read",
+					toolName: "read", policy: "tracked", inputHash: "review-child-input",
+				});
+				expect(effect.kind).toBe("tool_started");
+				expect(await store.nextInboxWakeAt(parent.engineGeneration)).toBeUndefined();
+			}
+		},
+	);
+
 	it("preserves a local child hold when its ancestor resumes and rejects stale controls", async () => {
 		const store = await createStore();
 		const root = identity("root"),

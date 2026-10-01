@@ -127,6 +127,23 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		removeSyncWithRetries(registryAuthDir);
 	});
 
+	it.each([
+		{ requested: ["read", "hub"], enableIrc: undefined, depth: 2, allowed: true },
+		{ requested: ["read"], enableIrc: undefined, depth: 2, allowed: false },
+		{ requested: ["read", "hub"], enableIrc: false, depth: 2, allowed: false },
+		{ requested: ["read", "hub"], enableIrc: undefined, depth: 0, allowed: false },
+	])("keeps restricted SDK hub admission within its explicit IRC ceiling: %j", async fixture => {
+		const { session } = await createAgentSession({
+			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: fixture.requested,
+			enableIrc: fixture.enableIrc,
+			settings: Settings.isolated({ "task.maxRecursionDepth": fixture.depth }),
+		});
+		try {
+			expect(session.getEnabledToolNames().includes("hub")).toBe(fixture.allowed);
+			expect(session.getToolByName("hub") !== undefined).toBe(fixture.allowed);
+		} finally { await session.dispose(); }
+	});
+
 	it("excludes defaultInactive extension tools from the initial active set unless explicitly requested", async () => {
 		const tempDir = makeTempDir();
 

@@ -107,6 +107,8 @@ export interface RocksHold {
 	kind: "pause" | "stop" | "recovery";
 	command_id: string;
 	generation: number;
+	/** History queue review is local; absent means the usual inherited hold. */
+	local_only?: true;
 }
 export type RocksEvent = EngineEvent & {
 	event_id: number;

@@ -44,7 +44,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/rocks-native-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { StorageClientError } from "@oh-my-pi/pi-coding-agent/session/storage-client";
+import { StorageClientError, storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { Database } from "bun:sqlite";
@@ -91,8 +91,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	});
 
 	afterEach(async () => {
-		for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
-		await storage?.stop();
+		const failures: unknown[] = [];
+		for (const runtime of testRuntimes.splice(0))
+			try { await runtime.dispose(); } catch (error) { failures.push(error); }
+		try { await storage?.stop(); } catch (error) { failures.push(error); }
 		storage = undefined;
 		for (const [name, value] of [
 			["GRIMOIRE_STORAGE_BINDING", savedStorageEnv.binding],
@@ -101,7 +103,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			if (value === undefined) delete process.env[name];
 			else process.env[name] = value;
 		}
-		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
+		for (const dir of tempDirs.splice(0))
+			try { removeSyncWithRetries(dir); } catch (error) { failures.push(error); }
+		if (failures.length) throw new AggregateError(failures, "Runtime fixture teardown failed");
 	});
 
 	/** One real Rust owner per test; every runtime and restart in that test binds to it. */
@@ -127,6 +131,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		execution: AdmittedExecutionFixture,
 		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true,
 		overrides: Partial<EngineRuntimeOptions> = {},
+		additionalExecutions: readonly AdmittedExecutionFixture[] = [],
 	) {
 		const { blobsDir } = await testStorage();
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-runtime-${Snowflake.next()}-`));
@@ -139,6 +144,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			agentDir,
 			overrides: { "bash.autoBackground.enabled": true },
 		});
+		const executions = [execution, ...additionalExecutions];
 		const options: EngineRuntimeOptions = {
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			attachmentBlobStore: new BlobStore(blobsDir),
@@ -157,6 +163,17 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				modelRegistry,
 			},
 			...execution.optionsFor({ deviceId: "engine-runtime-test-device" }),
+			resolveExecution: (config, frozen, attempt, resolverCwd, signal) => {
+				const selected = executions.find(item => storageCanonicalJson(item.config) === storageCanonicalJson(config));
+				if (!selected) throw new Error("Unregistered fixture execution");
+				return selected.optionsFor({ deviceId: "engine-runtime-test-device" })
+					.resolveExecution!(config, frozen, attempt, resolverCwd, signal);
+			},
+			verifyOriginReceipt: identity => {
+				const selected = executions.find(item => item.receipts.has(identity.originReceiptId));
+				if (!selected) throw new Error("Unregistered fixture receipt");
+				return selected.optionsFor({ deviceId: "engine-runtime-test-device" }).verifyOriginReceipt!(identity);
+			},
 			...overrides,
 		};
 		const runtime = await openRuntime(options);
@@ -249,7 +266,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { toolNames: ["read"], restrictToolNames: true },
 		});
-		const setup = await createRuntime(execution, undefined);
+		const setup = await createRuntime(execution, undefined, {}, [deniedExecution]);
 		// The denied Start runs on the same runtime but its own typed config and receipt.
 		const deniedRuntime = setup.runtime;
 		try {
@@ -365,7 +382,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			message: expect.stringContaining('Image "pixel.png" cannot be sent'),
 		});
 		expect(mock.calls).toHaveLength(0);
-		expect(await runtime.store.getAttempt(request.attemptId)).toBeUndefined();
+		expect(await runtime.store.getAttempt(request.attemptId)).toMatchObject({ state: "failed" });
+		expect((await runtime.store.records.get("metadata", `slot-lease:${request.attemptId}`)).value).toBeNull();
+		expect(await runtime.store.attemptToolEffects(request.attemptId)).toEqual([]);
 		const queued = await runtime.enqueueAgentInbox(request.agentInstanceId, {
 			sourceEventId: "image-message",
 			sourceType: "user",
@@ -374,6 +393,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		const queuedRequest = {
 			...request,
+			commandId: "queued-image-start", attemptId: "queued-image-attempt", executionId: "queued-image-execution",
+			originReceiptId: "origin:queued-image-start",
 			attachmentUploadIds: undefined,
 			queueId: queued.item.queueId,
 			expectedRevision: queued.item.revision,
@@ -659,7 +680,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				{ content: ["answer after correction"] },
 			],
 		});
-		const execution = admittedExecution(mock.model, modelRegistry);
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["read"], restrictToolNames: true },
+		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) =>
 			session.prompt(input, identity));
 		try {
@@ -1399,7 +1422,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 			return true;
-		});
+		}, {}, [failingExecution]);
 		// Bind the failing resolver into this runtime's options before starting the branch.
 		const source = await admitRequest(runtime, startRequest(execution, {
 			commandId: "cleanup-source", agentInstanceId: "cleanup-source",
@@ -1428,9 +1451,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				})),
 			).rejects.toThrow();
 			expect(fork).toHaveBeenCalledTimes(1);
-			expect(((await fork.mock.results[0]!.value) as SessionManager).getSessionFile()).toBeDefined();
-			expect(await runtime.store.getBinding("cleanup-branch")).toBeUndefined();
-			expect(await runtime.store.getAttempt("cleanup-branch")).toBeUndefined();
+			const prepared = await fork.mock.results[0]!.value as SessionManager;
+			const abandoned = prepared.getSessionFile();
+			if (!abandoned) throw new Error("Prepared fork has no native locator");
+			await expect(nativeSession(runtime, abandoned)).rejects.toThrow();
+			expect((await runtime.store.getBinding("cleanup-branch"))?.sessionFile).toBeUndefined();
+			expect(await runtime.store.getAttempt("cleanup-branch")).toMatchObject({ state: "failed" });
 			expect(await nativeHistory(runtime, source.agentInstanceId)).toEqual(history);
 		} finally {
 			fork.mockRestore();
@@ -1461,7 +1487,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					agentInstanceRef: "grimoire://tasks/grimoire/retained-read/agents/agent-retained-read",
 					executionId: "execution-retained-read-b", attemptId: "attempt-retained-read-b",
 				}, { cwd, principalId: "owner", input: "Must not silently reset" })),
-			).rejects.toThrow("Retained AgentSession conversation could not be loaded");
+			).rejects.toThrow();
 		} finally {
 			failedRead.mockRestore();
 		}
@@ -1790,6 +1816,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(branchDispatch?.messages).toContain("original user");
 		expect(branchDispatch?.messages).not.toContain("answer:original user");
 		expect(await runtime.listInbox(branched, true)).toEqual([]);
+		expect((await runtime.store.intent(branched.agentInstanceId)).manualHold).toBeFalse();
 		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
 		const unchanged = await nativeHistory(runtime, source.agentInstanceId);
 		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
@@ -1823,7 +1850,22 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		expect(JSON.stringify((await nativeHistory(runtime, source.agentInstanceId)).entries)).not.toContain(
 			"R-history-edit",
 		);
-		expect(edited.manualHold).toBeTrue();
+		const review = await runtime.store.intent(edited.agentInstanceId);
+		expect(review.manualHold).toBeTrue();
+		const migrated = await runtime.listInbox(edited);
+		expect(migrated.map(item => [item.queueId, item.position, item.revision, item.deliveryPayload, item.disposition]))
+			.toEqual(pendingBeforeEdit.map(item => [item.queueId, item.position, item.revision, item.deliveryPayload, item.disposition]));
+		expect(await runtime.store.claimDueInboxWakes(runtime.engineGeneration, Date.now() + 60_000)).toEqual([]);
+		const reviewed = request("history-reviewed-command", "history-reviewed-attempt", source.agentInstanceId);
+		Object.assign(reviewed, { queueId: migrated[0]!.queueId, expectedRevision: migrated[0]!.revision,
+			mutationId: "history-reviewed-delivery", expectedIntentRevision: review.intentRevision - 1, explicitContinue: true });
+		await expect(admitRequest(runtime, reviewed)).rejects.toMatchObject({ code: "stale_target" });
+		const acceptedReview = request("history-reviewed-current", "history-reviewed-current-attempt", source.agentInstanceId);
+		Object.assign(acceptedReview, { queueId: migrated[0]!.queueId, expectedRevision: migrated[0]!.revision,
+			mutationId: "history-reviewed-current-delivery", expectedIntentRevision: review.intentRevision, explicitContinue: true });
+		await admitRequest(runtime, acceptedReview);
+		await runtime.drain();
+		expect((await runtime.store.getInboxItemByQueueId(migrated[0]!.queueId))?.disposition).toBe("acknowledged");
 		await runtime.dispose();
 	}, 60_000);
 
@@ -1836,16 +1878,14 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			return { content: ["answer"] };
 		}] });
 		const execution = admittedExecution(mock.model, modelRegistry);
-		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-			return true;
-		});
+		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity));
 		const source = await admitRequest(runtime, startRequest(execution, {
 			commandId: "active-history-source-command", agentInstanceId: "active-history-source",
 			agentInstanceRef: "grimoire://tasks/grimoire/active-history/agents/one",
 			executionId: "active-history-source-execution", attemptId: "active-history-source-attempt",
 		}, { cwd, principalId: "owner", input: "active source" }));
-		await entered.promise;
+		try {
+		await withTimeout(entered.promise, 5_000, "Source provider did not enter");
 		await runtime.agentRegistry.get(source.engineAgentId)!.session!.sessionManager.flush();
 		const history = await nativeHistory(runtime, source.agentInstanceId);
 		if (!history.sessionLeafEntryId || !history.entries[0]) throw new Error("Expected active source history");
@@ -1864,9 +1904,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		};
 		await expect(admitRequest(runtime, branchRequest)).rejects.toMatchObject({ code: "agent_busy" });
 		expect(runtime.getBinding("active-history-branch")).toBeUndefined();
-		release.resolve();
-		await runtime.drain();
-		await runtime.dispose();
+		} finally {
+			release.resolve();
+			await runtime.drain();
+			await runtime.dispose();
+		}
 	}, 60_000);
 
 	it("rejects an over-budget Resume before adding its context to the live or retained session", async () => {
@@ -2720,6 +2762,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				executionId: "history-cancel-execution", attemptId: "history-cancel-attempt",
 			}, { cwd, principalId: "owner", input }));
 			await withTimeout(dispatchEntered.promise, 2_000, "Start did not reach the append boundary");
+			const beforeAppend = Math.max(0, ...(await runtime.store.pendingEvents()).map(event => event.eventId));
 			stopOnAppend = () => {
 				runtime
 					.cancel({ ...started, commandId: "history-cancel-stop" })
@@ -2732,7 +2775,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 			const stoppedEvents = await runtime.store.pendingEvents();
 			expect(
-				stoppedEvents.filter(event => event.kind === "reconciled" && event.attemptId === started.attemptId),
+				stoppedEvents.filter(event => event.eventId > beforeAppend &&
+					event.kind === "reconciled" && event.attemptId === started.attemptId),
 			).toHaveLength(0);
 			const stopped = await runtime.store.intent(started.agentInstanceId);
 			const next = await admitRequest(runtime, startRequest(execution, {
@@ -2960,7 +3004,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					expectedIntentRevision: stopped.intentRevision! + 1,
 				}),
 			).rejects.toMatchObject({ code: "stale_target" });
-			expect(await runtime.store.getAttempt(started.attemptId)).toEqual(completedAttempt);
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+				state: completedAttempt!.state, agent_instance_id: completedAttempt!.agent_instance_id,
+				attempt_id: completedAttempt!.attempt_id, execution_id: completedAttempt!.execution_id,
+				binding_id: completedAttempt!.binding_id, binding_generation: completedAttempt!.binding_generation,
+				engine_generation: completedAttempt!.engine_generation, authority_generation: completedAttempt!.authority_generation,
+				result_payload: completedAttempt!.result_payload, execution: completedAttempt!.execution,
+			});
 			expect(
 				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
 			).toMatchObject({

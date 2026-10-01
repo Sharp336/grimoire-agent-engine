@@ -6169,6 +6169,12 @@ export class EngineRuntime {
 				? { pendingInboxSourceSessionId: binding.pendingInboxSourceSessionId }
 				: {}),
 		});
+		if (TERMINAL_ATTEMPT_STATES.has(state) && binding.pendingInboxSourceSessionId) {
+			const intent = await this.store.intent(binding.agentInstanceId);
+			binding.manualHold = intent.manualHold;
+			binding.intentRevision = intent.intentRevision;
+			binding.pendingInboxSourceSessionId = undefined;
+		}
 		if (state === "paused" || TERMINAL_ATTEMPT_STATES.has(state)) {
 			clearInterval(binding.leaseHeartbeat);
 			binding.leaseHeartbeat = undefined;

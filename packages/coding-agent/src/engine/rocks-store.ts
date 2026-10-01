@@ -1199,6 +1199,7 @@ export class RocksEngineMutations {
 			);
 	}
 	async holds(tx: RuntimeTransaction, id: string): Promise<EngineBranchHold[]> {
+		const requestedId = id;
 		const result: EngineBranchHold[] = [];
 		const seen = new Set<string>();
 		while (id) {
@@ -1208,7 +1209,7 @@ export class RocksEngineMutations {
 			const identity = await tx.get<RocksIdentity>("identity", id);
 			for (const kind of ["pause", "stop", "recovery"] as const) {
 				const hold = await tx.get<RocksHold>("hold", `${id}:${kind}`);
-				if (hold)
+				if (hold && (hold.local_only !== true || id === requestedId))
 					result.push({
 						sourceAgentInstanceId: id,
 						sourceAgentInstanceRef: identity?.agent_instance_ref ?? "",
@@ -2158,7 +2159,26 @@ export class RocksEngineMutations {
 					);
 				if (options.inboxSessionId) {
 					const pending = await tx.query<RocksInbox>("inbox_agent_pending", [binding.agentInstanceId]);
-					for (const item of pending)
+					const reviewId = projectionId("ownership", "history-edit-inbox", binding.attemptId);
+					const existingReview = await tx.get<RocksProjection>("projection", reviewId);
+					if (options.pendingInboxSourceSessionId && existingReview &&
+						(existingReview.value.sourceSessionId !== options.pendingInboxSourceSessionId ||
+							existingReview.value.sessionId !== options.inboxSessionId))
+						throw new EngineInboxConflictError("History review source or target changed");
+					if (options.pendingInboxSourceSessionId &&
+						options.pendingInboxSourceSessionId !== options.inboxSessionId &&
+						pending.some(item => item.session_id === options.pendingInboxSourceSessionId) && !existingReview)
+						await tx.create("projection", reviewId, {
+							subtype: "ownership", agent_instance_id: binding.agentInstanceId,
+							attempt_id: binding.attemptId, position: row.detail_revision,
+							value: { sourceSessionId: options.pendingInboxSourceSessionId, sessionId: options.inboxSessionId },
+						});
+					for (const item of pending) {
+						if (item.session_id !== options.inboxSessionId &&
+							item.session_id !== options.previousInboxSessionId &&
+							item.session_id !== options.pendingInboxSourceSessionId &&
+							item.session_id !== `pending:${binding.agentInstanceId}`)
+							throw new EngineInboxConflictError("Pending inbox belongs to another session");
 						await tx.put("inbox", item.queue_id, {
 							...item,
 							...bindingTarget(binding),
@@ -2168,6 +2188,7 @@ export class RocksEngineMutations {
 							wake_delivered_at: null,
 							wakeDeliveredAt: undefined,
 						});
+					}
 				}
 				if (options.inboxMutation) {
 					if (!options.inboxSessionId)
@@ -2179,6 +2200,31 @@ export class RocksEngineMutations {
 						options.inboxMutationCausationCommandId,
 					);
 					if (result.event) committed.push(result.event);
+				}
+				if (terminal.has(state)) {
+					const reviewId = projectionId("ownership", "history-edit-inbox", binding.attemptId);
+					const review = await tx.get<RocksProjection>("projection", reviewId);
+					if (review) {
+						const pending = await tx.query<RocksInbox>("inbox_agent_pending", [binding.agentInstanceId]);
+						const holdId = `${binding.agentInstanceId}:recovery`;
+						if (pending.some(item => item.disposition === "pending" && item.session_id === review.value.sessionId) &&
+							!(await tx.get<RocksHold>("hold", holdId))) {
+							const identity = (await tx.get<RocksIdentity>("identity", binding.agentInstanceId))!;
+							identity.intent_revision++;
+							await tx.put("identity", binding.agentInstanceId, identity);
+							await tx.put("hold", holdId, {
+								source_agent_instance_id: binding.agentInstanceId, agent_instance_id: binding.agentInstanceId,
+								kind: "recovery", command_id: binding.commandId, generation: identity.intent_revision, local_only: true,
+							});
+							const retained = (await tx.get<RocksBinding>("binding", binding.agentInstanceId))!;
+							await tx.put("binding", binding.agentInstanceId, { ...retained, manual_hold: 1,
+								intent_revision: identity.intent_revision, intent_command_id: binding.commandId });
+							committed.push(await this.identityEvent(tx, binding.agentInstanceId, binding.commandId, "holds_changed", {
+								action: "recovery", cause: "history_edit_review", requiresExplicitContinue: true,
+							}));
+						}
+						await tx.delete("projection", reviewId);
+					}
 				}
 				const transitionEvents: readonly EngineTransitionEvent<EngineOrdinaryEvent>[] =
 					events.length || !checkpoint ? events : [{ kind: "reconciled" }];
@@ -3328,6 +3374,8 @@ export class RocksEngineMutations {
 				const gate = await this.semanticGate(item.agent_instance_id);
 				if (gate && (!this.#installation || gate.phase !== "open")) continue;
 				if (!binding || binding.manualHold || binding.state === "running") continue;
+				if ((await this.records.get("projection",
+					projectionId("ownership", "history-edit-inbox", binding.attemptId))).value) continue;
 				const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
 					.records[0];
 				if (first?.id === item.queueId) return item.deliver_at ?? item.createdAt;
@@ -3364,6 +3412,7 @@ export class RocksEngineMutations {
 						(await this.holds(tx, item.agent_instance_id)).length
 					)
 						return;
+					if (await tx.get("projection", projectionId("ownership", "history-edit-inbox", binding.attempt_id))) return;
 					const pending = await tx.query<RocksInbox>("inbox_session", [item.sessionId, "pending"]);
 					pending.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
 					if (pending[0]?.queueId !== item.queueId) return;
@@ -3679,6 +3728,7 @@ export class RocksEngineMutations {
 							retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
 						});
 						await stageRelease(tx, attempt.attempt_id);
+						await tx.delete("projection", projectionId("ownership", "history-edit-inbox", attempt.attempt_id));
 						return [
 							...(await settleRuntimeMessages(tx, target, "interrupted", (tx, target, event) =>
 								this.append(tx, target, event),
