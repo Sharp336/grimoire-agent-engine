@@ -13,6 +13,7 @@ import {
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import { EngineBindingPendingError } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { HostedEngineBridge } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
 import {
 	AGENT_MESSAGE_STREAM,
 	ENGINE_COMMAND_STREAM,
@@ -48,6 +49,85 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		if (tempDir) removeSyncWithRetries(tempDir);
 		tempDir = undefined;
 	});
+	it("delivers a non-browser native rejection and releases its hosted claim without creating an Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-native-receipt-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			deviceId: "receipt-device",
+			verifyOriginReceipt: async () => { throw new Error("Missing principal must be refused before origin lookup"); },
+		});
+		const command: EngineCommandEnvelope = {
+			schema: "grimoire.engine.command.v1", commandId: "headless-invalid-control", op: "cancel",
+			deviceId: "receipt-device", engineId: "receipt-engine", engineGeneration: runtime.engineGeneration,
+			agentInstanceId: "unstarted", agentInstanceRef: "grimoire://tasks/grimoire/receipt/agents/unstarted",
+			executionId: "unstarted-execution", attemptId: "unstarted-attempt", authorityGeneration: 1,
+			issuedAt: Date.now(), payload: { originReceiptId: "origin:invalid-control", reason: "stop" },
+		};
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime, deviceId: command.deviceId, engineId: command.engineId, servers: broker.url,
+			authorizeCommand: () => {}, authorizeMessage: () => {}, onError: error => errors.push(error),
+		});
+		const client = await connect({ servers: broker.url });
+		const receipts: Array<Record<string, unknown>> = [];
+		let claimed = false;
+		const bridge = await HostedEngineBridge.connect({
+			deviceId: command.deviceId, engineId: command.engineId, engineGeneration: runtime.engineGeneration,
+			servers: broker.url, eventStore: runtime.store, pollIntervalMs: 10,
+			onError: error => errors.push(error),
+			rpc: { call: async (tool, args) => {
+				if (tool !== "grimoire_agent_engine_bridge") throw new Error("Unexpected bridge tool");
+				if (args.action === "claim") {
+					if (claimed || args.lane !== "control") return { status: "idle" };
+					claimed = true;
+					return { status: "claimed", job_id: command.commandId, lease_token: "isolated-claim",
+						operation_type: "agent_engine_command", work: { kind: "command", command } };
+				}
+				if (args.action === "accepted") {
+					expect(args.job_id).toBe(command.commandId);
+					expect(args.lease_token).toBe("isolated-claim");
+					receipts.push(args.receipt as Record<string, unknown>);
+					return { status: "accepted" };
+				}
+				if (args.action === "heartbeat") return { status: "renewed" };
+				throw new Error("Unexpected bridge action");
+			} },
+		});
+		try {
+			await waitFor(() => receipts.some(receipt => receipt.stage === "rejected"));
+			await bridge.drain();
+			expect(receipts[0]).toMatchObject({
+				commandId: command.commandId, lookup: "known", stage: "rejected",
+				rawCanonicalHash: engineCommandIdentity(command).canonicalHash,
+				receipt: { outcome: "rejected", detail: { code: "invalid_request" } },
+				target: { agentInstanceRef: command.agentInstanceRef, agentInstanceId: command.agentInstanceId,
+					attemptId: command.attemptId, executionId: command.executionId },
+			});
+			expect(receipts[0]).not.toHaveProperty("payloadHash");
+			expect(receipts[0]).not.toHaveProperty("browserPayloadHash");
+			expect(receipts[0]).not.toHaveProperty("version");
+			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
+			await jetstream(client).publish(adapter.commandSubject(command.agentInstanceId, command.op), JSON.stringify(command));
+			const manager = await jetstreamManager(client);
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}_control`);
+				return info.delivered.consumer_seq >= 2 && info.num_ack_pending === 0;
+			});
+			await adapter.flushEvents();
+			await bridge.drain();
+			expect(receipts).toHaveLength(1);
+			expect(errors).toEqual([]);
+		} finally {
+			await bridge.dispose();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30_000);
+
 	it("acknowledges oversized retained receipts through NATS and native IPC without starting another Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
@@ -325,8 +405,6 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				agentInstanceId: started.agentInstanceId,
 				attemptId: started.attemptId,
 				principalId: "queue-owner",
-				browserPayloadHash: `sha256:${"a".repeat(64)}`,
-				browserTarget: { agentInstanceRef },
 				authorityGeneration: 1,
 				issuedAt: Date.now(),
 				payload: {
@@ -337,6 +415,15 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			};
 			command.payload.originReceiptId = "origin:queued-while-delivery-busy";
 			execution.captureCommand(command);
+			const receipts: Array<Record<string, unknown>> = [];
+			const receiptSub = client.subscribe(adapter.eventSubject(started.agentInstanceId, "*"), {
+				callback: (_error, message) => {
+					const event = JSON.parse(new TextDecoder().decode(message.data));
+					if (event.type === "attempt.command_receipt" && event.causationCommandId === command.commandId)
+						receipts.push(event.payload.value);
+				},
+			});
+			await client.flush();
 			await jetstream(client).publish(
 				adapter.commandSubject(started.agentInstanceId, "enqueue"),
 				JSON.stringify(command),
@@ -356,6 +443,15 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			expect(errors).toEqual([]);
 			releaseDelivery.resolve();
 			await draining;
+			await waitFor(() => receipts.some(receipt => receipt.stage === "applied"));
+			expect(receipts.map(receipt => receipt.stage)).toEqual(["engine_accepted", "applied"]);
+			expect(receipts[1]).toMatchObject({
+				rawCanonicalHash: engineCommandIdentity(command).canonicalHash,
+				receipt: { outcome: "applied" },
+				target: { agentInstanceRef, agentInstanceId: started.agentInstanceId, attemptId: started.attemptId },
+			});
+			expect(receipts[1]).not.toHaveProperty("payloadHash");
+			receiptSub.unsubscribe();
 		} finally {
 			providerBoundary.resolve();
 			releaseDelivery.resolve();

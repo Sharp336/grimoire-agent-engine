@@ -11,10 +11,10 @@ import {
 } from "./rocks-runtime-history";
 import {
 	inputBodyPrefix,
+	nativeCommandReceipt,
 	type ProjectedEvent,
 	projectEvent,
 	projectedHolds,
-	projectedReceipt,
 	projectionId,
 	type RocksProjection,
 	runtimeReceipt,
@@ -1270,21 +1270,10 @@ export class RocksEngineStore extends RocksEngineMutations {
 			effect.attempt_id === attempt?.attempt_id && effect.agent_instance_id === row.agent_instance_id);
 		const receipt = runtimeReceipt(row, agent, attempt);
 		return {
-			commandId,
+			...nativeCommandReceipt(row, attempt),
 			...(includeStartCommand && row.operation === "start" && identity.serializedCommand
 				? { command: JSON.parse(identity.serializedCommand) as unknown }
 				: {}),
-			lookup: row.state === "settled" ? "known" : "pending",
-			stage:
-				row.receipt?.outcome === "rejected"
-					? "rejected"
-					: row.state !== "settled"
-						? "engine_accepted"
-						: row.operation === "start" && attempt && terminal.has(attempt.state)
-							? "execution_terminal"
-							: "applied",
-			receipt: projectedReceipt(row) ?? undefined,
-			rawCanonicalHash: row.canonical_hash,
 			// Authoritative Engine admission is the pin/caller fence; CH's dispatch mirror is not.
 			routing: row.routing ?? null,
 			execution: attempt?.execution ?? null,
@@ -1311,12 +1300,6 @@ export class RocksEngineStore extends RocksEngineMutations {
 					toolName: effect!.tool_name, inputHash: effect!.input_hash }
 				: { started: false } } : {}),
 			browserPayloadHash: identity.browserPayloadHash,
-			target: {
-				agentInstanceRef: identity.agentInstanceRef,
-				agentInstanceId: row.agent_instance_id,
-				attemptId: identity.attemptId,
-				executionId: identity.executionId,
-			},
 			dedupHorizonMs: runtimeLimits.dedupHorizonMs,
 			dedupUntil: row.state === "settled" ? row.updated_at + runtimeLimits.dedupHorizonMs : null,
 			retention: "indefinite",

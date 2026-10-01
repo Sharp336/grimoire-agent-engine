@@ -43,6 +43,7 @@ import {
 import {
 	boundedReceipt,
 	eventReadKeys,
+	nativeCommandReceipt,
 	projectionId,
 	projectedDetail,
 	type RocksProjection,
@@ -1701,8 +1702,8 @@ export class RocksEngineMutations {
 		await this.receiptEvent(tx, id);
 	}
 	/**
-	 * Publishes a browser command's current receipt stage on its own agent and, when the browser froze another
-	 * source target (a branch launched from its parent), on that source agent of the same principal too.
+	 * Publishes every command's persisted delivery stage. Browser receipts retain their canonical payload hash
+	 * and may also target the browser's frozen source agent; native receipts never fabricate browser identity.
 	 */
 	async receiptEvent(tx: RuntimeTransaction, id: string): Promise<void> {
 		const row = await tx.get<RocksCommand>("command", id);
@@ -1710,7 +1711,9 @@ export class RocksEngineMutations {
 		const command = row.identity;
 		const identity = await tx.get<RocksIdentity>("identity", row.agent_instance_id);
 		const attempt = command.attemptId ? await tx.get<RocksAttempt>("attempt", command.attemptId) : undefined;
-		const value = runtimeReceipt(row, identity, attempt);
+		const value = command.browserPayloadHash === undefined
+			? nativeCommandReceipt(row, attempt)
+			: runtimeReceipt(row, identity, attempt);
 		if (!value) return;
 		await this.append(
 			tx,

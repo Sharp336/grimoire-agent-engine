@@ -342,6 +342,37 @@ export function projectedReceipt(row: RocksCommand): EngineCommandReceipt | null
 	return receipt && boundedReceipt(receipt);
 }
 
+function commandReceiptStage(row: RocksCommand, attempt: RocksAttempt | undefined): string {
+	return row.receipt?.outcome === "rejected"
+		? "rejected"
+		: row.state !== "settled"
+			? "engine_accepted"
+			: row.operation === "start" && attempt && terminal.has(attempt.state)
+				? "execution_terminal"
+				: "applied";
+}
+
+/** Native delivery identity shared by the command query and durable hosted receipts, not a browser receipt. */
+export function nativeCommandReceipt(
+	row: RocksCommand,
+	attempt: RocksAttempt | undefined,
+): Record<string, unknown> {
+	const command = row.identity;
+	return {
+		commandId: row.command_id,
+		lookup: row.state === "settled" ? "known" : "pending",
+		stage: commandReceiptStage(row, attempt),
+		receipt: projectedReceipt(row) ?? undefined,
+		rawCanonicalHash: row.canonical_hash,
+		target: {
+			agentInstanceRef: command.agentInstanceRef,
+			agentInstanceId: row.agent_instance_id,
+			attemptId: command.attemptId,
+			executionId: command.executionId,
+		},
+	};
+}
+
 export function runtimeReceipt(
 	row: RocksCommand,
 	identity: RocksIdentity | undefined,
@@ -351,14 +382,7 @@ export function runtimeReceipt(
 	const payload = command.serializedCommand
 		? (JSON.parse(command.serializedCommand) as { browserTarget?: unknown })
 		: undefined;
-	const stage =
-		row.receipt?.outcome === "rejected"
-			? "rejected"
-			: row.state !== "settled"
-				? "engine_accepted"
-				: row.operation === "start" && attempt && terminal.has(attempt.state)
-					? "execution_terminal"
-					: "applied";
+	const stage = commandReceiptStage(row, attempt);
 	const receipt = projectedReceipt(row);
 	const canonical: RuntimeReceiptRow = {
 		command_id: row.command_id,

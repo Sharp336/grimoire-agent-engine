@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { EngineEvent, EngineOrdinaryEvent, EngineTarget } from "../src/engine/contracts";
+import { engineCommandIdentity } from "../src/engine/nats-adapter";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { nativeEntry, nativeScope } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
@@ -306,6 +307,55 @@ describe("Rocks runtime atomic public projections", () => {
 			},
 		});
 		expect(event?.payload).not.toHaveProperty("receipt");
+	});
+	test("non-browser delivery retains the native outcome without inventing a browser receipt or target", async () => {
+		const rows = fixture();
+		const identity = engineCommandIdentity({
+			schema: "grimoire.engine.command.v1",
+			commandId: "native-delivery",
+			op: "compact",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			agentInstanceId: "a",
+			agentInstanceRef: ref,
+			executionId: "retained-execution",
+			attemptId: "retained-attempt",
+			authorityGeneration: 1,
+			principalId: "p",
+			issuedAt: 1,
+			payload: { originReceiptId: "origin:native-delivery" },
+		});
+		rows.seed("command", identity.commandId, {
+			command_id: identity.commandId, agent_instance_id: "a", processor_generation: 1,
+			state: "received", canonical_hash: identity.canonicalHash, payload_bytes: 1,
+			control_admission: 0, engine_generation: 1, operation: identity.operation,
+			identity, receipt: null, received_at: 1, updated_at: 1, pending_accounted: false,
+		} satisfies RocksCommand);
+		const tx = new RuntimeTransaction(rows);
+		const mutations = new RocksEngineMutations(rows.client, projectEvent);
+		await mutations.receiptEvent(tx, identity.commandId);
+		await mutations.settle(tx, identity.commandId, { outcome: "applied" }, identity.canonicalHash, true);
+		await mutations.settle(tx, identity.commandId, { outcome: "applied" }, identity.canonicalHash, true);
+		const events = tx.mutation().puts.filter(row => row.kind === "event").map(row => row.value);
+		expect(events.map(row => (row.payload as { value: { stage: string } }).value.stage))
+			.toEqual(["engine_accepted", "applied"]);
+		const delivered = (events[1].payload as { value: Record<string, unknown> }).value;
+		expect(delivered).toEqual({
+			commandId: identity.commandId, lookup: "known", stage: "applied",
+			rawCanonicalHash: identity.canonicalHash, receipt: { outcome: "applied" },
+			target: { agentInstanceRef: ref, agentInstanceId: "a",
+				attemptId: "retained-attempt", executionId: "retained-execution" },
+		});
+		for (const event of events) {
+			expect((event.projection_payload as Array<{ kind: string }>).some(change => change.kind === "receipt")).toBe(false);
+		}
+		for (const put of tx.mutation().puts) rows.seed(put.kind, put.id, put.value);
+		const queried = await storeWith(rows).runtimeCommand(identity.commandId, { principalId: "p" });
+		expect(queried).toMatchObject(delivered);
+		expect(queried).not.toHaveProperty("payloadHash");
+		expect((await rows.get("attempt", "attempt")).value?.state).toBe("running");
+		expect((await rows.get("attempt", "retained-attempt")).value).toBeNull();
 	});
 	test("a terminally rejected unbound Start leaves no pending target and an explicit Start becomes current", async () => {
 		const rows = fixture();

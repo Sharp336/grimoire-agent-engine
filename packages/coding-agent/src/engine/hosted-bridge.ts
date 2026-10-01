@@ -647,10 +647,9 @@ export class HostedEngineBridge {
 		this.#active.set(claim.jobId, claim);
 		if (event.type === "attempt.command_receipt" && event.payload) {
 			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
-			const receipt: Record<string, unknown> = {
-				...value,
-				browserPayloadHash: value.payloadHash ?? value.browserPayloadHash,
-			};
+			const receipt = typeof value.payloadHash === "string"
+				? { ...value, browserPayloadHash: value.payloadHash }
+				: value;
 			const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "accepted",
 				installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,

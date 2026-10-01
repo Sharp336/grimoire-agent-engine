@@ -16,6 +16,7 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Headless and MCP commands publish their persisted native admission/settlement receipt through the durable broker outbox, including rejected controls before an Attempt exists. Native delivery and command lookup share the retained target and canonical command hash; browser receipts keep their separate payload-hash contract.
 - Managed Engine sessions treat omitted context files, skills, prompt templates, slash commands, and rules as empty arrays instead of discovering ambient instructions; explicit arrays and non-Engine discovery remain unchanged.
 - Executor rule recovery replays the exact admitted transition history and original event IDs without duplicating archived messages. Fallback rules reach the next provider request durably while failed assistant context is removed; compaction replaces all raw rule messages with current-route L1 in its original priority order.
 - A paused fallback resumes on its retained current route and execution digest, without retrying the exhausted candidate prefix or changing its admitted prompt baseline.
