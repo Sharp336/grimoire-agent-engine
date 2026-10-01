@@ -3918,6 +3918,10 @@ export class EngineRuntime {
 				if (!delivered) continue;
 				validateRuntimeValue("requestReadResult", delivered);
 				const { projection, result } = await this.#readRequest(binding, source.requestId);
+				if (!message.details || typeof message.details !== "object" ||
+					!("requestResolutionRevision" in message.details) ||
+					message.details.requestResolutionRevision !== projection.value.revision)
+					continue;
 				// Approval collection revision can advance for a different request after this immutable decision.
 				const { inputRevision: _actualRevision, ...actual } = delivered;
 				const { inputRevision: _currentRevision, ...expected } = result;
@@ -3942,15 +3946,16 @@ export class EngineRuntime {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptState !== "running")
 			throw new EngineTargetError("stale_target", "Request requires its live running Attempt");
 		const target = this.#snapshot(binding);
-		const reply = (value: Record<string, unknown>): AgentToolResult<unknown> =>
-			({ content: [{ type: "text", text: JSON.stringify(value) }], details: { requestResult: value } });
+		const reply = (value: Record<string, unknown>, resolutionRevision?: number): AgentToolResult<unknown> =>
+			({ content: [{ type: "text", text: JSON.stringify(value) }], details: { requestResult: value,
+				...(resolutionRevision !== undefined ? { requestResolutionRevision: resolutionRevision } : {}) } });
 		if (input.action === "read") {
 			const { projection, result } = await this.#inLane(binding.agentInstanceId, () => this.#readRequest(binding, input.requestId));
 			if (projection.resolved) binding.requestReads.set(callId, {
 				requestId: input.requestId, inputRevision: Number(projection.value.revision),
 				resultHash: requestResultHash(result),
 			});
-			return reply(result);
+			return reply(result, projection.resolved ? Number(projection.value.revision) : undefined);
 		}
 		let operation: SubmittedOperation;
 		let args: Record<string, unknown>;
@@ -4616,7 +4621,9 @@ export class EngineRuntime {
 					entry.message.toolCallId === message.toolCallId && entry.message.toolName === "request");
 				const delivered = (message.details as { requestResult?: Record<string, unknown> } | undefined)?.requestResult;
 				if (delivered) validateRuntimeValue("requestReadResult", delivered);
-				if (!entry || !delivered || delivered.requestId !== read.requestId || requestResultHash(delivered) !== read.resultHash)
+				if (!entry || !delivered || delivered.requestId !== read.requestId || requestResultHash(delivered) !== read.resultHash ||
+					!message.details || typeof message.details !== "object" ||
+					!("requestResolutionRevision" in message.details) || message.details.requestResolutionRevision !== read.inputRevision)
 					throw new EngineTargetError("stale_target", "Request answer differs from its native delivered tool result");
 				await this.store.consumeRequest(this.#snapshot(binding), read.requestId, {
 					input_revision: read.inputRevision, tool_call_id: message.toolCallId,

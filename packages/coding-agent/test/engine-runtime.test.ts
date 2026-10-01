@@ -2258,6 +2258,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			enabled: true, api: "openai-responses",
 			endpoint: "https://compact.invalid/v1/responses/compact", v2StreamingEnabled: false,
 		} });
+		// Automatic maintenance selects from the available catalog, unlike explicit manual compaction.
+		const available = spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
 		let requests = 0;
@@ -2322,6 +2324,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				await created?.runtime.dispose();
 			} finally {
 				provider.mockRestore();
+				available.mockRestore();
 			}
 		}
 	}, 30_000);
