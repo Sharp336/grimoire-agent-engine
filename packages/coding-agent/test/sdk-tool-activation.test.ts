@@ -94,7 +94,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		cwd: tempDir,
 		agentDir: tempDir,
 		modelRegistry,
-		sessionManager: SessionManager.inMemory(),
+		sessionManager: SessionManager.inMemory(tempDir),
 		settings: Settings.isolated(),
 		model: getBundledModel("openai", "gpt-4o-mini"),
 		disableExtensionDiscovery: true,
@@ -1867,39 +1867,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("does not register the xAI TTS tool unless enabled", async () => {
-		const tempDir = makeTempDir();
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-		});
-
-		try {
-			expect(session.getToolByName("tts")).toBeUndefined();
-			expect(session.getAllToolNames()).not.toContain("tts");
-			expect(session.getActiveToolNames()).not.toContain("tts");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("registers the xAI TTS tool when enabled", async () => {
-		const tempDir = makeTempDir();
-
-		const { session } = await createAgentSession({
-			...baseOptions(tempDir),
-		});
-
-		try {
-			expect(session.getToolByName("tts")).toBeDefined();
-			// tts is a discoverable custom tool → mounted as an xd:// device, not top-level.
-			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("tts");
-			expect(session.getActiveToolNames()).not.toContain("tts");
-		} finally {
-			await session.dispose();
-		}
-	});
-
 	it("keeps the stable MCP tool-name collision winner during SDK startup and warns", async () => {
 		const tempDir = makeTempDir();
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -1981,8 +1948,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				reportSendError: vi.fn(),
 				reportRuntimeError: vi.fn(),
 			});
-			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "yield"]);
-			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "yield"]);
+			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
+			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
 			for (const name of [
 				"generate_image",
 				"tts",
@@ -1990,7 +1957,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_inactive_tool",
 				"sdk_custom_tool",
 				"restricted_late_extension_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}

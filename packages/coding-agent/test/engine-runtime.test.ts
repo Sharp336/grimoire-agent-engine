@@ -1464,7 +1464,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				.rejects.toMatchObject({ code: "history_expired" });
 			expect((await runtime.store.getBinding("cleanup-branch"))?.sessionFile).toBeUndefined();
 			expect(await runtime.store.getAttempt("cleanup-branch")).toMatchObject({ state: "failed" });
-			expect(await nativeHistory(runtime, source.agentInstanceId)).toEqual(history);
+			const retained = await nativeHistory(runtime, source.agentInstanceId);
+			expect(retained.sessionId).toBe(history.sessionId);
+			expect(retained.sessionLeafEntryId).toBe(history.sessionLeafEntryId);
+			expect(retained.entries).toEqual(history.entries);
 		} finally {
 			fork.mockRestore();
 			await runtime.dispose();
@@ -1577,6 +1580,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
 				engineGeneration: generation, authorityGeneration: binding.authorityGeneration,
 				agentInstanceId, agentInstanceRef, bindingSnapshot: binding.bindingSnapshot,
+				attemptId: binding.attemptId, executionId: binding.executionId,
+				runtimeBindingId: binding.bindingId, bindingGeneration: binding.bindingGeneration,
 				principalId, issuedAt: Date.now(),
 				payload: { originReceiptId: `origin:${commandId}`, clientMessageId: commandId,
 					text: "queued after material failure", expectedIntentRevision: revision },
@@ -1998,6 +2003,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				await withTimeout(changed, 2_000, "Active source history checkpoint was not published");
 			}
 		})();
+		if (!history.sessionLeafEntryId) throw new Error("Published source history has no native leaf");
 
 		const branchRequest = startRequest(execution, {
 			commandId: "active-history-branch-command", agentInstanceId: "active-history-branch",
@@ -4415,7 +4421,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			],
 		});
 		const execution = admittedExecution(mock.model, modelRegistry, {
-			continuation: { requireYieldTool: true, outputSchema: { type: "object" } },
+			continuation: { requireYieldTool: true, outputSchema: { type: ["object", "boolean"] } },
 		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => {
 			prompts.push(input);
