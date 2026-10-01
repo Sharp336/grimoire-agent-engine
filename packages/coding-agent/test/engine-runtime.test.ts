@@ -1075,6 +1075,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	it.each(["mounted", "nested", "denied", "worker", "worker-denied", "worker-shared-denied", "worker-stop", "parallel", "delayed"] as const)("preserves %s request ownership through the real mounted tool boundary", async mode => {
 		const reached = Promise.withResolvers<void>();
+		const submitted = Promise.withResolvers<{ isError: boolean; text: string }>();
 		const queuedTurn = Promise.withResolvers<void>();
 		const delayed = mode === "delayed";
 		const release = Promise.withResolvers<void>();
@@ -1093,6 +1094,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const call = (id: string, name: string, args: Record<string, unknown>) =>
 			({ content: [{ type: "toolCall" as const, id, name, arguments: args }] });
 		const mock = createMockModel({ handler: async context => {
+			if (phase === 1) {
+				const submit = context.messages.findLast(message => message.role === "toolResult" && message.toolCallId === "submit-mounted");
+				submitted.resolve(submit?.role === "toolResult"
+					? { isError: submit.isError === true, text: submit.content.filter(block => block.type === "text").map(block => block.text).join("") }
+					: { isError: true, text: "submit-mounted has no tool result" });
+			}
 			switch (phase++) {
 				case 0: return call("submit-mounted", "request", { action: "submit", handling: "nonblocking",
 					operation: delayed ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
@@ -1187,11 +1194,20 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				agentInstanceRef: `grimoire://tasks/grimoire/requests/agents/mounted-${mode}`,
 				executionId: `mounted-execution-${mode}`, attemptId: `mounted-attempt-${mode}`,
 			}, { cwd, principalId: "owner", input: "Use the enabled mounted operation" }));
-			const event = await requested;
+			// The real submit result must be the pending handle of an emitted approval, not an error the model skips past.
+			const submit = await withTimeout(submitted.promise, 20_000, "The submit result never reached the model");
+			let handle: { status?: unknown; requestId?: unknown; handling?: unknown } | undefined;
+			try { handle = JSON.parse(submit.text); } catch { handle = undefined; }
+			if (submit.isError || handle?.status !== "pending" || typeof handle.requestId !== "string")
+				throw new Error(`Submit did not return a pending handle: ${submit.text}`);
+			expect(handle.handling).toBe("nonblocking");
+			const event = await withTimeout(requested, 5_000, "A pending handle was returned without its approval request");
 			if (event.kind !== "tool_approval_requested") throw new Error("Missing original leaf approval");
-			requestId = event.payload.id;
-			await reached.promise;
-			await allRequested.promise;
+			await withTimeout(allRequested.promise, 10_000, "Not every protected leaf requested approval");
+			if (mode === "parallel") expect(requests.map(request => request.id)).toContain(handle.requestId);
+			else expect(handle.requestId).toBe(event.payload.id);
+			requestId = handle.requestId;
+			await withTimeout(reached.promise, 10_000, "The model did not take its turn after the pending handle");
 			if (shared) await withTimeout(independentLive.promise, 5_000, "Independent eval did not enter the same live kernel");
 			if (worker) {
 				expect(fs.readFileSync(path.join(cwd, "sibling-before.txt"), "utf8")).toBe("before");
