@@ -6,7 +6,7 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:dc7e1a5344a9dc8cac2ef81c32a7d48757b166fe63e13e57fb0c66c3b7829ab6";
+export const RUNTIME_PROTOCOL_HASH = "sha256:b862cecfcaecc3f822a2bc993333b607c211bf3a04d29aaf18137c1629d498ad";
 export { RUNTIME_PROTOCOL_REVISION } from "./runtime-protocol.mjs";
 export const runtimeOriginIdChars = protocol.$defs.id.maxLength;
 export const runtimeLimits = protocol["x-artel"].limits;
@@ -51,6 +51,7 @@ export interface RuntimeBindingCheckpoint {
 	gate_revision: number;
 	census_mutation_revision: number;
 	runtime_contract_revision: 17;
+	runtime_contract_hash: string;
 	engine_generation?: number;
 	status: "complete" | "busy" | "unknown";
 	nonterminal_starts: number;

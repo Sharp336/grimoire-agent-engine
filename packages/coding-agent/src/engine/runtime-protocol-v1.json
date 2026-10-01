@@ -791,6 +791,9 @@
         "runtime_contract_revision": {
           "const": 17
         },
+        "runtime_contract_hash": {
+          "$ref": "#/$defs/hash"
+        },
         "engine_generation": {
           "type": "integer",
           "minimum": 0,
@@ -848,6 +851,7 @@
         "gate_revision",
         "census_mutation_revision",
         "runtime_contract_revision",
+        "runtime_contract_hash",
         "status",
         "nonterminal_starts",
         "nonterminal_attempts",

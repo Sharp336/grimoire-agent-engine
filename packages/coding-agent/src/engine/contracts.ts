@@ -112,6 +112,7 @@ export interface EngineBindingCheckpoint {
 	gate_revision: number;
 	census_mutation_revision: number;
 	runtime_contract_revision: 17;
+	runtime_contract_hash: string;
 	engine_generation: number;
 	status: "complete" | "busy" | "unknown";
 	nonterminal_starts: number;

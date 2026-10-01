@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { type ApprovalDecision, type ApprovalRequest, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding } from "../src/engine/contracts";
+import { type ApprovalDecision, type ApprovalRequest, type EngineBindingCheckpoint, type EngineBindingGate, type EngineBindingResult, type EngineEvent, sameSemanticBinding, validateSemanticBinding } from "../src/engine/contracts";
 import { type EngineCommandEnvelope, engineCommandIdentity } from "../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../src/engine/route";
 import { candidateIdentity } from "../src/engine/routing-admission";
@@ -344,7 +344,28 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		checkpoint = await restarted.bindingCensus(emptyParams, generation);
 		for (let page = 0; checkpoint.next_cursor && page < 30; page++)
 			checkpoint = await restarted.bindingCensus(emptyParams, generation);
-		expect(checkpoint).toMatchObject({ status: "complete", mutable_pending_writes: 0, next_cursor: null });
+		expect(checkpoint).toMatchObject({ status: "complete", runtime_contract_hash: RUNTIME_PROTOCOL_HASH,
+			mutable_pending_writes: 0, next_cursor: null });
+		// A complete cut from another runtime17 contract cannot authorize a current adoption.
+		const censusKey = `binding-census:${emptyId}`;
+		await restarted.mutation(emptyId, async tx => {
+			const scan = await tx.get<{ checkpoint: EngineBindingCheckpoint; stack: unknown[] }>("metadata", censusKey);
+			if (!scan) throw new Error("Completed census fixture is missing");
+			await tx.put("metadata", censusKey, { ...scan,
+				checkpoint: { ...scan.checkpoint, runtime_contract_hash: `sha256:${"f".repeat(64)}` } });
+		});
+		await expect(restarted.bindingTransition("adopt", { ...committed, action: "status" }, staged))
+			.rejects.toMatchObject({ code: "binding_pending" });
+		expect(await restarted.semanticGate(emptyId)).toMatchObject({
+			phase: "preparing", bindingSnapshot: emptySnapshot, operationId: "operation-empty",
+		});
+		checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		expect(checkpoint).toMatchObject({ status: "unknown", runtime_contract_hash: RUNTIME_PROTOCOL_HASH });
+		expect(typeof checkpoint.next_cursor).toBe("string");
+		for (let page = 0; checkpoint.next_cursor && page < 30; page++)
+			checkpoint = await restarted.bindingCensus(emptyParams, generation);
+		expect(checkpoint).toMatchObject({ status: "complete", runtime_contract_hash: RUNTIME_PROTOCOL_HASH,
+			mutable_pending_writes: 0, next_cursor: null });
 		const firstAdopt = await restarted.bindingTransition("adopt", { ...committed, action: "status" }, staged);
 		for (const action of ["commit", "status", "prepare"] as const)
 			expect(await restarted.bindingTransition("adopt", { ...committed, action }, staged)).toEqual(firstAdopt);

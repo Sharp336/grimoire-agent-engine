@@ -71,7 +71,7 @@ import {
 	type EngineAttachment,
 	messageAttachmentReferences,
 } from "./runtime-attachments";
-import { ENGINE_CONTROL_OPS, RUNTIME_PROTOCOL_REVISION, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { ENGINE_CONTROL_OPS, RUNTIME_PROTOCOL_HASH, RUNTIME_PROTOCOL_REVISION, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { engineAgentInstanceId } from "./route";
 import {
 	type AdmissionOutcome,
@@ -557,6 +557,8 @@ export class RocksEngineMutations {
 	async #freshBindingCheckpoint(tx: RuntimeTransaction, id: string, gate: EngineBindingGate,
 		checkpoint: EngineBindingCheckpoint | undefined, bindingRevision: number): Promise<boolean> {
 		return checkpoint?.status === "complete" && checkpoint.next_cursor === null &&
+			checkpoint.runtime_contract_revision === RUNTIME_PROTOCOL_REVISION &&
+			checkpoint.runtime_contract_hash === RUNTIME_PROTOCOL_HASH &&
 			checkpoint.agent_ref === gate.bindingSnapshot.agentInstanceRef &&
 			checkpoint.installation_id === gate.bindingSnapshot.installationId &&
 			checkpoint.operation_id === gate.operationId && checkpoint.proposal_hash === gate.proposalHash &&
@@ -587,13 +589,16 @@ export class RocksEngineMutations {
 			const revision = await tx.revision("metadata", marker);
 			let scan = await tx.get<Scan>("metadata", key);
 			if (!scan?.stack || scan.checkpoint.gate_revision !== gate.gateRevision ||
+				scan.checkpoint.runtime_contract_revision !== RUNTIME_PROTOCOL_REVISION ||
+				scan.checkpoint.runtime_contract_hash !== RUNTIME_PROTOCOL_HASH ||
 				scan.checkpoint.census_mutation_revision !== revision ||
 				scan.checkpoint.engine_generation !== generation) {
 				scan = { stack: [{ id, ref: params.agentInstanceRef, stage: 0 }], checkpoint: {
 					agent_ref: params.agentInstanceRef, installation_id: params.installationId,
 					operation_id: params.operationId, proposal_hash: params.proposalHash, binding_revision: params.bindingRevision,
 					gate_revision: gate.gateRevision, census_mutation_revision: revision,
-					runtime_contract_revision: RUNTIME_PROTOCOL_REVISION, engine_generation: generation, status: "unknown",
+					runtime_contract_revision: RUNTIME_PROTOCOL_REVISION, runtime_contract_hash: RUNTIME_PROTOCOL_HASH,
+					engine_generation: generation, status: "unknown",
 					nonterminal_starts: 0, nonterminal_attempts: 0, open_effects: 0, unsettled_children: 0,
 					mutable_pending_writes: 0, next_cursor: null } };
 			}

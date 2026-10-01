@@ -1601,6 +1601,7 @@
         "gate_revision",
         "census_mutation_revision",
         "runtime_contract_revision",
+        "runtime_contract_hash",
         "status",
         "nonterminal_starts",
         "nonterminal_attempts",
@@ -1634,6 +1635,9 @@
         },
         "runtime_contract_revision": {
           "const": 17
+        },
+        "runtime_contract_hash": {
+          "$ref": "#/$defs/bytesHash"
         },
         "engine_generation": {
           "$ref": "#/$defs/semanticRevision"
