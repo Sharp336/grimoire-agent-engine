@@ -389,6 +389,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	requestReads: Map<string, { requestId: string; inputRevision: number; resultHash: string }>;
 	requestNotices: Set<string>;
 	requestTurnDrained?: boolean;
+	/** Attempt whose sole prompt owner is idle while live submitted work drains. */
+	drainingAttemptId?: string;
 	pendingInput?: PendingInput;
 }
 
@@ -401,6 +403,7 @@ interface SubmittedRun {
 	dispatch: EngineRequestDispatch;
 	controller: AbortController;
 	pending: Set<string>;
+	rootPendingRequestId?: string;
 	members: Set<string>;
 	activeSideRequests: number;
 	changed: PromiseWithResolvers<void>;
@@ -1051,8 +1054,10 @@ export class EngineRuntime {
 			if (binding.steerCommandSet.has(request.commandId)) return this.#controlResult(binding);
 			await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision, true);
 			const waiting = binding.attemptState === "waiting_request";
+			const idleDrain = () => this.#idleDrainOwner(binding);
 			const steerableState = binding.attemptState === "running" || waiting;
-			if (binding.state !== "running" || !steerableState || binding.manualHold || (!waiting && !binding.session.isStreaming)) {
+			if (binding.state !== "running" || !steerableState || binding.manualHold ||
+				(!waiting && !binding.session.isStreaming && !idleDrain())) {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is not streaming`);
 			}
 			const item = queued ? await this.store.getInboxItem(binding.session.sessionId, request.queueId!) : undefined;
@@ -1078,7 +1083,7 @@ export class EngineRuntime {
 				: undefined;
 			const images = preparedAttachments?.images;
 			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
-			if (binding.state !== "running" || (!waiting && !binding.session.isStreaming))
+			if (binding.state !== "running" || (!waiting && !binding.session.isStreaming && !idleDrain()))
 				throw new EngineTargetError(
 					"too_late",
 					"The Attempt stopped streaming while attachments were being prepared",
@@ -1092,8 +1097,9 @@ export class EngineRuntime {
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
 			if (references && !item?.attachments) binding.directUploads.set(request.clientMessageId!, references);
+			const drained = !waiting && idleDrain();
 			try {
-				await binding.session[waiting ? "acceptEngineQueuedInput" : "steer"](
+				await binding.session[waiting || drained ? "acceptEngineQueuedInput" : "steer"](
 					item?.deliveryPayload ?? request.message ?? "",
 					images,
 					{
@@ -1135,7 +1141,7 @@ export class EngineRuntime {
 						...(routingResume ? { routingResume } : {}),
 						settleCommandId: request.commandId,
 						settleCommandReceipt: { outcome: "applied", detail: result },
-						...(waiting ? { transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint() } : {}),
+						...(waiting || drained ? { transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint() } : {}),
 						...(item
 							? {
 									inboxSessionId: binding.session.sessionId,
@@ -1167,6 +1173,7 @@ export class EngineRuntime {
 				binding.requestTurnDrained = false;
 				this.#trackRun(this.#runPrompt(binding, "", undefined, "resume_queued"));
 			}
+			if (drained) this.#notifyPauseProgress(binding);
 			this.#signalInboxWake();
 			return result;
 		});
@@ -3875,6 +3882,8 @@ export class EngineRuntime {
 
 	/** Called only in the Agent mutation lane; a decision never interrupts an active turn. */
 	async #wakeWaitingRequest(binding: LiveBinding): Promise<void> {
+		// A running Attempt keeps its one prompt owner; it observes the resolution while draining.
+		if (binding.attemptState === "running") this.#notifyPauseProgress(binding);
 		if (binding.attemptState !== "waiting_request" || binding.manualHold) return;
 		await this.store.assertIntent(binding.agentInstanceId, binding.intentRevision, true);
 		if (!await this.store.renewRouting(binding.attemptId, this.engineGeneration))
@@ -3993,21 +4002,12 @@ export class EngineRuntime {
 			if (run?.binding === binding) waiting.set(id, run);
 		}
 		for (const [id, run] of waiting) {
-			let current: string | undefined = id;
-			while (current && !effects.has(current)) {
-				const record = this.#toolInvocations.get(current);
-				if (!record || record.submittedRun !== run) break;
-				effects.add(current);
-				calls.add(record.toolCallId);
-				current = record.submittedParentEffectId;
-				if (run.activeSideRequests) break;
-			}
+			const record = this.#toolInvocations.get(id);
+			if (!record || record.submittedRun !== run) continue;
+			// Only the host gate is suspended; its callers may still run delayed tails or other calls.
+			effects.add(id);
+			calls.add(record.toolCallId);
 		}
-		for (const run of waiting.values())
-			if (!run.activeSideRequests && [...run.members].every(id => {
-				const record = this.#toolInvocations.get(id);
-				return !record || record.executionFinished || effects.has(id);
-			})) calls.add(run.wrapperCallId);
 		return { effects, calls };
 	}
 
@@ -4025,7 +4025,7 @@ export class EngineRuntime {
 				const record = this.#toolInvocations.get(id);
 				return record && !record.executionFinished && !parked.has(id);
 			});
-			if (run.pending.size && !active) {
+			if (run.pending.size) {
 				run.dispatch.setUpdateHandler(undefined);
 				const requestId = run.pending.values().next().value!;
 				const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
@@ -4037,12 +4037,13 @@ export class EngineRuntime {
 				if (active || (root && !root.executionFinished)) { await changed; continue; }
 				if (run.termination) return { isError: true,
 					content: [{ type: "text", text: run.termination.reason }], details: { operationOutcome: run.termination.status } };
-				if ("result" in run.outcome) return run.outcome.result;
-				if (run.outcome.error instanceof EngineRequestPending) {
-					const requestId = run.outcome.error.requestId;
+				if (run.rootPendingRequestId) {
+					const requestId = run.rootPendingRequestId;
 					const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
+					validateRuntimeValue("requestToolPending", pending);
 					return { content: [{ type: "text", text: JSON.stringify(pending) }], details: { requestResult: pending } };
 				}
+				if ("result" in run.outcome) return run.outcome.result;
 				throw run.outcome.error;
 			}
 			await changed;
@@ -4051,13 +4052,14 @@ export class EngineRuntime {
 
 	async #parkSubmittedLeaf(record: ToolInvocationRecord, signal?: AbortSignal): Promise<void> {
 		const run = record.submittedRun;
-		if (!run || run.rootEffectId === record.invocationId)
+		if (!run || run.rootEffectId === record.invocationId) {
+			if (run) run.rootPendingRequestId = record.invocationId;
 			throw new EngineRequestPending(record.invocationId);
+		}
 		const gate = Promise.withResolvers<void>();
 		this.#requestContinuations.set(record.invocationId, { run, gate });
 		run.pending.add(record.invocationId);
 		run.binding.parkedEffectTools.add(record.toolCallId);
-		run.binding.parkedEffectTools.add(run.root.tool_call_id);
 		this.#submittedRunChanged(run);
 		const abort = () => {
 			this.#trackRun(this.#cancelSubmittedRun(run,
@@ -4072,7 +4074,6 @@ export class EngineRuntime {
 			this.#requestContinuations.delete(record.invocationId);
 			run.pending.delete(record.invocationId);
 			run.binding.parkedEffectTools.delete(record.toolCallId);
-			if (!run.pending.size) run.binding.parkedEffectTools.delete(run.root.tool_call_id);
 			this.#submittedRunChanged(run);
 		}
 	}
@@ -4672,6 +4673,7 @@ export class EngineRuntime {
 					throw new EngineTargetError("cancelled", "Nested escalation was not approved");
 				return decision.origin_receipt_id;
 			}
+			if (record.submittedRun) record.submittedRun.rootPendingRequestId = record.invocationId;
 			this.#toolInvocations.delete(record.invocationId);
 			record.resolveDone();
 			throw new EngineRequestPending(record.invocationId);
@@ -5215,7 +5217,8 @@ export class EngineRuntime {
 				if (pending.record.target.bindingId === binding.bindingId) suspended.add(pending.record.toolCallId);
 			if (binding.pendingInput)
 				for (const [id, tool] of binding.traceTools) if (tool.name === "ask") suspended.add(id);
-			const active = [...binding.activeToolCallIds].some(id => !suspended.has(id));
+			const active = [...binding.activeToolCallIds].some(id => !suspended.has(id)) ||
+				this.#submittedWorkActive(binding);
 			if (
 				!active && binding.sideModelCalls.size === 0 &&
 				(binding.pauseGate.parked || suspended.size > 0 || binding.pendingInput || !binding.session.isStreaming)
@@ -6476,6 +6479,64 @@ export class EngineRuntime {
 		});
 	}
 
+	/** Unfinished submitted work is live unless it is exactly a parked host gate. */
+	#submittedWorkActive(binding: LiveBinding): boolean {
+		const parked = this.#parkedSubmittedWork(binding).effects;
+		for (const record of this.#toolInvocations.values()) {
+			const run = record.submittedRun;
+			if (run?.binding !== binding || record.target.attemptId !== binding.attemptId) continue;
+			if (run.activeSideRequests > 0 || (!record.executionFinished && !parked.has(record.invocationId))) return true;
+		}
+		return false;
+	}
+
+	#idleDrainOwner(binding: LiveBinding): boolean {
+		return this.#bindings.get(binding.agentInstanceId) === binding && binding.attemptState === "running" &&
+			binding.drainingAttemptId === binding.attemptId && !binding.manualHold && !binding.session.isStreaming;
+	}
+
+	/**
+	 * Waits for existing drain work. While live submitted work keeps the Attempt running, the idle
+	 * prompt owner instead takes an accepted queued input or a not-yet-noticed resolved request.
+	 */
+	async #untilDrainedOrTurn(binding: LiveBinding, attemptId: string, work: Promise<unknown>): Promise<"queued" | "request" | undefined> {
+		let finished = false;
+		const settled = work.finally(() => { finished = true; });
+		try {
+			for (;;) {
+				const progress = binding.pauseProgress.promise;
+				const live = binding.attemptId === attemptId && this.#submittedWorkActive(binding);
+				binding.drainingAttemptId = live ? attemptId : undefined;
+				const turn = live ? await this.#drainTurn(binding, attemptId) : undefined;
+				if (turn) {
+					settled.catch(() => undefined);
+					return turn;
+				}
+				if (finished) {
+					await settled;
+					return undefined;
+				}
+				await Promise.race([settled, progress]);
+			}
+		} finally {
+			if (binding.drainingAttemptId === attemptId) binding.drainingAttemptId = undefined;
+		}
+	}
+
+	#drainTurn(binding: LiveBinding, attemptId: string): Promise<"queued" | "request" | undefined> {
+		return this.#inLane(binding.agentInstanceId, async () => {
+			if (binding.attemptId !== attemptId || !this.#idleDrainOwner(binding)) return undefined;
+			if (binding.session.agent.hasQueuedMessages()) return "queued";
+			const notices = (await this.store.retainedRequestInputs(this.#snapshot(binding))).filter(row =>
+				row.resolved && !requestConsumptionMatches(row) &&
+				!binding.requestNotices.has(`${row.value.inputId}:${row.value.revision}`));
+			if (!notices.length) return undefined;
+			await this.store.assertIntent(binding.agentInstanceId, binding.intentRevision, true);
+			for (const row of notices) binding.requestNotices.add(`${row.value.inputId}:${row.value.revision}`);
+			return "request";
+		});
+	}
+
 	async #waitForAttemptQuiescence(binding: LiveBinding, attemptId: string): Promise<void> {
 		const filter = { ownerId: binding.engineAgentId, attemptId };
 		for (;;) {
@@ -6491,10 +6552,18 @@ export class EngineRuntime {
 				}
 			}
 			const parked = this.#parkedSubmittedWork(binding).calls;
-			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId,
-				isParked: job => Boolean(job.sourceToolCallId && parked.has(job.sourceToolCallId)) });
-			await this.asyncJobManager.drainDeliveries({ filter });
-			await this.#waitForToolInvocations(binding, attemptId);
+			let turn = await this.#untilDrainedOrTurn(binding, attemptId,
+				this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId,
+					isParked: job => Boolean(job.sourceToolCallId && parked.has(job.sourceToolCallId)) }));
+			if (!turn) {
+				await this.asyncJobManager.drainDeliveries({ filter });
+				turn = await this.#untilDrainedOrTurn(binding, attemptId, this.#waitForToolInvocations(binding, attemptId));
+			}
+			if (turn) {
+				await this.#dispatchModel(binding, turn === "queued" ? "" : engineRequestReadyPrompt, undefined,
+					turn === "queued" ? "resume_queued" : "continue_after_assistant");
+				continue;
+			}
 			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 			binding.streamAdmission?.check();
 			await binding.session.waitForIdle();

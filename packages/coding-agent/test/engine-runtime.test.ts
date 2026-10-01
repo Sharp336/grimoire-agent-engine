@@ -1073,8 +1073,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it.each(["mounted", "nested", "denied", "worker", "worker-denied", "worker-shared-denied", "worker-stop", "parallel"] as const)("preserves %s request ownership through the real mounted tool boundary", async mode => {
+	it.each(["mounted", "nested", "denied", "worker", "worker-denied", "worker-shared-denied", "worker-stop", "parallel", "delayed"] as const)("preserves %s request ownership through the real mounted tool boundary", async mode => {
 		const reached = Promise.withResolvers<void>();
+		const queuedTurn = Promise.withResolvers<void>();
+		const delayed = mode === "delayed";
 		const release = Promise.withResolvers<void>();
 		const allRequested = Promise.withResolvers<void>();
 		const independentLive = Promise.withResolvers<void>();
@@ -1082,6 +1084,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		let independentLaunched = false;
 		const requests: Array<Extract<EngineEvent, { kind: "tool_approval_requested" }>["payload"]> = [];
 		const worker = mode.startsWith("worker") || mode === "parallel";
+		const evalOperation = worker || delayed;
 		const denied = mode.endsWith("denied");
 		let continuationOrdinal = 0;
 		let phase = 0;
@@ -1092,11 +1095,16 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const mock = createMockModel({ handler: async context => {
 			switch (phase++) {
 				case 0: return call("submit-mounted", "request", { action: "submit", handling: "nonblocking",
-					operation: worker ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
+					operation: delayed ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
+						'const pending=tool.read({path:"protected-read.txt"}); await new Promise(resolve=>setTimeout(resolve,1500));' +
+						'await tool.write({path:"sibling-after.txt",content:"after"}); display(await pending);' } }
+					: worker ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
 						'globalThis.requestKernelMarker="same-kernel"; await tool.write({path:"sibling-before.txt",content:"before"});' +
 						(mode === "parallel"
 							? 'const value=await Promise.all([tool.read({path:"protected-read.txt"}),tool.read({path:"protected-read.txt"})]);'
-							: 'const value=await tool.read({path:"protected-read.txt"});') +
+							: shared
+								? 'let value; try { value=await tool.read({path:"protected-read.txt"}); } catch { value="caught"; }'
+								: 'const value=await tool.read({path:"protected-read.txt"});') +
 						'await tool.write({path:"sibling-after.txt",content:"after"}); display(value);' } }
 						: mode === "mounted" ? { toolName: "read", arguments: { path: "protected-read.txt" } }
 							: { toolName: "write", arguments: { path: "xd://read", content: JSON.stringify({ path: "protected-read.txt" }) } } });
@@ -1110,6 +1118,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					}
 					reached.resolve();
 					if (mode === "worker-stop") { phase = 4; return { content: ["Wait for the request."] }; }
+					if (delayed) { phase = 5; return { content: ["Wait for the request."] }; }
 					await release.promise;
 					return call(`read-mounted-decision-${continuationOrdinal}`, "request", { action: "read", requestId });
 				case 2: {
@@ -1137,15 +1146,24 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				case 4:
 					if (shared) return call("independent-write", "write", { path: "independent-after-request.txt", content: "still authorized" });
 					return { content: ["done"] };
+				case 5: {
+					const queued = context.messages.findLast(message => message.role === "user");
+					expect(JSON.stringify(queued?.content)).toContain("queued while composite lives");
+					queuedTurn.resolve();
+					return { content: ["Queued work handled."] };
+				}
+				case 6:
+					phase = 2;
+					return call(`read-mounted-decision-${continuationOrdinal}`, "request", { action: "read", requestId });
 				default: return { content: ["done"] };
 			}
 		} });
 		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
-			toolNames: ["request", "write", "read", ...(worker ? ["eval"] : [])], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"],
+			toolNames: ["request", "write", "read", ...(evalOperation ? ["eval"] : [])], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"],
 		} });
 		const { runtime, cwd } = await createRuntime(execution, async (session, input, identity) => {
 			await session.setActiveToolPresentation(["request", "write", ...(shared ? ["eval"] : [])],
-				["read", ...(worker && !shared ? ["eval"] : [])]);
+				["read", ...(evalOperation && !shared ? ["eval"] : [])]);
 			expect(session.getActiveToolNames()).not.toContain("read");
 			expect(session.getEnabledToolNames()).toContain("read");
 			return session.prompt(input, identity);
@@ -1180,12 +1198,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBeFalse();
 			}
 			if (mode === "worker-stop") {
-				await runtime.drain();
-				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+				// The live evaluator awaiting its leaf is not a proven suspension point.
+				await scheduler.wait(100);
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
 				await runtime.pause({ ...started, commandId: "pause-worker-request", initiator: { kind: "human" } });
+				await scheduler.wait(200);
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("pause_requested");
+				expect(await runtime.store.runtimeCommand(`mounted-${mode}`)).toMatchObject({ lease: { held: true } });
 				await runtime.resume({ ...started, commandId: "resume-worker-request", initiator: { kind: "human" } });
-				await runtime.drain();
-				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
 				await runtime.cancel({ ...started, commandId: "stop-worker-request" });
 				await runtime.drain();
 				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
@@ -1194,6 +1215,22 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				expect((await runtime.store.attemptToolEffects(started.attemptId)).filter(effect =>
 					effect.state === "started" || effect.state === "planned")).toEqual([]);
 				return;
+			}
+			if (delayed) {
+				await scheduler.wait(100);
+				await runtime.pause({ ...started, commandId: "pause-delayed-tail", initiator: { kind: "human" } });
+				await scheduler.wait(300);
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("pause_requested");
+				expect(await runtime.store.runtimeCommand(`mounted-${mode}`)).toMatchObject({ lease: { held: true } });
+				expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBeFalse();
+				await runtime.resume({ ...started, commandId: "resume-delayed-tail", initiator: { kind: "human" } });
+				const tail = path.join(cwd, "sibling-after.txt");
+				for (let wait = 0; wait < 100 && !fs.existsSync(tail); wait++) await scheduler.wait(50);
+				expect(fs.readFileSync(tail, "utf8")).toBe("after");
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+				await runtime.steer({ ...started, commandId: "steer-delayed-live", message: "queued while composite lives" });
+				await withTimeout(queuedTurn.promise, 5_000, "Queued input did not run while the composite root lived");
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
 			}
 			for (const request of requests) {
 				expect(request.handling).toBe("nonblocking");
@@ -1207,7 +1244,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const result = toolResultOf(mock, `continue-mounted-${continuationOrdinal}`);
 			expect(result?.isError).toBe(denied);
 			if (!denied) expect(JSON.stringify(result?.content)).toContain("whole-operation-value");
-			if (worker) expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBe(!denied);
+			if (evalOperation) expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBe(!denied);
 			expect(fs.readFileSync(path.join(cwd, "independent-after-request.txt"), "utf8")).toBe("still authorized");
 			if (shared) {
 				const independent = runtime.asyncJobManager.getAllJobs({ ownerId: started.engineAgentId, attemptId: started.attemptId })
@@ -1225,6 +1262,86 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			unsubscribe();
 			registration?.mockRestore();
 			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("returns the trusted handle for a direct hosted MCP escalation and keeps ordinary MCP errors", async () => {
+		const subject = { action: "gated_probe", scope: "fixture" };
+		const subjectHash = `sha256:${crypto.createHash("sha256").update(storageCanonicalJson(subject)).digest("hex")}`;
+		let gatedCalls = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				if (request.method === "DELETE") return new Response(null, { status: 204 });
+				if (request.method === "GET") return new Response(null, { status: 405 });
+				const message = (await request.json()) as { id?: string | number; method: string; params?: { name?: string } };
+				if (message.id === undefined) return new Response(null, { status: 202 });
+				const reply = (result: unknown, headers?: Record<string, string>) =>
+					Response.json({ jsonrpc: "2.0", id: message.id, result }, headers ? { headers } : undefined);
+				if (message.method === "initialize")
+					return reply({ protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "escalation", version: "1" } },
+						{ "Mcp-Session-Id": "escalation-fixture" });
+				if (message.method === "tools/list")
+					return reply({ tools: ["gated_probe", "failing_probe"].map(name => ({
+						name, description: `${name} fixture`, inputSchema: { type: "object", properties: {} },
+					})) });
+				if (message.method === "tools/call" && message.params?.name === "gated_probe") {
+					gatedCalls++;
+					return reply({ content: [{ type: "text", text: JSON.stringify({ status: "escalation_required", subject, subject_hash: subjectHash }) }] });
+				}
+				if (message.method === "tools/call")
+					return reply({ isError: true, content: [{ type: "text", text: "ordinary failure" }] });
+				return Response.json({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "unsupported fixture method" } });
+			},
+		});
+		const discover = spyOn(mcpConfig, "loadAllMCPConfigs").mockResolvedValue({ configs: {}, sources: {}, exaApiKeys: [] });
+		const gated = "mcp__grimoire_engine_gated_probe";
+		const failing = "mcp__grimoire_engine_failing_probe";
+		const call = (id: string, name: string, args: Record<string, unknown>) =>
+			({ content: [{ type: "toolCall" as const, id, name, arguments: args }] });
+		let turn = 0;
+		const mock = createMockModel({ handler: async () => {
+			switch (turn++) {
+				case 0: return call("submit-gated", "request", { action: "submit", handling: "nonblocking", operation: { toolName: gated, arguments: {} } });
+				case 1: return call("submit-failing", "request", { action: "submit", handling: "nonblocking", operation: { toolName: failing, arguments: {} } });
+				default: return { content: ["done"] };
+			}
+		} });
+		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
+			enableMCP: true, toolPolicies: { [gated]: "permit", [failing]: "permit" }, tools_permit: [gated, failing],
+		} });
+		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
+			mcpServer: {
+				...hostedCoreMcpConfig({ serverUrl: `${server.url}mcp/client_agents`, token: "isolated-mcp-test", clientId: "engine-route-test" }),
+				timeout: 1000,
+			},
+		});
+		try {
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "direct-mcp-escalation", agentInstanceId: "direct-mcp-escalation",
+				agentInstanceRef: "grimoire://tasks/grimoire/requests/agents/direct-mcp-escalation",
+				executionId: "direct-mcp-escalation-execution", attemptId: "direct-mcp-escalation-attempt",
+			}, { cwd, principalId: "owner", input: "Submit the hosted operations" }));
+			await runtime.drain();
+			// The SDK adapter normalizes the pending escalation into an error; only the host-owned identity is the handle.
+			const gatedResult = toolResultOf(mock, "submit-gated");
+			expect(gatedResult?.isError).toBeFalsy();
+			const handle = JSON.parse(gatedResult!.content.filter(block => block.type === "text").map(block => block.text).join(""));
+			expect(handle).toMatchObject({ status: "pending", handling: "nonblocking" });
+			expect(handle.effectId).toBe(handle.requestId);
+			expect(await runtime.store.getApproval(handle.requestId)).toMatchObject({ state: "pending",
+				request: { kind: "escalation", handling: "nonblocking", requester_attempt_id: started.attemptId } });
+			expect(gatedCalls).toBe(1);
+			const failingResult = toolResultOf(mock, "submit-failing");
+			expect(failingResult?.isError).toBeTrue();
+			expect(JSON.stringify(failingResult?.content)).toContain("ordinary failure");
+			expect(JSON.stringify(failingResult?.content)).not.toContain("requestId");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+		} finally {
+			discover.mockRestore();
+			await runtime.dispose();
+			server.stop(true);
 		}
 	}, 60_000);
 

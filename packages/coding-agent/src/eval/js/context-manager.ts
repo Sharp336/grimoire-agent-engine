@@ -64,6 +64,9 @@ interface PendingRun {
 	deferDrained?: PromiseWithResolvers<void>;
 	/** Set once the turn was cancelled; blocks new bridge calls during the drain. */
 	aborted: boolean;
+	/** Whole-session cancellation owns settlement; soft request cancellation waits for the worker. */
+	killRequested: boolean;
+	abortError?: Error;
 	/**
 	 * A worker `result` withheld because the cell still has bridge calls in
 	 * flight. `#runOne` reports a finished run without awaiting its pending
@@ -296,6 +299,7 @@ async function runOnce(
 		toolCalls: new Map(),
 		deferDepth: 0,
 		aborted: false,
+		killRequested: false,
 		settled: false,
 	};
 	session.pending.set(runId, pending);
@@ -303,6 +307,9 @@ async function runOnce(
 	const abortRun = (force: boolean): void => {
 		const reason = options.runState.signal?.reason;
 		const abortError = reasonToError(reason, "Execution aborted");
+		pending.abortError = abortError;
+		pending.killRequested ||= force || !pending.requestOwned ||
+			pending.toolSession.engineRequest?.mayTerminateSharedKernel() === true;
 		// Stop delegated work at once — this is what kills spawned subagents —
 		// and refuse further bridge calls so the drain below stays bounded to
 		// phases that had already started.
@@ -310,7 +317,7 @@ async function runOnce(
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(abortError);
 		// Per-submission refusal has no authority to kill other runs sharing this persistent kernel.
 		// Keep awaiting the real result; an uncooperative cancelled run remains non-quiescent.
-		if (!force && pending.requestOwned && !pending.toolSession.engineRequest?.mayTerminateSharedKernel()) return;
+		if (!pending.killRequested) return;
 		// A critical host phase ignores its abort once started (isolation
 		// worktree setup, merge/cherry-pick). Killing the worker now would
 		// settle the cell on top of a git operation still in progress, so wait
@@ -561,7 +568,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		pending.toolCalls.delete(msg.id);
 		// Last call of a run whose worker result was withheld: settle it now.
 		const held = pending.heldResult;
-		if (held && !pending.settled && !pending.aborted && pending.toolCalls.size === 0) {
+		if (held && !pending.settled && !pending.killRequested && pending.toolCalls.size === 0) {
 			finishPending(pending, held);
 		}
 	}
@@ -571,6 +578,10 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 function finishPending(pending: PendingRun, msg: Extract<WorkerOutbound, { type: "result" }>): void {
 	pending.settled = true;
 	pending.heldResult = undefined;
+	if (pending.aborted) {
+		pending.reject(pending.abortError ?? new ToolError("Execution aborted"));
+		return;
+	}
 	if (msg.ok) {
 		pending.resolve({ value: undefined });
 		return;
@@ -581,9 +592,9 @@ function finishPending(pending: PendingRun, msg: Extract<WorkerOutbound, { type:
 function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: "result" }>): void {
 	const pending = session.pending.get(msg.runId);
 	if (!pending || pending.settled) return;
-	// Once the turn is cancelled the scheduled kill is the sole settler, so a
-	// late worker result can't cut the abort drain short.
-	if (pending.aborted) return;
+	// A whole-session kill owns its drain. Soft request cancellation must consume
+	// the actual worker result without terminating independent runs in this kernel.
+	if (pending.killRequested) return;
 	// A cell owns every bridge call it starts. The worker finishes a run without
 	// awaiting its outstanding tool calls, so `agent(...)` that is floated or
 	// caught would settle the run here — `runOnce` then drops the abort listener
