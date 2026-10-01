@@ -1764,12 +1764,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		let prebindingTarget: Record<string, unknown> | undefined;
 		const { runtime, cwd } = await createRuntime(execution, async () => true, {
 			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				// Same unqualified read as ClientHost provider preparation: the durable binding row was committed
+				// atomically with the running Attempt, while the live native session is not opened yet.
 				prebindingTarget = await runtime.store.runtimeTarget({
 					principalId: attempt.expectedPrincipalId, agentInstanceRef: attempt.agentInstanceRef,
-					attemptId: attempt.attemptId,
 				});
 				validateRuntimeValue("nativeTarget", prebindingTarget);
-				expect(await runtime.store.getBinding(engineAgentInstanceId(attempt.agentInstanceRef))).toBeUndefined();
+				const durable = await runtime.store.getBinding(engineAgentInstanceId(attempt.agentInstanceRef));
+				expect(durable).toMatchObject({ attemptId: attempt.attemptId, commandId: "target-start", state: "running" });
+				expect(durable?.sessionFile).toBeUndefined();
 				expect(await runtime.store.runtimeCommand("target-start", { principalId: "owner" })).toMatchObject({
 					attemptState: "running", lease: { held: true },
 				});
