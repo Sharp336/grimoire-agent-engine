@@ -136,6 +136,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = undefined,
 		overrides: Partial<EngineRuntimeOptions> = {},
 		additionalExecutions: readonly AdmittedExecutionFixture[] = [],
+		/** Extra overrides sealed into the same read-only snapshot Engine mode requires. */
+		settingsOverrides: Parameters<typeof Settings.isolated>[0] = {},
 	) {
 		const { blobsDir } = await testStorage();
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-runtime-${Snowflake.next()}-`));
@@ -146,7 +148,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const settings = await Settings.loadReadOnly({
 			cwd,
 			agentDir,
-			overrides: { "bash.autoBackground.enabled": true },
+			overrides: { "bash.autoBackground.enabled": true, ...settingsOverrides },
 		});
 		const executions = [execution, ...additionalExecutions];
 		const options: EngineRuntimeOptions = {
@@ -2061,14 +2063,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			endpoint: "https://compact.invalid/v1/responses/compact", v2StreamingEnabled: false,
 		} });
 		const execution = admittedExecution(mock.model, modelRegistry);
-		const settings = Settings.isolated({
-			"compaction.enabled": mode === "automatic",
-			"compaction.asyncEnabled": false,
-			"compaction.methodOrder": ["remote"],
-			"compaction.thresholdPercent": 1,
-			"compaction.keepRecentTokens": 1,
-			"compaction.autoContinue": false,
-		});
 		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
 		let requests = 0;
 		const provider = mockProviderFetch("https://compact.invalid/", async url => {
@@ -2090,7 +2084,6 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}, {
 				resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
 					const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
-					resolved.options.settings = settings;
 					const route = config.routes.routes[0]!;
 					resolved.options.providerRequestHook = new ProviderAdmissionClient(
 						"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
@@ -2102,6 +2095,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					}]);
 					return resolved;
 				},
+			}, [], {
+				"compaction.enabled": mode === "automatic",
+				"compaction.asyncEnabled": false,
+				"compaction.methodOrder": ["remote"],
+				"compaction.thresholdPercent": 1,
+				"compaction.keepRecentTokens": 1,
+				"compaction.autoContinue": false,
 			});
 			const { runtime, cwd } = created;
 			const started = await admitRequest(runtime, startRequest(execution, {
@@ -2133,12 +2133,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	it("compacts a terminal session locally without resolving credentials or reopening provider work", async () => {
 		const mock = createMockModel({ handler: { content: ["retained answer ".repeat(2_000)] }, input: ["text", "image"] });
 		const execution = admittedExecution(mock.model, modelRegistry);
-		execution.setModelOverride({ settings: Settings.isolated({
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {}, [], {
 			"compaction.enabled": false,
 			"compaction.methodOrder": ["snapcompact"],
 			"compaction.keepRecentTokens": 1,
-		}) });
-		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		});
 		try {
 			const started = await admitRequest(runtime, startRequest(execution, {
 				commandId: "idle-local-compact", agentInstanceId: "idle-local-compact",
