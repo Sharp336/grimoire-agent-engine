@@ -25,6 +25,38 @@ import type { AuthStorage } from "../src/session/auth-storage";
 import { createProviderRetryBudgetHook, withProviderRetryBudget } from "../src/session/provider-retry-budget";
 
 describe("ProviderAdmissionClient", () => {
+	it("refuses a managed 307 redirect before sending the prompt to another origin", async () => {
+		let forwarded = 0;
+		let admitted = 0;
+		const destination = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+			forwarded++;
+			return new Response("must not receive prompt");
+		} });
+		const origin = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => {
+			admitted++;
+			return new Response(null, { status: 307, headers: { Location: `${destination.url}sink` } });
+		} });
+		try {
+			const route = { ...identity(), runtimeProviderId: "artel-route-redirect", modelId: "gpt-5.6-terra",
+				baseUrl: String(origin.url).replace(/\/$/, "") };
+			const model = buildModel({ id: route.modelId, name: "Redirect fixture", api: "openai-completions",
+				provider: route.runtimeProviderId, baseUrl: route.baseUrl, reasoning: false, input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128_000, maxTokens: 1_000 });
+			const hook = new ProviderAdmissionClient("http://127.0.0.1/admission", "fixture", async () =>
+				Response.json({ allowed: true })).createHook(undefined, {} as AuthStorage, "", [route]);
+			await withProviderObservationContext({ effectId: "redirect-effect", modelCallId: "redirect-model" }, async () => {
+				await expect(hook.wrapFetch(model, globalThis.fetch)(`${route.baseUrl}/chat/completions`, {
+					method: "POST", body: "private-prompt", redirect: "follow",
+				})).rejects.toThrow();
+			}, undefined, { register: async () => {}, settle: async () => {} });
+			expect(admitted).toBe(1);
+			expect(forwarded).toBe(0);
+		} finally {
+			origin.stop(true);
+			destination.stop(true);
+		}
+	});
+
 	it("keeps first nonempty content on its Response after another fetch, without changing emitted content", async () => {
 		const route = {
 			...identity(),

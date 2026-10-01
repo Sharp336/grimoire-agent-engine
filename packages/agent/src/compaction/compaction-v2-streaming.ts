@@ -242,6 +242,7 @@ export async function requestCompactionV2Streaming(
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
 		onUsage?: RemoteCompactionTransport["onUsage"];
+		serviceTier?: RemoteCompactionTransport["serviceTier"];
 	},
 ): Promise<CompactionV2Response> {
 	const endpoint = getCompactionV2Endpoint(model);
@@ -275,6 +276,7 @@ export async function requestCompactionV2Streaming(
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
 				onUsage: options?.onUsage,
+				serviceTier: options?.serviceTier,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
@@ -312,6 +314,7 @@ async function attemptCompactionV2Streaming(
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
 		onUsage?: RemoteCompactionTransport["onUsage"];
+		serviceTier?: RemoteCompactionTransport["serviceTier"];
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -325,6 +328,7 @@ async function attemptCompactionV2Streaming(
 		instructions: request.instructions,
 		stream: true,
 		store: false,
+		...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
 		...(request.reasoning || model.useResponsesLite
 			? {
 					// Lite implies gpt-5.4+, where codex-rs sends `all_turns` replay.

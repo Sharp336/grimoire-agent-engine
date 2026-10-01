@@ -34,6 +34,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	FetchImpl,
+	ServiceTier,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -67,6 +68,8 @@ export interface RemoteCompactionTransport {
 	fetch?: FetchImpl;
 	signal?: AbortSignal;
 	onUsage?: (accounting: RemoteCompactionAccounting) => void;
+	serviceTier?: ServiceTier;
+	strictServiceTier?: boolean;
 }
 
 /** Encloses credential resolution, transport, body parsing and durable accounting as one call. */
@@ -276,6 +279,7 @@ export interface OpenAiRemoteCompactionRequest {
 	model: string;
 	input: Array<Record<string, unknown>>;
 	instructions: string;
+	service_tier?: ServiceTier;
 	reasoning?: {
 		context?: string;
 		[key: string]: unknown;
@@ -788,6 +792,7 @@ export async function requestOpenAiRemoteCompaction(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		onUsage?: RemoteCompactionTransport["onUsage"];
+		serviceTier?: ServiceTier;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
@@ -815,6 +820,7 @@ export async function requestOpenAiRemoteCompaction(
 		// reasoning, or call/result pairing.
 		input: trimmed.input,
 		instructions,
+		...(opts?.serviceTier ? { service_tier: opts.serviceTier } : {}),
 	};
 	const isAzureOpenAiResponses = (model.remoteCompaction?.api ?? model.api) === "azure-openai-responses";
 	const isCodexResponses =
@@ -948,7 +954,7 @@ export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string; onUsage?: RemoteCompactionTransport["onUsage"] },
+	opts?: RemoteCompactionTransport & { timeoutMs?: number; model?: Model; apiKey?: string },
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -957,6 +963,8 @@ export async function requestRemoteCompaction(
 		// Keep the raw endpoint for relative/custom fetch implementations.
 	}
 	const isChatCompletions = /\/chat\/completions\/?$/.test(endpointPath);
+	if (!isChatCompletions && opts?.strictServiceTier && opts.serviceTier && opts.serviceTier !== "default")
+		throw new Error("Generic remote compaction cannot realize the admitted nonstandard service tier");
 	const headers: Record<string, string> = { "content-type": "application/json" };
 	if (isChatCompletions) {
 		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
@@ -972,6 +980,7 @@ export async function requestRemoteCompaction(
 				],
 				stream: false,
 				max_tokens: request.maxTokens,
+				...(opts?.serviceTier ? { service_tier: opts.serviceTier } : {}),
 			}
 		: { systemPrompt: request.systemPrompt, prompt: request.prompt, maxTokens: request.maxTokens };
 

@@ -440,6 +440,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		const childRef = `grimoire://agents/~u/${owner}/child`;
 		const childId = engineAgentInstanceId(childRef);
 		const childSnapshot = { ...snapshot, agentInstanceRef: childRef, parentAgentInstanceRef: parentRef,
+			taskRef: `grimoire://tasks/~u/${owner}/independent-child`, workStepId: "descendant",
 			parentAttemptId: parent.attemptId, parentBindingRevision: 1 };
 		await store.registerAgent({ agentInstanceId: childId, agentInstanceRef: childRef, principalId,
 			parentAgentInstanceId: parentId, authorityGeneration: 1 });
@@ -1161,7 +1162,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			kinds: ["usage"],
 		};
 		const before = await store.runtimeSnapshot(scope, { principalId: "owner" });
-		const effect = { effectId: "model-usage", modelCallId: "model-call", inputHash: "sha256:private" };
+		const effect = { source: "primary" as const, effectId: "model-usage", modelCallId: "model-call", inputHash: "sha256:private" };
 		await store.startModelEffect(target, effect);
 		const settled = await store.settleModelEffect(
 			target,
@@ -1369,6 +1370,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		// A held child cannot even open a model effect: the guarded admission path refuses before any effect row.
 		await expect(
 			store.startModelEffect({ ...binding("child"), engineGeneration: 1 }, {
+				source: "primary",
 				effectId: "effect-child",
 				modelCallId: "model-child",
 				inputHash: "hash",

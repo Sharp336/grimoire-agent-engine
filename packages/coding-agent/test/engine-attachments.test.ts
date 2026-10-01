@@ -77,6 +77,23 @@ describe("Engine attachment admission", () => {
 		expect(JSON.stringify(manager.buildSessionContext().messages)).not.toContain("attachment://");
 	});
 
+	it("retains prepared consultant originals before a user message exists without trusting arbitrary custom data", () => {
+		const attachment = identity(Buffer.from("consultant original"));
+		const imageHash = "a".repeat(64);
+		const data = { prepared: {
+			identity: { originalAttachments: [attachment] },
+			images: [{ type: "image", mimeType: "image/png", data: `blob:sha256:${imageHash}` }],
+		} };
+		expect(collectPersistedBlobHashes([{ type: "custom", customType: "engine-consultant-input", data }]))
+			.toEqual([attachment.contentHash.slice(7), imageHash].sort());
+		expect(collectPersistedBlobHashes([{ type: "custom", customType: "unrelated", data }]))
+			.toEqual([imageHash]);
+		expect(() => collectPersistedBlobHashes([{
+			type: "custom", customType: "engine-consultant-input",
+			data: { prepared: { identity: { originalAttachments: [{ ...attachment, bytes: -1 }] } } },
+		}])).toThrow("Invalid original attachment descriptor");
+	});
+
 	it("archives only validated original user attachments and never retains upload authority in portable metadata", () => {
 		const manager = SessionManager.inMemory();
 		const attachment = identity(Buffer.from("original file"));

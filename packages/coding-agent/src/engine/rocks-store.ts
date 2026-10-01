@@ -253,11 +253,23 @@ export interface RocksTransitionOptions {
 	restoreWorkspaceReceipt?: RestoreWorkspaceReceipt;
 }
 
+interface DispatchExecutionState {
+	agentId: string;
+	bindingId: string;
+	generation: number;
+	deadline: number | null;
+	maxIterations: number | null;
+	count?: number;
+}
+
 /** Product state transitions remain here; the storage owner checks every observed revision and commits the batch. */
 export class RocksEngineMutations {
 	readonly records: RuntimeRecords;
 	#change = Promise.withResolvers<void>();
 	readonly #commitWatchers = new Set<(puts: StorageRuntimeMutation["puts"]) => void>();
+	/** Derived from explicit model-effect sources; updated only after the owning effect transaction commits. */
+	readonly #primaryIterations = new Map<string, DispatchExecutionState>();
+	readonly #iterationCommits = new WeakMap<RuntimeTransaction, DispatchExecutionState & { attemptId: string }>();
 	#installation: { installationId: string; principalId: string } | undefined;
 	readonly #agentRoots = new Map<string, string>();
 	readonly #ownedRoots = new Set<string>();
@@ -357,10 +369,19 @@ export class RocksEngineMutations {
 			},
 			dependencies,
 			durability,
-		);
+		).catch(error => {
+			for (const [id, cached] of this.#primaryIterations)
+				if (cached.agentId === scope) this.#primaryIterations.delete(id);
+			throw error;
+		});
 		const mutation = committed?.mutation();
+		const iterations = committed && this.#iterationCommits.get(committed);
+		if (iterations) this.#primaryIterations.set(iterations.attemptId, iterations);
 		if (mutation && (mutation.puts.length || mutation.deletes.length)) {
 			this.#rememberBindingRows(mutation.puts);
+			for (const row of mutation.puts)
+				if (row.kind === "attempt" && terminal.has((row.value as unknown as RocksAttempt).state))
+					this.#primaryIterations.delete(row.id);
 			for (const watch of this.#commitWatchers) watch(mutation.puts);
 			const change = this.#change;
 			this.#change = Promise.withResolvers<void>();
@@ -429,8 +450,7 @@ export class RocksEngineMutations {
 				const parent = parentAttempt?.binding_snapshot;
 				if (!parent || parentAttempt?.agent_instance_id !== parentId || parent.agentInstanceRef !== snapshot.parentAgentInstanceRef ||
 					parent.bindingRevision !== snapshot.parentBindingRevision ||
-					parent.installationId !== snapshot.installationId ||
-					parent.taskRef !== snapshot.taskRef || parent.workStepId !== snapshot.workStepId)
+					parent.installationId !== snapshot.installationId)
 					throw new EngineTargetError("stale_target", "Child birth differs from its exact admitted parent");
 				if (parentGate?.phase !== "open") throw new EngineBindingPendingError("Parent binding is closed");
 				if (!sameSemanticBinding(parentGate.bindingSnapshot, parent))
@@ -2538,6 +2558,67 @@ export class RocksEngineMutations {
 			throw new EngineTargetError("stale_target", "Native checkpoint owner changed");
 		return [{ familyId: native.familyId, generationId: native.generationId, throughSeq: native.throughSeq }];
 	}
+	/** Restore only the derived primary count; no iteration is admitted or charged by recovery. */
+	async restoreDispatchIterations(target: EventTarget): Promise<void> {
+		await this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!attempt) throw new EngineTargetError("stale_target", "Missing retained Dispatch Attempt");
+			await this.#admitDispatchEffect(tx, target, attempt, "model_dispatch_primary", false);
+		});
+	}
+
+	async #admitDispatchEffect(tx: RuntimeTransaction, target: EventTarget, attempt: RocksAttempt, toolName: string, reserve = true): Promise<void> {
+		let cached = this.#primaryIterations.get(attempt.attempt_id);
+		if (!cached || cached.bindingId !== target.bindingId || cached.generation !== target.engineGeneration) {
+			const command = await tx.get<RocksCommand>("command", attempt.command_id);
+			const config = command?.identity.serializedCommand
+				? (JSON.parse(command.identity.serializedCommand) as { payload?: { executionConfiguration?: EngineExecutionConfiguration } })
+					.payload?.executionConfiguration : undefined;
+			const limits = config?.dispatch.limits;
+			cached = { agentId: target.agentInstanceId, bindingId: target.bindingId, generation: target.engineGeneration,
+				deadline: limits?.timeout_seconds == null ? null : attempt.created_at + limits.timeout_seconds * 1_000,
+				maxIterations: limits?.max_iterations ?? null };
+			this.#primaryIterations.set(attempt.attempt_id, cached);
+		}
+		if (cached.deadline !== null && Date.now() >= cached.deadline)
+			throw new EngineTargetError("cancelled", "dispatch_timeout: immutable Attempt deadline elapsed");
+		if (toolName !== "model_dispatch_primary" || cached.maxIterations === null) return;
+		if (cached.count === undefined) {
+			let count = 0;
+			for (const state of ["started", "settled", "unknown"]) {
+				let cursor: string | undefined;
+				do {
+					const page = await this.records.query("effect_attempt", [attempt.attempt_id, state], cursor);
+					for (const row of page.records) {
+						const effect = row.value as unknown as RocksEffect;
+						if (effect.effect_kind !== "model") continue;
+						if (effect.tool_name === "model_dispatch_primary") {
+							if (effect.runtime_event_id > 0) {
+								const activation = (await this.records.get("event", String(effect.runtime_event_id))).value as unknown as RocksEvent | null;
+								if (activation?.kind !== "model_started" || activation.attemptId !== attempt.attempt_id ||
+									activation.agentInstanceId !== target.agentInstanceId || activation.bindingId !== target.bindingId ||
+									activation.payload?.effectId !== effect.effect_id || activation.payload?.modelCallId !== effect.tool_call_id)
+									throw new EngineTargetError("stale_target", "recovery_required: primary activation evidence is unavailable");
+								count++;
+							} else if (effect.state !== "settled" || (effect.outcome !== "denied" && effect.outcome !== "cancelled")) {
+								throw new EngineTargetError("stale_target", "recovery_required: primary model has no activation anchor");
+							}
+						} else if (effect.tool_name !== "model_dispatch_side" && effect.tool_name !== "model_dispatch_primary_retry") {
+							throw new EngineTargetError("stale_target", "recovery_required: bounded Attempt has unsourced model history");
+						}
+					}
+					cursor = page.nextCursor ?? undefined;
+				} while (cursor);
+			}
+			cached.count = count;
+		}
+		if (!reserve) return;
+		if (cached.count >= cached.maxIterations)
+			throw new EngineTargetError("cancelled", "dispatch_max_iterations: primary iteration limit reached");
+		this.#iterationCommits.set(tx, { ...cached, attemptId: attempt.attempt_id, count: cached.count + 1 });
+	}
+
 	async effectStart(
 		target: EventTarget,
 		input: EngineToolEffectInput | EngineModelEffectInput,
@@ -2564,6 +2645,8 @@ export class RocksEngineMutations {
 				if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
 				const tool = "toolCallId" in input ? input : undefined;
 				const modelCall = "modelCallId" in input ? input.modelCallId : "";
+				const toolName = tool?.toolName ?? `model_dispatch_${(input as EngineModelEffectInput).source}`;
+				if (!approval) await this.#admitDispatchEffect(tx, target, attempt, model ? toolName : "");
 				const row: RocksEffect = {
 					agent_instance_id: target.agentInstanceId,
 					execution_id: target.executionId,
@@ -2575,7 +2658,7 @@ export class RocksEngineMutations {
 					effect_id: input.effectId,
 					command_id: target.commandId,
 					tool_call_id: tool?.toolCallId ?? modelCall,
-					tool_name: tool?.toolName ?? "model_dispatch",
+					tool_name: toolName,
 					policy: tool?.policy ?? "unrestricted",
 					input_hash: input.inputHash,
 					assistant_message_id: tool?.origin?.messageId ?? null,
@@ -2607,7 +2690,7 @@ export class RocksEngineMutations {
 					} satisfies EngineApprovalRow);
 					return this.append(tx, target, { kind: `${approval.kind}_approval_requested`, payload: approval });
 				}
-				return this.append(tx, target, {
+				const started = await this.append(tx, target, {
 					kind: model ? "model_started" : "tool_started",
 					payload: model
 						? { effectId: input.effectId, modelCallId: modelCall }
@@ -2620,6 +2703,8 @@ export class RocksEngineMutations {
 								...(tool?.origin ? { origin: tool.origin } : {}),
 							},
 				});
+				if (model) await tx.put("effect", input.effectId, { ...row, runtime_event_id: started.eventId });
+				return started;
 			},
 			this.checkpointDependencies(checkpoint),
 		);
@@ -2847,8 +2932,9 @@ export class RocksEngineMutations {
 					lease.expires_at <= Date.now() ||
 					lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
 					throw new EngineTargetError("stale_target", "Approval cannot start effect without active routing lease");
+				await this.#admitDispatchEffect(tx, target, attempt, effect.effect_kind === "model" ? effect.tool_name : "");
 				await tx.put("effect", effect.effect_id, { ...effect, state: "started", updated_at: Date.now() });
-				events.push(await this.append(tx, target, {
+				const started = await this.append(tx, target, {
 					kind: effect.effect_kind === "model" ? "model_started" : "tool_started",
 					payload: effect.effect_kind === "model"
 						? { effectId: effect.effect_id, modelCallId: effect.tool_call_id }
@@ -2856,7 +2942,10 @@ export class RocksEngineMutations {
 								invocationId: effect.effect_id, toolCallId: effect.tool_call_id,
 								toolName: effect.tool_name, policy: effect.policy, inputHash: effect.input_hash,
 							},
-				}));
+				});
+				if (effect.effect_kind === "model") await tx.put("effect", effect.effect_id,
+					{ ...effect, state: "started", updated_at: Date.now(), runtime_event_id: started.eventId });
+				events.push(started);
 			} else if (effect && status !== "approved" && (request.kind !== "escalation" || request.handling === "nonblocking"))
 				events.push(
 					await this.effectSettle(
@@ -2899,9 +2988,10 @@ export class RocksEngineMutations {
 				lease.expires_at <= Date.now() ||
 				lease.resources.account_ref !== currentIdentity(attempt.execution.executor_choice).account_ref)
 				throw new EngineTargetError("stale_target", "Approved tool effect requires the resumed Attempt's live routing lease");
+			await this.#admitDispatchEffect(tx, target, attempt, effect.effect_kind === "model" ? effect.tool_name : "");
 			if (input) await tx.put("projection", inputKey, { ...input, continuation_claimed: true });
 			await tx.put("effect", id, { ...effect, state: "started", updated_at: Date.now() });
-			return this.append(tx, target, {
+			const started = await this.append(tx, target, {
 				kind: effect.effect_kind === "model" ? "model_started" : "tool_started",
 				payload: effect.effect_kind === "model"
 					? { effectId: effect.effect_id, modelCallId: effect.tool_call_id }
@@ -2910,6 +3000,9 @@ export class RocksEngineMutations {
 							policy: effect.policy, inputHash: effect.input_hash,
 						},
 			});
+			if (effect.effect_kind === "model") await tx.put("effect", id,
+				{ ...effect, state: "started", updated_at: Date.now(), runtime_event_id: started.eventId });
+			return started;
 		});
 	}
 
@@ -3748,7 +3841,7 @@ export class RocksEngineMutations {
 			for (const effect of effects)
 				if (!this.retainedApproval(effect, await tx.get<EngineApprovalRow>("approval", effect.effect_id), attemptId))
 					return undefined;
-			if (current.state === "waiting_request") await stageRelease(tx, attemptId);
+			if (current.state === "waiting_request") await stageRelease(tx, attemptId, undefined, true);
 			await tx.put("binding", attempt.agent_instance_id, { ...binding, engine_generation: generation });
 			await tx.put("attempt", attemptId, { ...current, engine_generation: generation,
 				...(current.state === "waiting_request" ? { state: "paused", cause: "request_recovery" } : {}) });

@@ -138,6 +138,7 @@ export function routingReachability(
 	leases: readonly RocksSlotLease[],
 	waiting: readonly WaitingAdmission[],
 	edges: readonly RocksWaitEdge[],
+	paused: ReadonlySet<string> = new Set(),
 ): { reachable: Set<string>; released: Set<string>; available: Vector } {
 	const available = heldAvailability(limits, leases);
 	const holders = new Map(leases.map(lease => [lease.attempt_id, demand(lease.resources, limits)]));
@@ -145,7 +146,7 @@ export function routingReachability(
 	if (holders.size !== leases.length || admissions.size !== waiting.length)
 		throw new EngineTargetError("admission_state_unknown", "Duplicate routing census identity");
 	for (const edge of edges)
-		if (!holders.has(edge.waited_admission_id) && !admissions.has(edge.waited_admission_id))
+		if (!holders.has(edge.waited_admission_id) && !admissions.has(edge.waited_admission_id) && !paused.has(edge.waited_admission_id))
 			throw new EngineTargetError("admission_state_unknown", "Wait edge names an unknown admission");
 	const reachable = new Set<string>();
 	const released = new Set<string>();
@@ -348,7 +349,16 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 		edge => !(edge.caller_attempt_id === tentative?.caller_attempt_id && edge.waited_admission_id === request.attemptId),
 	);
 	if (tentative) edges.push(tentative);
-	const proof = routingReachability(request.limits, current.leases, waiting, edges);
+	const paused = new Set<string>();
+	for (const edge of edges) {
+		if (current.leases.some(lease => lease.attempt_id === edge.waited_admission_id) ||
+			waiting.some(item => item.admission_id === edge.waited_admission_id) || paused.has(edge.waited_admission_id)) continue;
+		const retained = await tx.get<RocksAttempt>("attempt", edge.waited_admission_id);
+		const command = retained && await tx.get<RocksCommand>("command", retained.command_id);
+		if (retained?.state === "paused" && command?.identity.principalId === request.principalId &&
+			command.identity.deviceId === request.deviceId) paused.add(edge.waited_admission_id);
+	}
+	const proof = routingReachability(request.limits, current.leases, waiting, edges, paused);
 	const now = heldAvailability(request.limits, current.leases);
 	const limitsOnly = ceilings(request.limits);
 	const filtered: Record<string, number> = {
@@ -505,9 +515,12 @@ export async function stageQueueCancel(
 	if (!own) return false;
 	const key = queueId(own.sequence);
 	await tx.put("metadata", key, { ...own, status, reason } satisfies RocksSlotQueue);
-	for (const edge of current.edges)
-		if (edge.waited_admission_id === request.attemptId)
-			await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
+	const attempt = await tx.get<RocksAttempt>("attempt", request.attemptId);
+	const terminal = attempt && ["completed", "cancelled", "failed", "interrupted"].includes(attempt.state);
+	if (attempt?.state !== "paused")
+		for (const edge of current.edges)
+			if (edge.waited_admission_id === request.attemptId || (terminal && edge.caller_attempt_id === request.attemptId))
+				await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
 	await commitTransition({
 		tx,
 		census: current,
@@ -522,11 +535,12 @@ export async function stageQueueCancel(
 	return true;
 }
 
-/** Explicit pause / terminal / cancel: release exactly once by lease_revision and settle this Attempt's edges. */
+/** Pause releases occupancy, not logical waits. Terminal/cancel settle the Attempt's dependency edges. */
 export async function stageRelease(
 	tx: RuntimeTransaction,
 	attemptId: string,
 	start?: { commandId: string; agentInstanceRef: string; candidate: CandidateIdentity },
+	retainDependencies = false,
 ): Promise<boolean> {
 	const key = leaseId(attemptId);
 	const lease = await tx.get<RocksSlotLease>("metadata", key);
@@ -535,6 +549,25 @@ export async function stageRelease(
 	const command = commandId ? await tx.get<RocksCommand>("command", commandId) : undefined;
 	if (!lease) {
 		if (!commandId || !command?.identity.agentInstanceRef || !command.identity.principalId) return false;
+		const prior = command.routing;
+		const priorChoice = attempt?.execution?.executor_choice;
+		const candidate = prior?.action === "release" ? prior.candidate
+			: prior?.action === "cancel" && priorChoice ? currentIdentity(priorChoice) : undefined;
+		if (attempt && ["completed", "cancelled", "failed", "interrupted"].includes(attempt.state) &&
+			prior && candidate && prior.lease_revision !== null) {
+			if (attempt.execution?.lease_id !== key)
+				throw new EngineTargetError("admission_state_unknown", "Terminal dependency cleanup lacks its retained lease identity");
+			const current = await census(tx, command.identity.principalId, command.identity.deviceId);
+			const ownEdges = current.edges.filter(edge =>
+				edge.caller_attempt_id === attemptId || edge.waited_admission_id === attemptId);
+			if (!ownEdges.length) return false;
+			for (const edge of ownEdges) await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
+			await commitTransition({ tx, census: current, principalId: command.identity.principalId,
+				deviceId: command.identity.deviceId, commandId, agentRef: command.identity.agentInstanceRef,
+				attemptId, action: "release", lease: key, queue: null,
+				candidate, leaseRevision: prior.lease_revision });
+			return true;
+		}
 		return stageQueueCancel(tx, {
 			commandId, attemptId, agentInstanceRef: command.identity.agentInstanceRef,
 			principalId: command.identity.principalId, deviceId: command.identity.deviceId,
@@ -544,9 +577,10 @@ export async function stageRelease(
 		throw new EngineTargetError("admission_state_unknown", "Leased Attempt has no admitted start command");
 	const current = await census(tx, lease.principal_id, lease.device_id);
 	await tx.delete("metadata", key);
-	for (const edge of current.edges)
-		if (edge.caller_attempt_id === attemptId || edge.waited_admission_id === attemptId)
-			await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
+	if (!retainDependencies && attempt?.state !== "paused")
+		for (const edge of current.edges)
+			if (edge.caller_attempt_id === attemptId || edge.waited_admission_id === attemptId)
+				await tx.delete("metadata", edgeId(edge.caller_attempt_id, edge.waited_admission_id));
 	const selected = attempt?.execution?.executor_choice;
 	const candidate = selected ? currentIdentity(selected) : start?.candidate;
 	if (!candidate)

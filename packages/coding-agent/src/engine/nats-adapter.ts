@@ -878,7 +878,6 @@ export async function dispatchEngineCommand(options: {
 	runtime: EngineRuntime;
 	command: EngineCommandEnvelope;
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
-	legacyBindingSnapshot?: EngineSemanticBindingSnapshot;
 }): Promise<unknown> {
 	const { runtime } = options;
 	let { command } = options;
@@ -1012,7 +1011,7 @@ export async function dispatchEngineCommand(options: {
 						context,
 						agentInstanceId: command.agentInstanceId,
 						agentInstanceRef,
-						bindingSnapshot: command.bindingSnapshot ?? options.legacyBindingSnapshot,
+						bindingSnapshot: command.bindingSnapshot,
 						parentAgentInstanceRef: command.parentAgentInstanceRef,
 						displayName: optionalRecordString(command.payload, "displayName"),
 						delegationHint: optionalRecordString(command.payload, "delegationHint"),

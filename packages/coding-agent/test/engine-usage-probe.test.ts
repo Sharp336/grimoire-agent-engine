@@ -140,6 +140,36 @@ describe("Engine builtin usage readers", () => {
 			.toEqual({ status: "account_identity_mismatch", observations: [] });
 	});
 
+	it("uses the exact Cursor API key without ambient credentials and refuses unsupported key readers", async () => {
+		const previous = process.env.CURSOR_API_KEY;
+		process.env.CURSOR_API_KEY = AMBIENT;
+		cleanup.push(() => {
+			if (previous === undefined) delete process.env.CURSOR_API_KEY;
+			else process.env.CURSOR_API_KEY = previous;
+		});
+		const sent = providerFetch(url => {
+			expect(url).toBe("https://api2.cursor.sh/auth/usage");
+			return Response.json({ "gpt-4": { numRequests: 37, maxRequestUsage: 500 } });
+		});
+		const input = { principalId: "grimoire:user:owner", accountRef: "gctx:aaaaaaaaaaaaaaaa",
+			kind: "builtin", builtinId: "cursor_usage", builtinVersion: 1,
+			account: { provider_id: "cursor", external_id: null,
+				pools: [{ pool_id: "cursor:requests:gpt-4" }], quota_windows: [] },
+			credential: { method: "api_key", value: "owned-cursor-key" } };
+		const result = await runUsageProbe({} as RocksEngineMutations, "device", input);
+		expect(result.status).toBe("ready");
+		expect(result.observations).toEqual([expect.objectContaining({
+			dimension: "pool", dimension_id: "cursor:requests:gpt-4", metric: "request_count", value: 37, unit: "requests",
+		})]);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toContain("owned-cursor-key");
+		expect(sent[0]).not.toContain(AMBIENT);
+		expect(await runUsageProbe({} as RocksEngineMutations, "device", {
+			...input, builtinId: "anthropic_claude_usage", account: { ...input.account, provider_id: "anthropic" },
+		})).toEqual({ status: "builtin_unsupported", observations: [] });
+		expect(sent).toHaveLength(1);
+	});
+
 	it("maps Cursor spend and request rails to exact pools and proves a legacy row by its token", async () => {
 		// A row stored before Cursor logins recorded the account id is proven by its token's user id.
 		const legacy = await storedRow("cursor", cursorJwt("user_claimed"), undefined);

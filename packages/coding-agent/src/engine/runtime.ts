@@ -156,7 +156,7 @@ import {
 	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules,
 } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
-import { type CapturedApprovalSettings, requireApprovalSettings } from "./contracts";
+import { type CapturedApprovalSettings, type HumanSelectionProof, requireApprovalSettings, requireHumanSelectionProof, humanSelectionMatches } from "./contracts";
 import { EngineRequestPending, type EngineRequestInput, type EngineRequestDispatch } from "./request-tool";
 import type { SubmittedOperation } from "./runtime-protocol.mjs";
 import engineRequestReadyPrompt from "../prompts/engine-request-ready.md" with { type: "text" };
@@ -350,9 +350,11 @@ interface LiveBinding extends EngineBindingSnapshot {
 	spawnApprovals: Map<string, string>;
 	approvalGrants: Map<string, { receiptId: string; ceilingHash: string }>;
 	recoveryCallIds?: string[];
-	consultantEffectId?: string;
+	consultantEffect?: EngineModelEffectInput;
 	modelCallSequence: number;
 	modelEffect?: EngineModelEffectInput;
+	primaryTurn?: { attemptId: string; admission: StreamAdmission | undefined; iterationEffectId?: string; retryEffectId?: string };
+	dispatchDeadlineTimer?: NodeJS.Timeout;
 	/** The Engine-composed admission/fact hook every model request of this binding must use. */
 	providerRequestHook: NonNullable<CreateAgentSessionOptions["providerRequestHook"]>;
 	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
@@ -486,6 +488,14 @@ interface PendingInput {
 
 type HistoryDispatchKind = "prompt" | "continue" | "continue_after_assistant" | "resume_queued" | "pending_tool";
 
+interface PreparedConsultantPrompt {
+	input: string;
+	identity: SessionMessageIdentity;
+	kind: HistoryDispatchKind;
+	context?: string;
+	images?: ImageContent[];
+}
+
 interface PreparedHistoryStart {
 	sessionManager: SessionManager;
 	dispatchKind: HistoryDispatchKind;
@@ -558,7 +568,7 @@ export interface EngineRuntimeOptions {
 		agentInstanceRef: string;
 		attemptId: string;
 		principalId: string;
-	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string; approvalSettings: CapturedApprovalSettings | null; specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null }>;
+	}) => Promise<{ verified: true; dispatchHash?: string; commandHash?: string; bindingSnapshot?: EngineSemanticBindingSnapshot; authContextId: string; approvalSettings: CapturedApprovalSettings | null; humanSelection?: HumanSelectionProof | null; specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null }>;
 	verifyApprovalReceipt?: (receipt: {
 		originReceiptId: string;
 		commandId: string;
@@ -650,7 +660,7 @@ export class EngineRuntime {
 	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
 	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
 	readonly #pendingEscalations = new Map<string, PromiseWithResolvers<EngineApprovalDecision["approvalDecision"]>>();
-	readonly #pendingConsultants = new Map<string, PromiseWithResolvers<"approve" | "deny">>();
+	readonly #pendingConsultants = new Map<string, PromiseWithResolvers<"approve" | "deny"> & { binding: LiveBinding }>();
 	readonly #approvalTimers = new Map<string, NodeJS.Timeout>();
 	readonly #retainedApprovals = new Map<string, EngineBindingSnapshot>();
 	readonly #recoveryTimers = new Map<string, NodeJS.Timeout>();
@@ -808,6 +818,7 @@ export class EngineRuntime {
 	async #resumeRouting(binding: LiveBinding): Promise<AdmissionRequest> {
 		if (!binding.bindingSnapshot || !this.#verifyOriginReceipt)
 			throw new EngineTargetError("stale_target", "Resume requires an admitted hosted binding");
+		await this.#assertDispatchDeadline(binding.attemptId, binding.execution.config);
 		const original = await this.store.getStartConversationIdentity(binding.commandId);
 		const start = original?.serializedCommand
 			? JSON.parse(original.serializedCommand) as { payload?: { originReceiptId?: string } }
@@ -824,6 +835,9 @@ export class EngineRuntime {
 			!origin.authContextId)
 			throw new EngineTargetError("stale_target", "Resume origin or semantic binding changed");
 		const config = binding.execution.config;
+		const humanSelection = requireHumanSelectionProof(origin.humanSelection, binding.dispatchHash, config.dispatch.requirement);
+		if (binding.execution.choice.selected.basis === "user" && !humanSelectionMatches(humanSelection, binding.execution.choice.selected))
+			throw new EngineTargetError("stale_target", "Frozen human selection lost its original verified proof");
 		const current = currentIdentity(binding.execution.choice);
 		const candidate = binding.execution.frozen.find(route =>
 			candidateRef(route) === candidateRef(current) &&
@@ -1259,11 +1273,12 @@ export class EngineRuntime {
 			const resumeMessage = action === "resume" && "message" in request && request.message !== undefined;
 			const recoveringAcceptedMessage = action === "resume" && !resumeMessage &&
 				root?.pendingPausedMessage !== undefined && root.attemptState === "running" && attempt.state === "paused";
+			const coldResume = !root && attempt.state === "paused" && this.#retainedApprovals.has(request.agentInstanceId);
 			if (!startFence && !resumedIntent)
 				await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
 			if (
 				action === "resume" &&
-				(!resumedIntent && (!root || (!recoveringAcceptedMessage &&
+				(!resumedIntent && (!root ? !coldResume : (!recoveringAcceptedMessage &&
 					!["paused", "pause_requested", "waiting_input"].includes(root.attemptState))))
 			)
 				throw new EngineTargetError(
@@ -1349,13 +1364,30 @@ export class EngineRuntime {
 					const original = await this.store.getAttempt(saved.attemptId);
 					if (original && TERMINAL_ATTEMPT_STATES.has(original.state)) return;
 				}
-				const binding = this.#bindings.get(agentId);
+				let binding = this.#bindings.get(agentId);
 				if (!binding) {
 					const retained = await this.store.getBinding(agentId);
-					if (action === "resume" && retained &&
-						(await this.store.getAttempt(retained.attemptId))?.state === "paused")
-						throw new EngineTargetError("stale_target", "Paused branch member requires its live Resume Attempt");
-					return;
+					const retainedAttempt = retained && await this.store.getAttempt(retained.attemptId);
+					if (action === "stop" && retained && retainedAttempt?.state === "paused" && this.#retainedApprovals.has(agentId)) {
+						await this.#cancelRetainedRequestWait(retained, request.commandId,
+							"reason" in request ? request.reason ?? "Engine branch stopped" : "Engine branch stopped");
+						return;
+					}
+					if (action === "resume" && retained && retainedAttempt?.state === "paused") {
+						if (!saved || !this.#attemptMatchesTarget(retainedAttempt, saved) ||
+							retained.intentCommandId !== request.commandId || retained.intentRevision !== saved.intentRevision ||
+							!sameSemanticBinding(retained.bindingSnapshot, saved.bindingSnapshot))
+							throw new EngineTargetError("stale_target", "Cold Resume target or intent changed");
+						if (blockedAncestors.has(agentId)) {
+							await this.store.cancelPausedRouting(retained.attemptId, request.commandId, this.engineGeneration);
+							return;
+						}
+						binding = await this.#rehydrateRequestWait(retained, true);
+						if (!binding) {
+							if (TERMINAL_ATTEMPT_STATES.has((await this.store.getAttempt(retained.attemptId))!.state)) return;
+							throw new EngineBindingPendingError("Cold Resume remains held");
+						}
+					} else return;
 				}
 				const retained = await this.store.getBinding(agentId);
 				if (action === "resume" && (!saved || !retained ||
@@ -1467,16 +1499,7 @@ export class EngineRuntime {
 					binding.pauseGate.resume();
 					this.#notifyPauseProgress(binding);
 					if (binding.attemptState === "running") {
-						for (const [id, pending] of this.#pendingToolApprovals) {
-							if (pending.record.target.bindingId !== binding.bindingId ||
-								(await this.store.getApproval(id))?.request.status !== "approved") continue;
-							const effect = await this.store.getEffect(id);
-							if (effect?.state === "planned")
-								this.#notifyEvents([await this.store.activateApprovedToolEffect(this.#snapshot(binding), id)]);
-							this.#pendingToolApprovals.delete(id);
-							pending.resolve({ decision: "approve",
-								receiptId: (await this.store.getApproval(id))?.decision_record?.origin_receipt_id });
-						}
+						await this.#deliverDecidedApprovals(binding);
 						if (binding.requestTurnDrained) {
 							binding.requestTurnDrained = false;
 							this.#trackRun(this.#runPrompt(binding, engineRequestReadyPrompt, undefined, "continue_after_assistant"));
@@ -1667,6 +1690,10 @@ export class EngineRuntime {
 				if (continuation && decision.decision === "deny")
 					this.#trackRun(this.#cancelSubmittedRun(continuation.run, decision.reason ?? "Submitted operation refused", "failed"));
 				if (live) await this.#wakeWaitingRequest(live);
+				else if (!(await this.store.intent(binding.agentInstanceId)).manualHold)
+					this.#trackRun(this.#inLane(binding.agentInstanceId, async () => {
+						await this.#rehydrateRequestWait(binding);
+					}).catch(error => this.#retryPausedRecovery(binding, error)));
 				return;
 			}
 			const paused = live
@@ -1677,8 +1704,7 @@ export class EngineRuntime {
 					this.#trackRun(this.#resumeApprovedTool(live, decision.request_id));
 				if (!live && !(await this.store.intent(binding.agentInstanceId)).manualHold)
 					this.#trackRun(this.#inLane(binding.agentInstanceId, async () => {
-						const reopened = await this.#rehydrateRequestWait(binding);
-						this.#trackRun(this.#resumeApprovedTool(reopened, decision.request_id));
+						await this.#rehydrateRequestWait(binding);
 					}).catch(error => this.#retryPausedRecovery(binding, error)));
 				return;
 			}
@@ -1708,15 +1734,21 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "commandId and inputId must be non-empty strings");
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
-			const binding = this.#requireTarget(request);
-			const projection = await this.store.requestProjection(this.#snapshot(binding), request.inputId);
-			const pending: PendingInput | undefined = binding.pendingInput ??
+			const binding = this.#bindings.has(request.agentInstanceId) ? this.#requireTarget(request) : undefined;
+			const target = binding ? this.#snapshot(binding) : await this.store.getBinding(request.agentInstanceId);
+			const coldAttempt = !binding ? await this.store.getAttempt(request.attemptId) : undefined;
+			if (!target || (!binding && (!coldAttempt || coldAttempt.state !== "paused" ||
+				!this.#attemptMatchesTarget(coldAttempt, request) || !this.#retainedApprovals.has(request.agentInstanceId))))
+				throw new EngineTargetError("stale_target", "Question has no matching retained Attempt");
+			const state = binding?.attemptState ?? coldAttempt!.state;
+			const projection = await this.store.requestProjection(target, request.inputId);
+			const pending: PendingInput | undefined = binding?.pendingInput ??
 				(projection?.body?.kind === "question" && !projection.resolved
 					? { inputId: request.inputId, handling: projection.body.handling === "nonblocking" ? "nonblocking" : "blocking",
-						questions: await this.store.requestQuestions(this.#snapshot(binding), request.inputId) }
+						questions: await this.store.requestQuestions(target, request.inputId) }
 					: undefined);
-			if (!pending || pending.inputId !== request.inputId || TERMINAL_ATTEMPT_STATES.has(binding.attemptState) ||
-				(pending.handling === "blocking" && binding.attemptState !== "waiting_input")) {
+			if (!pending || pending.inputId !== request.inputId || TERMINAL_ATTEMPT_STATES.has(state) ||
+				(pending.handling === "blocking" && (!binding || state !== "waiting_input"))) {
 				throw new EngineTargetError("too_late", `Input ${request.inputId} is no longer pending`);
 			}
 			const result = validateInputResult(request.result, pending.questions);
@@ -1727,12 +1759,19 @@ export class EngineRuntime {
 					...(answer.customInput !== undefined ? { customInput: answer.customInput } : {}),
 					...(answer.note !== undefined ? { note: answer.note } : {}),
 				})) };
-				this.#notifyEvents([await this.store.resolveQuestion(this.#snapshot(binding), request.inputId, indexed,
+				this.#notifyEvents([await this.store.resolveQuestion(target, request.inputId, indexed,
 					request.commandId, request.expectedIntentRevision, request.expectedInputRevision)]);
-				binding.pendingInput = undefined;
-				await this.#wakeWaitingRequest(binding);
+				if (binding) {
+					binding.pendingInput = undefined;
+					await this.#wakeWaitingRequest(binding);
+				} else if (!(await this.store.intent(request.agentInstanceId)).manualHold) {
+					this.#trackRun(this.#inLane(request.agentInstanceId, async () => {
+						await this.#rehydrateRequestWait(target);
+					}).catch(error => this.#retryPausedRecovery(target, error)));
+				}
 				return;
 			}
+			if (!binding) throw new EngineTargetError("too_late", "Blocking question requires its original live waiter");
 			const compactResult =
 				request.result.kind === "submit" && request.result.results.some(item => "selectedOptionIndexes" in item);
 			binding.attemptState = "running";
@@ -2581,9 +2620,11 @@ export class EngineRuntime {
 		if (!config.roster_complete || config.routes.routes.length === 0)
 			throw new EngineTargetError("admission_state_unknown", "A complete authorized executor roster is required");
 		const requirement = config.dispatch.requirement;
+		const humanSelection = requireHumanSelectionProof(origin.humanSelection, request.dispatchHash, requirement);
 		const roster = config.routes.routes.filter(route =>
+			(!humanSelection || humanSelectionMatches(humanSelection, route)) &&
 			(!requirement.require_trusted_provider || route.execution.trusted) &&
-			(route.tier === null ? requirement.min_tier === 0 : route.tier >= requirement.min_tier) &&
+			(route.tier === null ? requirement.min_tier === 0 || humanSelectionMatches(humanSelection, route) : route.tier >= requirement.min_tier) &&
 			(!requirement.pin || (route.model_id === requirement.pin.model_id &&
 				route.effort === requirement.pin.effort &&
 				(requirement.pin.route_ref === null || route.route_ref === requirement.pin.route_ref))));
@@ -2654,7 +2695,7 @@ export class EngineRuntime {
 		if (!route) throw new EngineTargetError("admission_state_unknown", "Admitted route is missing");
 		const selected: SelectedExecutor = {
 			...candidateIdentity(route),
-			basis: requirement.pin ? "pin" : route.order_match ? "order" : "rank",
+			basis: humanSelectionMatches(humanSelection, route) ? "user" : requirement.pin ? "pin" : route.order_match ? "order" : "rank",
 			order_match: route.order_match,
 		};
 		const candidates = preview.frozen.map(frozenCandidate);
@@ -2772,6 +2813,7 @@ export class EngineRuntime {
 				executionDigest,
 				originReceiptId: request.originReceiptId,
 			};
+			await this.#assertDispatchDeadline(request.attemptId, config);
 			resolved = await this.#resolveExecution(config, preview.frozen, attempt, request.cwd, pendingStartSignal);
 			const openingExecution = resolved;
 			resolved = undefined;
@@ -2827,42 +2869,32 @@ export class EngineRuntime {
 			throw error;
 		}
 		const promptInput = preparedHistory?.dispatchInput ?? queuedItem?.deliveryPayload ?? request.input ?? "";
+		const promptIdentity: SessionMessageIdentity = {
+			sourceCommandId: request.commandId,
+			...(preparedAttachments ? { originalAttachments: preparedAttachments.originalAttachments } : {}),
+			...(request.clientMessageId ? { clientMessageId: request.clientMessageId }
+				: queuedItem?.sourceType === "user" ? { clientMessageId: queuedItem.sourceEventId } : {}),
+		};
+		const promptKind = (queuedItem ? "resume_queued" : preparedHistory?.dispatchKind) ??
+			(explicitContinue && request.input === undefined && !queuedItem &&
+				!preparedAttachments?.originalAttachments.length ? "continue" : "prompt");
+		const promptContext = queuedItem ? undefined : request.context;
 		this.#trackRun((async () => {
 			if (origin.specialApproval) {
 				try {
 					if (!request.specialRef || request.executionKind !== "consultation")
 						throw new EngineTargetError("stale_target", "Consultant approval requires the exact consultation Start");
 					await this.#requestConsultantApproval(binding, origin.specialApproval, request.specialRef,
-						promptInput, preparedAttachments?.originalAttachments, images);
+						{ input: promptInput, identity: promptIdentity, kind: promptKind, context: promptContext, images });
 				} catch (error) {
+					if (this.#disposed || binding.state === "released") return;
 					await this.#settleAttempt(binding, binding.attemptId, binding.session.messages.length,
 						"failed", error instanceof Error ? error.message : String(error));
 					return;
 				}
 			}
-			await this.#runPrompt(
-				binding,
-				promptInput,
-				{
-					sourceCommandId: request.commandId,
-					...(preparedAttachments ? { originalAttachments: preparedAttachments.originalAttachments } : {}),
-					...(request.clientMessageId
-						? { clientMessageId: request.clientMessageId }
-						: queuedItem?.sourceType === "user"
-							? { clientMessageId: queuedItem.sourceEventId }
-							: {}),
-				},
-				(queuedItem ? "resume_queued" : preparedHistory?.dispatchKind) ??
-					(explicitContinue &&
-					request.input === undefined &&
-					!queuedItem &&
-					!preparedAttachments?.originalAttachments.length
-						? "continue"
-						: undefined),
-				queuedItem ? undefined : request.context,
-				{ agentInstanceRef: request.agentInstanceRef },
-				images,
-			);
+			await this.#runPrompt(binding, promptInput, promptIdentity, promptKind, promptContext,
+				{ agentInstanceRef: request.agentInstanceRef }, images);
 		})());
 		this.#signalInboxWake();
 		return {
@@ -3020,11 +3052,11 @@ export class EngineRuntime {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager = preparedSessionManager;
-		const uncommittedForkSessionFile = preparedSessionManager?.getSessionFile();
+		const uncommittedForkSessionFile = recoverSession ? undefined : preparedSessionManager?.getSessionFile();
 		const disposeResolved = resolved?.dispose;
 		let mcpManager: MCPManager | undefined;
 		try {
-			if (preparedSessionManager && !uncommittedForkSessionFile)
+			if (preparedSessionManager && !recoverSession && !uncommittedForkSessionFile)
 				throw new Error("Prepared session was not durably materialized");
 			pendingStartSignal?.throwIfAborted();
 			audit?.mark("binding_history_start");
@@ -3036,7 +3068,7 @@ export class EngineRuntime {
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			let previousInboxSessionId: string | undefined;
-			if (recoverSession && prior?.sessionFile)
+			if (recoverSession && !preparedSessionManager && prior?.sessionFile)
 				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
 			if (
 				!recoverSession &&
@@ -3337,11 +3369,12 @@ export class EngineRuntime {
 							if (!changed) return false;
 							if (changed.event.kind !== "executor_route_changed")
 								throw new EngineTargetError("stale_target", "Fallback did not commit its route event");
-							parent.execution.activateCandidate(index, digest);
 							parent.executionDigest = digest;
 							parent.execution.choice = changed.choice;
 							(parent.execution.ruleEventsPending ??= []).push(changed.event.payload.event_id);
 							this.#notifyEvents([changed.event]);
+							await parent.execution.activateCandidate(index, digest);
+							this.#markPrimaryRetry(parent);
 							return true;
 						},
 						afterApply: async () => {
@@ -3559,6 +3592,10 @@ export class EngineRuntime {
 						});
 					}
 					if (entry.type === "message" && entry.message.role === "user") {
+						if (binding.primaryTurn) {
+							binding.primaryTurn.iterationEffectId = undefined;
+							binding.primaryTurn.retryEffectId = undefined;
+						}
 						const target = this.#snapshot(binding);
 						const sessionId = manager.getSessionId();
 						const sessionFile = manager.getSessionFile();
@@ -3621,11 +3658,22 @@ export class EngineRuntime {
 				const checkpoint = await this.#effectCheckpoint(binding);
 				await binding.traceWriteTail;
 				if (binding.messageWriteError) throw binding.messageWriteError;
-				if (binding.modelEffect) return;
-				const effect = this.#nextModelEffect(binding, sha256(stableStringifyJson(session.messages)));
+				if (binding.modelEffect) {
+					if (binding.primaryTurn && binding.modelEffect.source === "primary")
+						binding.primaryTurn.iterationEffectId = binding.modelEffect.effectId;
+					return;
+				}
+				const turn = binding.primaryTurn;
+				const retry = turn?.attemptId === binding.attemptId && turn.admission === binding.streamAdmission &&
+					turn.retryEffectId !== undefined && turn.retryEffectId === turn.iterationEffectId;
+				const effect = this.#nextModelEffect(binding, sha256(stableStringifyJson(session.messages)), retry ? "primary_retry" : "primary");
 				const started = await this.#admitEffect(binding,
 					() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), signal);
 				binding.modelEffect = effect;
+				if (turn) {
+					if (!retry) turn.iterationEffectId = effect.effectId;
+					turn.retryEffectId = undefined;
+				}
 				setProviderObservationModel(effect);
 				this.#notifyEvents([started]);
 			});
@@ -3687,6 +3735,7 @@ export class EngineRuntime {
 					this.#notifyPauseProgress(binding);
 				}
 				if (event.type === "auto_retry_start") {
+					this.#markPrimaryRetry(binding);
 					this.#queueExecutorRoute(binding, "loading");
 					const model = binding.session.model;
 					const retry = {
@@ -3701,6 +3750,7 @@ export class EngineRuntime {
 					this.#queueRetryEvent(binding, "retry_scheduled", retry);
 				}
 				if (event.type === "auto_retry_end") {
+					if (binding.primaryTurn) binding.primaryTurn.retryEffectId = undefined;
 					const model = binding.session.model;
 					const retry = {
 						attempt: event.attempt,
@@ -3730,7 +3780,9 @@ export class EngineRuntime {
 				if (manager.onEntryAppended === onEntryAppended) manager.onEntryAppended = previousEntryAppended;
 			};
 			unsubscribeCreated = binding.unsubscribe;
+			const deadline = await this.#assertDispatchDeadline(binding.attemptId, binding.execution.config);
 			this.#bindings.set(request.agentInstanceId, binding);
+			this.#armDispatchDeadline(binding, deadline);
 			return binding;
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
@@ -4304,6 +4356,31 @@ export class EngineRuntime {
 		return await completion.promise.finally(() => signal?.removeEventListener("abort", abort));
 	}
 
+	async #cancelRetainedRequestWait(target: EngineBindingSnapshot, commandId: string, reason: string): Promise<void> {
+		if (!await this.store.durableRequestWait(target.attemptId))
+			throw new EngineTargetError("stale_target", "Cold Stop cannot prove retained request quiescence");
+		this.#notifyEvents(await this.store.commitAttemptTransition(target, "cancel_requested", [{
+			kind: "cancel_requested", causationCommandId: commandId, payload: { reason },
+		}], { expectedStates: ["paused"] }));
+		for (const effect of await this.store.attemptToolEffects(target.attemptId)) {
+			if (effect.state !== "planned" && effect.state !== "started") continue;
+			const approval = await this.store.getApproval(effect.effect_id);
+			if (approval?.state === "pending")
+				this.#notifyEvents(await this.store.resolveApproval(target, effect.effect_id, "cancelled", null));
+			const current = await this.store.getEffect(effect.effect_id);
+			if (current?.state === "planned" || current?.state === "started")
+				this.#notifyEvents([await this.store.settleToolEffect(target, effect.effect_id, "cancelled", { error: reason })]);
+		}
+		for (const input of await this.store.retainedRequestInputs(target))
+			if (!input.resolved && input.body?.kind === "question")
+				await this.#commitEvent(target, "input_resolved", { inputId: String(input.value.inputId),
+					status: "cancelled", reason, attemptState: "cancelled", controlReadiness: controlReadiness("cancelled") }, commandId);
+		this.#notifyEvents(await this.store.commitAttemptTransition({ ...target, state: "idle" }, "cancelled", [{
+			kind: "cancelled", causationCommandId: commandId, payload: { reason },
+		}], { expectedStates: ["cancel_requested"], cause: reason }));
+		this.#retainedApprovals.delete(target.agentInstanceId);
+	}
+
 	async #cancelPendingInput(
 		binding: LiveBinding,
 		reason: string,
@@ -4526,17 +4603,43 @@ export class EngineRuntime {
 		this.#approvalTimers.set(request.id, timer);
 	}
 
+	async #runRecoveredConsultant(binding: LiveBinding, approval: ApprovalRequest, prepared: PreparedConsultantPrompt): Promise<void> {
+		const pending = approval.status === "approved" ? undefined
+			: Object.assign(Promise.withResolvers<"approve" | "deny">(), { binding });
+		if (this.#pendingConsultants.has(approval.id))
+			throw new EngineTargetError("stale_target", "Consultant continuation already has an owner");
+		if (pending) this.#pendingConsultants.set(approval.id, pending);
+		try {
+			if (pending && await pending.promise !== "approve")
+				throw new EngineTargetError("cancelled", "Consultant route reselection denied");
+			const effect = await this.store.getEffect(approval.id);
+			if (effect?.state === "planned")
+				this.#notifyEvents([await this.#admitEffect(binding,
+					() => this.store.activateApprovedToolEffect(this.#snapshot(binding), approval.id))]);
+			else if (effect?.state !== "started")
+				throw new EngineTargetError("stale_target", "Original consultant model effect is no longer activatable");
+			this.#assertAttachmentSupport(binding.session, prepared.images, prepared.identity.originalAttachments);
+			if (binding.consultantEffect?.effectId !== approval.id)
+				throw new EngineTargetError("cancelled", "Consultant reservation was cancelled");
+			await this.#runPrompt(binding, prepared.input, prepared.identity, prepared.kind, prepared.context,
+				{ agentInstanceRef: binding.bindingSnapshot!.agentInstanceRef }, prepared.images);
+		} catch (error) {
+			if (this.#disposed || binding.state === "released") return;
+			await this.#settleAttempt(binding, binding.attemptId, binding.session.messages.length,
+				"failed", error instanceof Error ? error.message : String(error));
+		} finally {
+			if (this.#pendingConsultants.get(approval.id) === pending) this.#pendingConsultants.delete(approval.id);
+		}
+	}
+
 	async #requestConsultantApproval(binding: LiveBinding,
 		special: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null,
 		ref: NonNullable<EngineStartRequest["specialRef"]>,
-		input: string, originals?: SessionMessageIdentity["originalAttachments"], images?: ImageContent[]): Promise<void> {
+		prepared: PreparedConsultantPrompt): Promise<void> {
 		if (!special || special.kind !== "consultant" || !binding.bindingSnapshot)
 			throw new EngineTargetError("stale_target", "Consultant approval lacks exact Start provenance");
-		const modelCallId = "model-1";
-		const effect: EngineModelEffectInput = {
-			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
-			modelCallId, inputHash: modelInputHash(input, originals, images),
-		};
+		const effect = this.#nextModelEffect(binding,
+			modelInputHash(prepared.input, prepared.identity.originalAttachments, prepared.images), "primary");
 		const subject: Extract<ApprovalRequest, { kind: "consultant" }>["subject"] = {
 			call_id: ref.occurrenceOrCallId, definition_ref: ref.definitionRef,
 			definition_revision: ref.revision, dispatch_hash: binding.dispatchHash,
@@ -4569,12 +4672,16 @@ export class EngineRuntime {
 			settings_hash: binding.approvalSettings.settings_hash,
 		};
 		validateRuntimeValue("approvalRequest", request);
-		const pending = Promise.withResolvers<"approve" | "deny">();
+		const pending = Object.assign(Promise.withResolvers<"approve" | "deny">(), { binding });
 		this.#pendingConsultants.set(effect.effectId, pending);
 		try {
+			binding.session.sessionManager.appendCustomEntry("engine-consultant-input", {
+				attemptId: binding.attemptId, bindingId: binding.bindingId,
+				effectId: effect.effectId, modelCallId: effect.modelCallId, inputHash: effect.inputHash, prepared,
+			});
 			const event = await this.store.requestModelApproval(this.#snapshot(binding), effect, request,
 				await this.#effectCheckpoint(binding));
-			binding.consultantEffectId = effect.effectId;
+			binding.consultantEffect = effect;
 			this.#notifyEvents([event]);
 			this.#armApprovalDeadline(binding, request);
 			if (await pending.promise !== "approve")
@@ -5053,6 +5160,27 @@ export class EngineRuntime {
 			}
 			await this.#cancelPendingToolApproval(pending, reason, causationCommandId);
 		}
+		for (const [id, pending] of this.#pendingConsultants) {
+			if (pending.binding !== binding) continue;
+			const approval = await this.store.getApproval(id);
+			if (approval?.request.requester_attempt_id !== binding.attemptId) continue;
+			if (approval.state === "pending")
+				this.#notifyEvents(await this.store.resolveApproval(this.#snapshot(binding), id, "cancelled", null, { causationCommandId }));
+			this.#pendingConsultants.delete(id);
+			pending.resolve("deny");
+			clearTimeout(this.#approvalTimers.get(id));
+			this.#approvalTimers.delete(id);
+		}
+		const reserved = binding.consultantEffect;
+		binding.consultantEffect = undefined;
+		if (reserved) {
+			const effect = await this.store.getEffect(reserved.effectId);
+			if (effect?.state === "planned" || effect?.state === "started") {
+				if (effect.effect_kind !== "model" || effect.requests?.length)
+					throw new EngineTargetError("stale_target", "recovery_required: consultant reservation already has physical requests");
+				this.#notifyEvents([await this.store.settleToolEffect(this.#snapshot(binding), reserved.effectId, "cancelled", { error: reason })]);
+			}
+		}
 		for (const input of await this.store.retainedRequestInputs(this.#snapshot(binding))) {
 			const id = String(input.value.inputId);
 			const approval = await this.store.getApproval(id);
@@ -5165,29 +5293,41 @@ export class EngineRuntime {
 				this.#trackRun(this.#runPrompt(binding, "", undefined, "pending_tool"));
 				return;
 			}
-			const effect = await this.store.getEffect(id);
-			if (effect?.state === "planned" && approval.request.status === "approved")
+			await this.#deliverDecidedApprovals(binding);
+		});
+	}
+
+	/** Called in the Agent lane only after this same Attempt has reacquired its running lease. */
+	async #deliverDecidedApprovals(binding: LiveBinding): Promise<void> {
+		const ids = new Set([...this.#pendingToolApprovals.keys(), ...this.#pendingEscalations.keys(),
+			...this.#pendingConsultants.keys()]);
+		for (const id of ids) {
+			const approval = await this.store.getApproval(id);
+			if (approval?.state !== "resolved" || approval.request.requester_attempt_id !== binding.attemptId ||
+				approval.request.principal_id !== binding.principalId || approval.request.handling === "nonblocking") continue;
+			const status = approval.request.status;
+			if (!["approved", "denied", "cancelled"].includes(status)) continue;
+			if (status === "approved" && (await this.store.getEffect(id))?.state === "planned")
 				this.#notifyEvents([await this.store.activateApprovedToolEffect(this.#snapshot(binding), id)]);
 			const pending = this.#pendingToolApprovals.get(id);
 			if (pending) {
 				this.#pendingToolApprovals.delete(id);
-				pending.resolve({
-					decision: approval.request.status === "denied" ? "deny" : "approve",
+				pending.resolve({ decision: status === "approved" ? "approve" : status === "denied" ? "deny" : "cancelled",
 					receiptId: approval.decision_record?.origin_receipt_id,
-					reason: approval.decision_record?.reason ?? undefined,
-				});
+					reason: approval.decision_record?.reason ?? undefined });
 			}
 			const escalation = this.#pendingEscalations.get(id);
-			if (escalation && approval.decision_record) {
+			if (escalation) {
 				this.#pendingEscalations.delete(id);
-				escalation.resolve(approval.decision_record);
+				if (approval.decision_record) escalation.resolve(approval.decision_record);
+				else escalation.reject(new EngineTargetError("cancelled", "Escalation was cancelled"));
 			}
 			const consultant = this.#pendingConsultants.get(id);
 			if (consultant) {
 				this.#pendingConsultants.delete(id);
-				consultant.resolve(approval.request.status === "denied" ? "deny" : "approve");
+				consultant.resolve(status === "approved" ? "approve" : "deny");
 			}
-		});
+		}
 	}
 
 	async #finishPause(binding: LiveBinding, attemptId: string): Promise<void> {
@@ -5299,7 +5439,7 @@ export class EngineRuntime {
 		if (index < 0) throw new EngineTargetError("stale_target", "Current billing route is outside the frozen choices");
 		binding.execution.choice = result.choice;
 		binding.executionDigest = result.executionDigest;
-		binding.execution.activateCandidate(index, result.executionDigest);
+		await binding.execution.activateCandidate(index, result.executionDigest);
 		if (result.event) this.#notifyEvents([result.event]);
 	}
 
@@ -5376,9 +5516,48 @@ export class EngineRuntime {
 		);
 	}
 
-	#nextModelEffect(binding: LiveBinding, inputHash: string): EngineModelEffectInput {
+	async #assertDispatchDeadline(attemptId: string, config: EngineExecutionConfiguration): Promise<number | undefined> {
+		const seconds = config.dispatch.limits.timeout_seconds;
+		if (seconds === null) return undefined;
+		const attempt = await this.store.getAttempt(attemptId);
+		if (!attempt) throw new EngineTargetError("stale_target", "Dispatch deadline has no durable Attempt anchor");
+		const deadline = attempt.created_at + seconds * 1_000;
+		if (deadline <= Date.now()) {
+			await this.store.cancelPausedRouting(attemptId);
+			throw new EngineTargetError("cancelled", "dispatch_timeout: immutable Attempt deadline elapsed");
+		}
+		return deadline;
+	}
+
+	#armDispatchDeadline(binding: LiveBinding, deadline: number | undefined): void {
+		if (deadline === undefined) return;
+		const attemptId = binding.attemptId;
+		const arm = () => {
+			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding ||
+				binding.attemptId !== attemptId || TERMINAL_ATTEMPT_STATES.has(binding.attemptState)) return;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				this.#trackRun(this.#branchControl({ ...this.#snapshot(binding),
+					commandId: `dispatch-timeout-${attemptId}`, reason: "dispatch_timeout: immutable Attempt deadline elapsed" }, "stop", false));
+				return;
+			}
+			binding.dispatchDeadlineTimer = setTimeout(arm, Math.min(remaining, 2_147_483_647));
+			binding.dispatchDeadlineTimer.unref?.();
+		};
+		arm();
+	}
+
+	#markPrimaryRetry(binding: LiveBinding): void {
+		const turn = binding.primaryTurn;
+		if (turn?.attemptId === binding.attemptId && turn.admission === binding.streamAdmission &&
+			turn.iterationEffectId && binding.attemptState === "running" && !binding.manualHold)
+			turn.retryEffectId = turn.iterationEffectId;
+	}
+
+	#nextModelEffect(binding: LiveBinding, inputHash: string, source: EngineModelEffectInput["source"]): EngineModelEffectInput {
 		const modelCallId = `model-${++binding.modelCallSequence}`;
 		return {
+			source,
 			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
 			modelCallId,
 			inputHash,
@@ -5492,8 +5671,14 @@ export class EngineRuntime {
 		images?: ImageContent[],
 	): Promise<boolean> {
 		const completed = Promise.withResolvers<void>();
+		if (binding.primaryTurn) throw new EngineTargetError("agent_busy", "Another primary prompt owns this Attempt");
+		const turn: NonNullable<LiveBinding["primaryTurn"]> = { attemptId: binding.attemptId, admission: binding.streamAdmission };
+		binding.primaryTurn = turn;
 		binding.activeModelCalls.add(completed.promise);
-		const effect = this.#nextModelEffect(binding, modelInputHash(input, identity?.originalAttachments, images));
+		const inputHash = modelInputHash(input, identity?.originalAttachments, images);
+		const reserved = binding.consultantEffect;
+		binding.consultantEffect = undefined;
+		const effect = reserved ?? this.#nextModelEffect(binding, inputHash, "primary");
 		const modelCallId = effect.modelCallId;
 		const audit = createLatencyAudit({
 			commandId: identity?.sourceCommandId ?? binding.commandId,
@@ -5507,12 +5692,11 @@ export class EngineRuntime {
 		});
 		audit?.mark("model_admission_start");
 		try {
-			if (binding.consultantEffectId === effect.effectId) {
+			if (reserved) {
 				const approved = await this.store.getEffect(effect.effectId);
 				if (approved?.state !== "started" || approved.effect_kind !== "model" ||
-					approved.input_hash !== effect.inputHash)
+					approved.input_hash !== effect.inputHash || effect.inputHash !== inputHash)
 					throw new EngineTargetError("stale_target", "Consultant model effect differs from approved call");
-				binding.consultantEffectId = undefined;
 			} else {
 				const admissionCheckpoint = await this.#effectCheckpoint(binding);
 				const started = await this.#admitEffect(binding, () =>
@@ -5521,6 +5705,7 @@ export class EngineRuntime {
 				audit?.mark("model_started", { eventId: started.eventId });
 			}
 			binding.modelEffect = effect;
+			turn.iterationEffectId = effect.effectId;
 			this.#queueExecutorRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
@@ -5567,6 +5752,7 @@ export class EngineRuntime {
 		} finally {
 			audit?.finish("model_settled");
 			completed.resolve();
+			if (binding.primaryTurn === turn) binding.primaryTurn = undefined;
 			binding.activeModelCalls.delete(completed.promise);
 			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 		}
@@ -5704,7 +5890,7 @@ export class EngineRuntime {
 		work: () => Promise<T>,
 		message: (value: T) => SideModelUsage | undefined = () => undefined,
 	): Promise<T> {
-		const effect = this.#nextModelEffect(binding, inputHash);
+		const effect = this.#nextModelEffect(binding, inputHash, "side");
 		const records = this.#requestRecord(binding);
 		let opening: Promise<void> | undefined;
 		let opened = false;
@@ -6783,6 +6969,8 @@ export class EngineRuntime {
 		retainApproval = false,
 	): Promise<void> {
 		binding.sideAbort.abort(new EngineTargetError("cancelled", reason));
+		clearTimeout(binding.dispatchDeadlineTimer);
+		binding.dispatchDeadlineTimer = undefined;
 		clearInterval(binding.leaseHeartbeat);
 		binding.leaseHeartbeat = undefined;
 		binding.session.beginDispose();
@@ -6797,6 +6985,11 @@ export class EngineRuntime {
 				if (pending.record.target.bindingId === binding.bindingId) {
 					this.#pendingToolApprovals.delete(id);
 					pending.resolve({ decision: "cancelled", reason: "Engine stopped; approval remains durable" });
+				}
+			for (const [id, pending] of this.#pendingConsultants)
+				if (pending.binding === binding) {
+					this.#pendingConsultants.delete(id);
+					pending.reject(new EngineTargetError("source_unavailable", "Engine stopped; consultant approval remains durable"));
 				}
 		} else await collectFailure(errors, () => this.#cancelToolApprovals(binding, reason));
 		if (!retainApproval)
@@ -6942,6 +7135,26 @@ export class EngineRuntime {
 		throw new EngineTargetError("too_late", `Attempt ${target.attemptId} is already ${attempt.state}`);
 	}
 
+	/** Restores unique allocation only; IDs never classify primary/side work or charge iterations. */
+	async #restoreModelCallSequence(binding: LiveBinding): Promise<void> {
+		for (const state of ["planned", "started", "settled", "unknown"]) {
+			let cursor: string | undefined;
+			do {
+				const page = await this.store.records.query("effect_attempt", [binding.attemptId, state], cursor);
+				for (const row of page.records) {
+					if (row.value?.effect_kind !== "model" || typeof row.value.tool_call_id !== "string") continue;
+					const match = /^model-(\d+)$/.exec(row.value.tool_call_id);
+					if (!match) continue;
+					const sequence = Number(match[1]);
+					if (!Number.isSafeInteger(sequence))
+						throw new EngineTargetError("stale_target", "Retained model allocation sequence is invalid");
+					binding.modelCallSequence = Math.max(binding.modelCallSequence, sequence);
+				}
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor);
+		}
+	}
+
 	async #recoveryToolCallIds(binding: LiveBinding): Promise<string[]> {
 		const completed = new Set(binding.session.messages.flatMap(message =>
 			message.role === "toolResult" ? [message.toolCallId] : []));
@@ -6966,9 +7179,6 @@ export class EngineRuntime {
 			ids.push(call.id);
 		}
 		if (!ids.length) throw new EngineTargetError("stale_target", "No original tool call is recoverable");
-		binding.modelCallSequence = binding.session.messages.filter(message => message.role === "assistant").length;
-		while (await this.store.getEffect(`model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0model-${binding.modelCallSequence + 1}`).slice(0, 32)}`))
-			binding.modelCallSequence++;
 		return ids;
 	}
 
@@ -7065,42 +7275,8 @@ export class EngineRuntime {
 		}
 	}
 
-	async #resumeRecoveredRequestWait(binding: LiveBinding): Promise<void> {
-		try {
-			await this.#inLane(binding.agentInstanceId, async () => {
-				if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding ||
-					binding.attemptState !== "paused" || binding.manualHold) return;
-				const route = await this.#resumeRouting(binding);
-				const inputs = await this.store.retainedRequestInputs(this.#snapshot(binding));
-				const state = inputs.length ? "waiting_request" : "running";
-				await this.#commitAttemptTransition(binding, state, [{
-					kind: "request_waiting", payload: { cause: "request_recovery" },
-				}], { expectedStates: ["paused"], routingResume: route,
-					intentGuard: { expectedRevision: binding.intentRevision, requireUnheld: true },
-					transcriptCheckpoint: await this.#effectCheckpoint(binding) });
-				binding.attemptState = state;
-				binding.pauseGate.resume();
-				if (inputs.some(input => input.resolved && !requestConsumptionMatches(input)))
-					await this.#wakeWaitingRequest(binding);
-				else if (!inputs.length) this.#trackRun(this.#settleAttempt(binding, binding.attemptId, 0, "completed"));
-			});
-		} catch (error) {
-			if (error instanceof EngineRoutingQueuedError && !this.#approvalRoutingWakes.has(binding.agentInstanceId)) {
-				this.#approvalRoutingWakes.add(binding.agentInstanceId);
-				this.#trackRun((async () => {
-					try { await waitForEngineWake(this.store.changeSignal(), 1_000); }
-					finally { this.#approvalRoutingWakes.delete(binding.agentInstanceId); }
-					if (!this.#disposed) await this.#resumeRecoveredRequestWait(binding);
-				})());
-				return;
-			}
-			await this.#commitEvent(this.#snapshot(binding), "paused", {
-				cause: "recovery_required", reason: safeEngineErrorDetail(error),
-			});
-		}
-	}
 
-	async #rehydrateRequestWait(target: EngineBindingSnapshot): Promise<LiveBinding> {
+	async #rehydrateRequestWait(target: EngineBindingSnapshot, manualResume = false): Promise<LiveBinding | undefined> {
 		const current = await this.store.getBinding(target.agentInstanceId);
 		const attempt = await this.store.getAttempt(target.attemptId);
 		const identity = await this.store.getStartConversationIdentity(target.commandId);
@@ -7118,6 +7294,17 @@ export class EngineRuntime {
 		validateRuntimeValue("engineExecutionConfiguration", config);
 		if (executionHash(config.dispatch) !== current.dispatchHash || !config.roster_complete)
 			throw new EngineTargetError("stale_target", "Retained approval has no matching admitted execution");
+		await this.#assertDispatchDeadline(target.attemptId, config);
+		const intent = await this.store.intent(target.agentInstanceId);
+		const approvals = await this.store.durableRequestWait(target.attemptId);
+		const inputs = await this.store.retainedRequestInputs(current);
+		const requestWait = inputs.some(input => input.body?.handling === "nonblocking" ||
+			(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
+		if (intent.manualHold || (!manualResume &&
+			!inputs.some(input => input.resolved && !requestConsumptionMatches(input)) &&
+			!(approvals ?? []).some(approval => approval.status === "approved" || approval.status === "denied"))) return undefined;
+		if (!requestWait && (approvals ?? []).some(approval => approval.status === "waiting_human_paused"))
+			throw new EngineBindingPendingError("Cold Resume awaits its retained human decision");
 		const request: EngineStartRequest = {
 			commandId: target.commandId, principalId: identity.principalId!,
 			agentInstanceId: target.agentInstanceId,
@@ -7144,6 +7331,15 @@ export class EngineRuntime {
 			!origin.authContextId)
 			throw new EngineTargetError("stale_target", "Retained Start no longer has current CH/Core authority");
 		await this.store.checkSemanticStart(request.agentInstanceId, request.bindingSnapshot, request.principalId);
+		const consultant = (approvals ?? []).find(approval => approval.kind === "consultant");
+		if (consultant?.status === "denied") {
+			this.#notifyEvents(await this.store.commitAttemptTransition({ ...current, state: "idle" }, "failed", [{
+				kind: "failed", payload: { reason: "Consultant route reselection denied" },
+			}], { expectedStates: ["paused"], cause: "consultant_denied",
+				terminalResult: { error: "Consultant route reselection denied" } }));
+			this.#retainedApprovals.delete(target.agentInstanceId);
+			return undefined;
+		}
 		const frozen = attempt.execution.executor_choice.candidates.map(saved => {
 			const matches = config.routes.routes.filter(route =>
 				storageCanonicalJson(frozenCandidate(route)) === storageCanonicalJson(saved));
@@ -7152,6 +7348,9 @@ export class EngineRuntime {
 			return matches[0];
 		});
 		const choice = attempt.execution.executor_choice;
+		const humanSelection = requireHumanSelectionProof(origin.humanSelection, current.dispatchHash, config.dispatch.requirement);
+		if (choice.selected.basis === "user" && !humanSelectionMatches(humanSelection, choice.selected))
+			throw new EngineTargetError("stale_target", "Recovered human selection differs from its original verified proof");
 		const currentIndex = frozen.findIndex(route => candidateRef(route) === candidateRef(currentIdentity(choice)));
 		if (currentIndex < 0)
 			throw new EngineTargetError("stale_target", "Current route is outside the retained frozen choices");
@@ -7161,43 +7360,123 @@ export class EngineRuntime {
 		const continuationDigest = await this.#continuationDigest(request);
 		if (continuationDigest !== current.continuationDigest)
 			throw new EngineTargetError("stale_target", "Retained native continuation changed");
-		const resolved = await this.#resolveExecution(config, remaining, {
-			expectedPrincipalId: request.principalId, agentInstanceRef: request.agentInstanceRef,
-			attemptId: request.attemptId, bindingRevision: request.bindingSnapshot.bindingRevision,
-			installationId: request.bindingSnapshot.installationId, dispatchRef: request.dispatchRef,
-			dispatchHash: request.dispatchHash, executionDigest: choice.execution_digest,
-			originReceiptId: request.originReceiptId,
-		}, request.cwd);
-		const binding = await this.#openBinding(request, resolved, continuationDigest,
-			choice.execution_digest, choice, remaining, current,
-			current.bindingGeneration, undefined, undefined, undefined, undefined, undefined,
-			origin.approvalSettings ?? undefined, true);
-		await this.#restoreMeasuredUsage(binding, attempt.transcript_native);
-		await this.#repairExecutorRuleMessages(binding, choice, config);
-		binding.manualHold = current.manualHold ?? false;
-		binding.intentRevision = current.intentRevision ?? 0;
-		binding.attemptState = "paused";
-		binding.state = "running";
-		binding.pauseGate.pause();
+		await this.store.restoreDispatchIterations(current);
+		// Restore native continuity without credentials, then reacquire before CH materialization.
+		const manager = await SessionManager.openNative(this.#nativeSessionStorage(current.sessionFile));
+		let binding: LiveBinding | undefined;
+		let reacquired = false;
+		let materializationHeartbeat: NodeJS.Timeout | undefined;
 		try {
-			const approvals = await this.store.durableRequestWait(target.attemptId);
-			const inputs = await this.store.retainedRequestInputs(this.#snapshot(binding));
-			const requestWait = inputs.some(input => input.body?.handling === "nonblocking" ||
-				(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
+			await manager.materializeHistory();
+			if (manager.getSessionId() !== attempt.transcript_session_id)
+				throw new EngineTargetError("stale_target", "Retained native session identity changed");
+			let consultantPrompt: PreparedConsultantPrompt | undefined;
+			let consultantEffect: EngineModelEffectInput | undefined;
+			if (consultant) {
+				const effect = await this.store.getEffect(consultant.id);
+				const entry = manager.getContextBranch().findLast(entry => entry.type === "custom" &&
+					entry.customType === "engine-consultant-input" && isRecord(entry.data) &&
+					entry.data.attemptId === target.attemptId && entry.data.bindingId === target.bindingId &&
+					entry.data.effectId === consultant.id);
+				const data = entry?.type === "custom" && isRecord(entry.data) ? entry.data : undefined;
+				const prepared = isRecord(data?.prepared) ? data.prepared : undefined;
+				if (!effect || !data || effect.state !== "planned" || effect.tool_name !== "model_dispatch_primary" ||
+					effect.binding_id !== target.bindingId || data.modelCallId !== effect.tool_call_id ||
+					data.inputHash !== effect.input_hash ||
+					!prepared || typeof prepared.input !== "string" || !isRecord(prepared.identity) ||
+					prepared.identity.sourceCommandId !== current.commandId ||
+					!["prompt", "continue", "continue_after_assistant", "resume_queued"].includes(String(prepared.kind)) ||
+					(prepared.context !== undefined && typeof prepared.context !== "string") ||
+					(prepared.identity.originalAttachments !== undefined && !Array.isArray(prepared.identity.originalAttachments)) ||
+					(prepared.images !== undefined && (!Array.isArray(prepared.images) || prepared.images.some(image =>
+						!isRecord(image) || image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string"))))
+					throw new EngineTargetError("stale_target", "recovery_required: original prepared consultant input is unavailable");
+				consultantPrompt = prepared as unknown as PreparedConsultantPrompt;
+				if (modelInputHash(consultantPrompt.input, consultantPrompt.identity.originalAttachments, consultantPrompt.images) !== effect.input_hash)
+					throw new EngineTargetError("stale_target", "recovery_required: prepared consultant input hash differs");
+				consultantEffect = { source: "primary", effectId: effect.effect_id,
+					modelCallId: effect.tool_call_id, inputHash: effect.input_hash };
+			}
+			const approvalSettings = requireApprovalSettings(origin.approvalSettings);
+			const selected = currentIdentity(choice);
+			const candidate = { ...remaining[0], billing_pool_id: selected.billing_pool_id, billing_pool_basis: selected.billing_pool_basis };
+			const routingResume: AdmissionRequest = {
+				principalId: request.principalId, deviceId: this.#deviceId, engineGeneration: this.engineGeneration,
+				commandId: current.commandId, agentInstanceRef: request.agentInstanceRef, attemptId: current.attemptId,
+				dispatchId: config.dispatch.dispatch_id, dispatchRef: current.dispatchRef, dispatchHash: current.dispatchHash,
+				originReceiptId: request.originReceiptId, authContextId: origin.authContextId, bindingSnapshot: request.bindingSnapshot,
+				executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
+				rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
+				maxFrozenCandidates: approvalSettings.max_frozen_candidates,
+				candidates: [candidate], callerAttemptId: null, frozen: true,
+			};
+			await this.#assertDispatchDeadline(target.attemptId, config);
+			this.#notifyEvents(await this.store.commitAttemptTransition(current, "running", [{
+				kind: "resumed", payload: { cause: "request_recovery" },
+			}], { expectedStates: ["paused"], routingResume,
+				intentGuard: { expectedRevision: intent.intentRevision, requireUnheld: true },
+				transcriptCheckpoint: await manager.flushAndCheckpoint() }));
+			reacquired = true;
+			const materializing = new AbortController();
+			let renewing = false;
+			materializationHeartbeat = setInterval(() => {
+				if (renewing) return;
+				renewing = true;
+				void this.store.renewRouting(target.attemptId, this.engineGeneration).then(held => {
+					if (!held) throw new EngineTargetError("stale_target", "Recovery lost its admitted lease during materialization");
+				}).catch(error => {
+					materializing.abort(error);
+				}).finally(() => { renewing = false; });
+			}, LEASE_HEARTBEAT_MS);
+			materializationHeartbeat.unref?.();
+			const resolved = await this.#resolveExecution(config, remaining, {
+				expectedPrincipalId: request.principalId, agentInstanceRef: request.agentInstanceRef,
+				attemptId: request.attemptId, bindingRevision: request.bindingSnapshot.bindingRevision,
+				installationId: request.bindingSnapshot.installationId, dispatchRef: request.dispatchRef,
+				dispatchHash: request.dispatchHash, executionDigest: choice.execution_digest,
+				originReceiptId: request.originReceiptId,
+			}, request.cwd, materializing.signal);
+			binding = await this.#openBinding(request, resolved, continuationDigest,
+				choice.execution_digest, choice, remaining, current,
+				current.bindingGeneration, undefined, undefined, manager, materializing.signal, undefined, approvalSettings, true);
+			await this.#restoreMeasuredUsage(binding, attempt.transcript_native);
+			await this.#restoreModelCallSequence(binding);
+			await this.#repairExecutorRuleMessages(binding, choice, config);
+			materializing.signal.throwIfAborted();
+			clearInterval(materializationHeartbeat);
+			materializationHeartbeat = undefined;
+			binding.manualHold = false;
+			binding.intentRevision = intent.intentRevision;
+			binding.attemptState = "running";
+			binding.state = "running";
+			this.#armLeaseHeartbeat(binding);
 			if (requestWait) {
 				await this.#reconcileRequestReads(binding);
 				const retained = await this.store.retainedRequestInputs(this.#snapshot(binding));
+				if (!retained.length) {
+					this.#retainedApprovals.delete(target.agentInstanceId);
+					this.#trackRun(this.#settleAttempt(binding, binding.attemptId, 0, "completed"));
+					return binding;
+				}
 				binding.requestTurnDrained = true;
 				for (const input of retained) if (input.body?.kind === "question" && !input.resolved) {
 					if (binding.pendingInput) throw new EngineTargetError("stale_target", "Multiple pending questions in retained Attempt");
 					binding.pendingInput = { inputId: String(input.value.inputId), handling: "nonblocking",
 						questions: await this.store.requestQuestions(this.#snapshot(binding), String(input.value.inputId)) };
 				}
-				binding.modelCallSequence = binding.session.messages.filter(message => message.role === "assistant").length;
-				while (await this.store.getEffect(`model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0model-${binding.modelCallSequence + 1}`).slice(0, 32)}`))
-					binding.modelCallSequence++;
-				if (!binding.manualHold) this.#trackRun(this.#resumeRecoveredRequestWait(binding));
-			} else binding.recoveryCallIds = await this.#recoveryToolCallIds(binding);
+				await this.#commitAttemptTransition(binding, "waiting_request", [{
+					kind: "request_waiting", payload: { cause: "request_recovery" },
+				}], { expectedStates: ["running"], transcriptCheckpoint: await this.#effectCheckpoint(binding) });
+				binding.attemptState = "waiting_request";
+				if (retained.some(input => input.resolved && !requestConsumptionMatches(input)))
+					await this.#wakeWaitingRequest(binding);
+			} else if (consultant && consultantPrompt && consultantEffect) {
+				binding.consultantEffect = consultantEffect;
+				this.#trackRun(this.#runRecoveredConsultant(binding, consultant, consultantPrompt));
+			} else {
+				binding.recoveryCallIds = await this.#recoveryToolCallIds(binding);
+				this.#trackRun(this.#runPrompt(binding, "", undefined, "pending_tool"));
+			}
 			for (const approval of approvals ?? []) {
 				if (approval.status === "waiting_human_paused")
 					binding.approvalPauseCause ??= {
@@ -7205,21 +7484,24 @@ export class EngineRuntime {
 						address_revision: approval.address_revision,
 					};
 				this.#armApprovalDeadline(binding, approval);
-				if (!requestWait && !binding.manualHold && (approval.status === "approved" || approval.status === "denied"))
-					this.#trackRun(this.#resumeApprovedTool(binding, approval.id));
 			}
 			this.#retainedApprovals.delete(target.agentInstanceId);
 			return binding;
 		} catch (error) {
-			binding.session.sessionManager.seal();
-			await this.#discardBinding(binding, true);
+			manager.seal();
+			if (binding) await this.#discardBinding(binding, true);
+			if (reacquired) this.#notifyEvents(await this.store.commitAttemptTransition(current, "paused", [{
+				kind: "paused", payload: { cause: "recovery_required", reason: safeEngineErrorDetail(error) },
+			}], { expectedStates: ["running", "waiting_request"], cause: "recovery_required" }));
 			throw error;
+		} finally {
+			clearInterval(materializationHeartbeat);
 		}
 	}
 
 	/** Only unknown availability or capacity is retried; an explicit authority refusal stays visibly paused. */
 	#transientRecoveryFailure(error: unknown): boolean {
-		if (error instanceof EngineBindingPendingError) return true;
+		if (error instanceof EngineBindingPendingError || error instanceof EngineRoutingQueuedError) return true;
 		if (!(error instanceof EngineTargetError)) return true;
 		return ["binding_pending", "source_unavailable", "admission_state_unknown"]
 			.includes(error.code);

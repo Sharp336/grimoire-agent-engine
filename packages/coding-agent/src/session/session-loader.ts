@@ -370,14 +370,15 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 export function collectPersistedBlobHashes(entries: readonly unknown[]): string[] {
 	const hashes = new Set<string>();
 	for (const entry of entries) {
-		if (
-			isRecord(entry) &&
-			entry.type === "message" &&
-			isRecord(entry.message) &&
-			entry.message.role === "user" &&
-			entry.originalAttachments !== undefined
-		)
-			for (const attachment of copyOriginalAttachments(entry.originalAttachments))
+		if (!isRecord(entry)) continue;
+		let originals: unknown;
+		if (entry.type === "message" && isRecord(entry.message) && entry.message.role === "user")
+			originals = entry.originalAttachments;
+		else if (entry.type === "custom" && entry.customType === "engine-consultant-input" &&
+			isRecord(entry.data) && isRecord(entry.data.prepared) && isRecord(entry.data.prepared.identity))
+			originals = entry.data.prepared.identity.originalAttachments;
+		if (originals !== undefined)
+			for (const attachment of copyOriginalAttachments(originals))
 				hashes.add(attachment.contentHash.slice(7));
 	}
 	const pending: Array<{ value: unknown; key?: string }> = entries.map(value => ({ value }));

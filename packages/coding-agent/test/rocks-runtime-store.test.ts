@@ -74,7 +74,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				byteBoundary: 0,
 				native: { familyId, generationId: "main", throughSeq: 1, incarnation: client.incarnation },
 			};
-			const effect = { effectId: `effect-${suffix}`, modelCallId: "call-1", inputHash: "input" };
+			const effect = { source: "primary" as const, effectId: `effect-${suffix}`, modelCallId: "call-1", inputHash: "input" };
 			await store.startModelEffect(binding, effect, checkpoint);
 			await expect(
 				store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [{ kind: "completed" }]),

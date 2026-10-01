@@ -846,6 +846,11 @@ describe.skipIf(storageWorkerUnavailable)("typed Engine lifecycle boundaries", (
 			await withTimeout(leafPaused, 5_000, "Leaf did not reach its pause");
 			expect(waiting.size).toBe(2);
 			expect(results).toEqual([]);
+			const dependencies = (await runtime.store.records.query("routing_wait_edges", [])).records.map(row => row.value);
+			expect(dependencies).toEqual(expect.arrayContaining([
+				expect.objectContaining({ caller_attempt_id: root.attemptId, waited_admission_id: middle.attemptId }),
+				expect.objectContaining({ caller_attempt_id: middle.attemptId, waited_admission_id: leaf.attemptId }),
+			]));
 			const sibling = await admitStart(runtime, leafExecution, requestFor("sibling", leafExecution));
 			await withTimeout(siblingEntered.promise, 5_000, "Independent root did not enter");
 			if (action !== "stop") {

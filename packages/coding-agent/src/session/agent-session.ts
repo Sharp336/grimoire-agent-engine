@@ -1027,6 +1027,7 @@ export class AgentSession {
 			thinkingLevel: config.thinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
+			managedServiceTier: config.managedServiceTier,
 		});
 
 		this.#promptTemplates = config.promptTemplates ?? [];

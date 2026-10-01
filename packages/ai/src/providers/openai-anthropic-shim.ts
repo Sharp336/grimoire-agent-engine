@@ -108,6 +108,7 @@ export function streamOpenAIAnthropicShim(
 					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
+					strictServiceTier: options?.strictServiceTier,
 				});
 
 				for await (const event of innerStream) {
@@ -146,6 +147,7 @@ export function streamOpenAIAnthropicShim(
 					reasoning: reasoningEffort,
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,
+					strictServiceTier: options?.strictServiceTier,
 					disableReasoning: options?.disableReasoning,
 				});
 

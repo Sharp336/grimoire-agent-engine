@@ -1884,7 +1884,7 @@ const streamAnthropicOnce = (
 			);
 			let disableStrictTools =
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
-			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
+			let dropFastMode = !options?.strictServiceTier && (providerSessionState?.fastModeDisabled ?? false);
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
@@ -1915,7 +1915,7 @@ const streamAnthropicOnce = (
 				isOAuthToken = false;
 			} else {
 				const extraBetas = normalizeExtraBetas(options?.betas);
-				const wantsAnthropicPriority = model.provider === "anthropic" && options?.serviceTier === "priority";
+				const wantsAnthropicPriority = (model.provider === "anthropic" || options?.strictServiceTier) && options?.serviceTier === "priority";
 				// Skip the fast-mode beta when this session already learned the
 				// endpoint+model rejects fast mode; `speed` is dropped from the params
 				// too (dropFastMode), so the request stays a faithful non-fast request.
@@ -2803,6 +2803,7 @@ const streamAnthropicOnce = (
 					}
 					if (
 						!dropFastMode &&
+						!options?.strictServiceTier &&
 						model.provider === "anthropic" &&
 						options?.serviceTier === "priority" &&
 						firstTokenTime === undefined &&
@@ -3515,7 +3516,7 @@ function buildParams(
 			seqs.length > ANTHROPIC_STOP_SEQUENCES_MAX ? seqs.slice(0, ANTHROPIC_STOP_SEQUENCES_MAX) : seqs;
 	}
 
-	if (model.provider === "anthropic" && options?.serviceTier === "priority") {
+	if ((model.provider === "anthropic" || options?.strictServiceTier) && options?.serviceTier === "priority") {
 		params.speed = "fast";
 	}
 

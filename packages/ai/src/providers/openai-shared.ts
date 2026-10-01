@@ -338,8 +338,9 @@ export function applyOpenAIServiceTier(
 	params: { service_tier?: ServiceTier | null | undefined },
 	serviceTier: ServiceTier | null | undefined,
 	model: Pick<Model, "provider" | "api" | "id">,
+	strict = false,
 ): void {
-	if (!shouldSendServiceTier(serviceTier, model)) return;
+	if (strict ? !serviceTier || serviceTier === "auto" : !shouldSendServiceTier(serviceTier, model)) return;
 	params.service_tier = serviceTier;
 }
 
@@ -3525,7 +3526,7 @@ type CommonResponsesParams = ResponseCreateParamsStreaming & ResponsesSamplingPa
 
 type CommonSamplingOptions = Pick<
 	StreamOptions,
-	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "maxTokens"
+	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "maxTokens" | "strictServiceTier"
 > & { serviceTier?: ServiceTier };
 
 /**
@@ -3563,7 +3564,7 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 			if (options?.repetitionPenalty !== undefined) params.repetition_penalty = options.repetitionPenalty;
 		}
 	}
-	applyOpenAIServiceTier(params, options?.serviceTier, model);
+	applyOpenAIServiceTier(params, options?.serviceTier, model, options?.strictServiceTier);
 }
 
 type ReasoningOptions = {

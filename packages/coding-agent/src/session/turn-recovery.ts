@@ -1749,14 +1749,14 @@ export class TurnRecovery {
 	): Promise<boolean> {
 		const generation = this.#host.promptGeneration();
 		if (this.#host.abortInProgress() || this.#host.isDisposed() || options?.signal?.aborted) return false;
+		if (this.#turnRetryPolicy?.orderedRouteFallback &&
+			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
+			return false;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
-		if (this.#turnRetryPolicy?.orderedRouteFallback &&
-			!(await this.#turnRetryPolicy.orderedRouteFallback.beforeApply(selector.raw, options?.signal)))
-			return false;
 		if (options?.signal?.aborted || this.#host.abortInProgress() || this.#host.isDisposed() ||
 			this.#host.promptGeneration() !== generation) return false;
 		let apiKey = options?.apiKey;

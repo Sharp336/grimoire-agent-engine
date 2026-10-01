@@ -407,6 +407,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevelCeiling?: Effort;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
+	/** Engine-owned exact route tier; overrides ambient, retained and caller tier preferences. */
+	managedServiceTier?: (model: Model) => ServiceTier | undefined;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
@@ -3403,7 +3405,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-		const configuredServiceTierByFamily = hasServiceTierEntry
+		const configuredServiceTierByFamily = options.managedServiceTier ? {} : hasServiceTierEntry
 			? (existingSession.serviceTier ?? {})
 			: buildServiceTierByFamily(
 					settings.get("tier.openai"),
@@ -3432,6 +3434,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					withProviderRetryBudget(providerRetryMaxAttempts, () =>
 						settingsAwareStreamFn(streamModel, context, {
 							...streamOptions,
+							...(options.managedServiceTier ? {
+								serviceTier: options.managedServiceTier(streamModel), strictServiceTier: true,
+							} : {}),
 							...(options.turnRetryPolicy?.deferNestedProviderRetries
 								? { codexSseMaxAttempts: 1, providerRetryWait: deferNestedProviderRetry }
 								: {}),
@@ -3490,6 +3495,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						try {
 							const value = await work({
 								signal, onUsage,
+								...(options.managedServiceTier ? {
+									serviceTier: options.managedServiceTier(requestModel), strictServiceTier: true,
+								} : {}),
 								fetch: (input, init) => {
 									// A retry cannot inherit the previous physical response's accounting.
 									usage = undefined;
@@ -3647,6 +3655,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			turnRetryPolicy: options.turnRetryPolicy,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
+			managedServiceTier: options.managedServiceTier,
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,

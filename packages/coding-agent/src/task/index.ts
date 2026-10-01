@@ -20,6 +20,7 @@ import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { MAX_ENGINE_CHILD_ASSIGNMENT_BYTES } from "../engine/contracts";
+import { validateRuntimeValue } from "../engine/runtime-protocol";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -1104,9 +1105,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const launcher = this.session.engineChildLauncher!;
 		const target = params.target;
 		const assignment = typeof params.assignment === "string" ? params.assignment.trim() : "";
-		if (!target?.task_ref?.trim() || !/^grimoire:\/\/tasks\/[^/]+\/[^/]+$/.test(target.task_ref) ||
-			(target.work_step_id !== null && (!target.work_step_id || typeof target.work_step_id !== "string")))
-			return createTaskModeError("A real Task or WorkStep target is required");
+		if (!target) return createTaskModeError("A real Task or WorkStep target is required");
+		try { validateRuntimeValue("workTarget", target); }
+		catch { return createTaskModeError("A real Task or WorkStep target is required"); }
 		if (!assignment) return createTaskModeError("assignment is required");
 		if (Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES) {
 			return createTaskModeError(`assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);

@@ -5,6 +5,7 @@ import { validateRuntimeValue } from "./runtime-protocol";
 import type {
 	ApprovalAddressee, ApprovalDecider, ApprovalDecision, ApprovalRequest, ChoiceTransition,
 	EngineExecutionConfiguration, ExecutorChoice, StartSpecialRef,
+	CandidateIdentity, DispatchRequirement,
 } from "./runtime-protocol.mjs";
 export type {
 	Effort, ServiceTier, WorkTarget, WorkStep, TaskHead, AgentHead, RequestedExecution,
@@ -185,6 +186,37 @@ export interface EngineRetryState {
 export const USAGE_PROBE_DEFAULT_TIMEOUT_MS = 30_000;
 /** Largest delay a platform timer represents; a documented bound, not a product cap. */
 export const USAGE_PROBE_MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Private verified Core receipt evidence, never a model/browser Start flag. */
+export interface HumanSelectionProof {
+	modelId: CandidateIdentity["model_id"];
+	routeRef: CandidateIdentity["route_ref"];
+	effort: CandidateIdentity["effort"];
+	serviceTier: CandidateIdentity["service_tier"];
+	dispatchHash: string;
+}
+
+export function requireHumanSelectionProof(value: unknown, dispatchHash: string, requirement: DispatchRequirement): HumanSelectionProof | null {
+	if (value == null) return null;
+	if (!isRecord(value) || Object.keys(value).length !== 5 ||
+		!["modelId", "routeRef", "effort", "serviceTier", "dispatchHash"].every(key => Object.hasOwn(value, key)) ||
+		typeof value.modelId !== "string" || !value.modelId.trim())
+		throw new EngineTargetError("stale_target", "Human selection proof has an invalid private shape");
+	validateRuntimeValue("artifactRef", value.routeRef);
+	validateRuntimeValue("effort", value.effort);
+	validateRuntimeValue("serviceTier", value.serviceTier);
+	validateRuntimeValue("hash", value.dispatchHash);
+	if (!requirement.pin || value.dispatchHash !== dispatchHash || value.modelId !== requirement.pin.model_id ||
+		value.routeRef !== requirement.pin.route_ref || value.effort !== requirement.pin.effort ||
+		value.serviceTier !== requirement.service_tier)
+		throw new EngineTargetError("stale_target", "Human selection proof differs from its immutable Dispatch pin");
+	return Object.freeze(value) as unknown as HumanSelectionProof;
+}
+
+export function humanSelectionMatches(proof: HumanSelectionProof | null, candidate: CandidateIdentity): boolean {
+	return proof !== null && proof.modelId === candidate.model_id && proof.routeRef === candidate.route_ref &&
+		proof.effort === candidate.effort && proof.serviceTier === candidate.service_tier;
+}
 
 /** Immutable Core receipt capture, not a second source of policy defaults. */
 export interface CapturedApprovalSettings {

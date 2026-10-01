@@ -1938,6 +1938,7 @@ function mapOptionsForApi<TApi extends Api>(
 	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
 	const simpleProviderOptions = getProviderDefinition(model.provider)?.mapSimpleOptions?.(options ?? {});
 	const base = {
+		strictServiceTier: options?.strictServiceTier,
 		temperature: options?.temperature,
 		topP: options?.topP,
 		topK: options?.topK,

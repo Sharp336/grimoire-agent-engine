@@ -167,8 +167,8 @@ describe("task approval details surface the dispatch", () => {
 	});
 });
 
-describe("Engine task profile dispatch", () => {
-	it("requires an explicit cached AgentProfile and launches an assignment without a hosted WorkStep", async () => {
+describe("Engine task WorkTarget dispatch", () => {
+	it("validates standalone WorkTargets and returns the child's retained output", async () => {
 		const calls: unknown[] = [];
 		const tool = await TaskTool.create({
 			cwd: "/tmp",
@@ -178,10 +178,8 @@ describe("Engine task profile dispatch", () => {
 			getSessionSpawns: () => "*",
 			engineChildLauncher: {
 				parentAgentInstanceRef: "grimoire://tasks/project/current/agents/parent",
-				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
 				async launch(request: {
-					profileRef: string;
-					workStepId?: string;
+					target: { task_ref: string; work_step_id: string | null };
 					assignment: string;
 					toolCallId: string;
 					signal?: AbortSignal;
@@ -198,9 +196,8 @@ describe("Engine task profile dispatch", () => {
 			},
 		} as unknown as ToolSession);
 
-		expect(tool.description).toContain("gctx:2222222222222222");
 		const rejected = await tool.execute("call-0", {
-			profileRef: "gctx:3333333333333333",
+			target: { task_ref: "grimoire://tasks/~u/not-an-owner/task", work_step_id: null },
 			assignment: "Inspect the local child path",
 		});
 		expect(rejected.content[0]).toMatchObject({ type: "text" });
@@ -208,15 +205,10 @@ describe("Engine task profile dispatch", () => {
 		expect(calls).toHaveLength(0);
 
 		const result = await tool.execute("call-1", {
-			profileRef: "gctx:2222222222222222",
+			target: { task_ref: `grimoire://tasks/~u/${"a".repeat(64)}/standalone`, work_step_id: null },
 			assignment: "Inspect the local child path",
 		});
 		expect(calls).toHaveLength(1);
-		expect(calls[0]).toMatchObject({
-			profileRef: "gctx:2222222222222222",
-			assignment: "Inspect the local child path",
-			toolCallId: "call-1",
-		});
 		expect(result.details?.results[0]).toMatchObject({
 			id: "child-1",
 			exitCode: 0,
@@ -237,7 +229,6 @@ describe("Engine task profile dispatch", () => {
 			getSessionSpawns: () => "*",
 			engineChildLauncher: {
 				parentAgentInstanceRef: "grimoire://tasks/project/current/agents/parent",
-				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
 				async launch() {
 					return {
 						agentInstanceId: "child-failed",
@@ -250,7 +241,7 @@ describe("Engine task profile dispatch", () => {
 		} as unknown as ToolSession);
 
 		const result = await tool.execute("call-failed", {
-			profileRef: "gctx:2222222222222222",
+			target: { task_ref: "grimoire://tasks/project/child", work_step_id: "inspect" },
 			assignment: "Inspect the local child path",
 		});
 		expect(result.isError).toBeTrue();

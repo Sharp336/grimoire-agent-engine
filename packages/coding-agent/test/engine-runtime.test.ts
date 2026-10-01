@@ -1000,6 +1000,37 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("delivers a retained blocking denial after manual Resume without executing the protected tool", async () => {
+		const mock = toolTurnModel("paused-denied-read", "read", { path: "private-permit.txt" });
+		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
+			toolNames: ["read"], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"],
+		} });
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		fs.writeFileSync(path.join(cwd, "private-permit.txt"), "must not be delivered");
+		try {
+			const requested = nextEngineEvent(runtime, "tool_approval_requested");
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "paused-denial-start", agentInstanceId: "paused-denial",
+				agentInstanceRef: "grimoire://tasks/grimoire/permit/agents/paused-denial",
+				executionId: "paused-denial-execution", attemptId: "paused-denial-attempt",
+			}, { cwd, principalId: "owner", input: "Read after approval" }));
+			const event = await requested;
+			if (event.kind !== "tool_approval_requested") throw new Error("Missing original permit");
+			const paused = nextEngineEvent(runtime, "paused", started.attemptId);
+			await runtime.pause({ ...started, commandId: "pause-denial", initiator: { kind: "human" } });
+			await withTimeout(paused, 5_000, "Permit waiter did not pause");
+			const decision = approvalDecisionFor(execution, started, "deny-while-paused", event.payload, "deny");
+			await runtime.resolveApproval({ ...started, commandId: decision.command_id, approvalDecision: decision });
+			expect(toolResultOf(mock, "paused-denied-read")).toBeUndefined();
+			await runtime.resume({ ...started, commandId: "resume-denial", initiator: { kind: "human" } });
+			await withTimeout(runtime.drain(), 10_000, "Decided blocking waiter did not finish after Resume");
+			expect(toolResultOf(mock, "paused-denied-read")?.isError).toBeTrue();
+			expect(JSON.stringify(toolResultOf(mock, "paused-denied-read")?.content)).not.toContain("must not be delivered");
+			expect(await runtime.store.getEffect(event.payload.id)).toMatchObject({ state: "settled", outcome: "denied" });
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		} finally { await runtime.dispose(); }
+	}, 30_000);
+
 	it("cancels an Attempt that is waiting for a tool permit", async () => {
 		let executed = false;
 		const mock = createMockModel({ handler: { content: ["done"] } });
@@ -1361,6 +1392,49 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it.each(["verified", "missing", "mismatch", "known-below-floor"] as const)(
+		"admits a private exact human null-tier pin without extending its authority: %s", async scenario => {
+			const mock = createMockModel({ handler: { content: ["human-selected result"] } });
+			const execution = admittedExecution(mock.model, modelRegistry);
+			const route = execution.config.routes.routes[0]!;
+			route.tier = scenario === "known-below-floor" ? 1 : null;
+			execution.config.dispatch.requirement.min_tier = 2;
+			execution.config.dispatch.requirement.pin = {
+				model_id: route.model_id, route_ref: route.route_ref, effort: route.effort, reason: "explicit human selection",
+			};
+			const verify = execution.optionsFor({}).verifyOriginReceipt!;
+			const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {
+				verifyOriginReceipt: async identity => {
+					const origin = await verify(identity);
+					return { ...origin, humanSelection: scenario === "missing" ? null : {
+						modelId: route.model_id, routeRef: route.route_ref, effort: route.effort, serviceTier: route.service_tier,
+						dispatchHash: scenario === "mismatch" ? `sha256:${"e".repeat(64)}` : origin.dispatchHash!,
+					} };
+				},
+			});
+			try {
+				const request = startRequest(execution, {
+					commandId: `human-pin-${scenario}`, agentInstanceId: `human-pin-${scenario}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/pin/agents/${scenario}`,
+					executionId: `human-pin-execution-${scenario}`, attemptId: `human-pin-attempt-${scenario}`,
+				}, { cwd, principalId: "owner", input: "Use the explicitly selected route" });
+				if (scenario !== "verified") {
+					await expect(admitRequest(runtime, request)).rejects.toMatchObject({
+						code: scenario === "mismatch" ? "stale_target" : "capacity_unavailable",
+					});
+					expect(mock.calls).toHaveLength(0);
+					return;
+				}
+				const started = await admitRequest(runtime, request);
+				await runtime.drain();
+				const choice = (await runtime.store.getAttempt(started.attemptId))!.execution!.executor_choice;
+				expect(choice.selected).toMatchObject({ basis: "user", model_id: route.model_id, route_ref: route.route_ref,
+					effort: route.effort, service_tier: route.service_tier });
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+			} finally { await runtime.dispose(); }
+		}, 30_000,
+	);
+
 	it("freezes the captured reachable limit from the full roster and never resizes it on Resume", async () => {
 		const release = Promise.withResolvers<boolean>();
 		const entered = Promise.withResolvers<void>();
@@ -1368,9 +1442,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const first = execution.config.routes.routes[0]!;
 		for (let index = 1; index < 14; index++) execution.config.routes.routes.push({
-			...structuredClone(first), route_ref: `gctx:${String(index).padStart(16, "0")}`,
+			...structuredClone(first), route_ref: `gctx:${"23456789abcdefgh".charAt(index).repeat(16)}`,
 		});
-		first.account_ref = "gctx:0000000000000000";
+		first.account_ref = "gctx:zzzzzzzzzzzzzzzz";
 		execution.config.routingLimits.accounts[first.account_ref] = 0;
 		let maximum = 11;
 		const verify = execution.optionsFor({}).verifyOriginReceipt!;
@@ -1403,6 +1477,138 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.dispose();
 		}
 	}, 60_000);
+
+	it("stops before a second primary model iteration without counting the first iteration's tool", async () => {
+		const mock = createMockModel({ handler: [
+			{ content: [{ type: "toolCall", id: "limited-write", name: "write",
+				arguments: { path: "limited-output.txt", content: "first iteration executed" } }] },
+			{ content: ["must not reach another primary iteration"] },
+		] });
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["write"], restrictToolNames: true },
+		});
+		execution.config.dispatch.limits = { timeout_seconds: null, max_iterations: 1 };
+		execution.config.continuationConfiguration.limits = { ...execution.config.dispatch.limits };
+		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity));
+		try {
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "primary-limit", agentInstanceId: "primary-limit",
+				agentInstanceRef: "grimoire://tasks/grimoire/limits/agents/primary",
+				executionId: "primary-limit-execution", attemptId: "primary-limit-attempt",
+			}, { cwd, principalId: "owner", input: "Write once, then answer" }));
+			await runtime.drain();
+			expect(fs.readFileSync(path.join(cwd, "limited-output.txt"), "utf8")).toBe("first iteration executed");
+			expect(mock.calls).toHaveLength(1);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("failed");
+			const effects = await runtime.store.attemptToolEffects(started.attemptId);
+			expect(effects.filter(effect => effect.effect_kind === "model" && effect.tool_name === "model_dispatch_primary")).toHaveLength(1);
+			expect(effects.filter(effect => effect.state === "planned" || effect.state === "started")).toEqual([]);
+		} finally { await runtime.dispose(); }
+	}, 30_000);
+
+	it.each(["approve", "deny", "missing_carrier"] as const)(
+		"recovers a consultant's exact prepared image and context only after cold %s admission",
+		async mode => {
+			const mock = createMockModel({ handler: { content: ["consultation complete"] } });
+			mock.input.push("image");
+			const ordinary = admittedExecution(mock.model, modelRegistry);
+			const execution = admittedExecution(mock.model, modelRegistry, {
+				dispatch: { ...ordinary.config.dispatch, execution_kind: "consultation",
+					special_ref: { kind: "consultation", definition_ref: "gctx:eeeeeeeeeeeeeeee",
+						definition_revision: 1, call_id: "retained-consultation" } },
+			});
+			const base = execution.optionsFor({ deviceId: "engine-runtime-test-device" });
+			let materializations = 0;
+			let runtime: EngineRuntime;
+			const setup = await createRuntime(execution, undefined, {
+				verifyOriginReceipt: async identity => ({ ...await base.verifyOriginReceipt!(identity),
+					specialApproval: { kind: "consultant", unavailable_pin: {
+						route_ref: "gctx:dddddddddddddddd", effort: "none", reason: "pinned route unavailable",
+					}, proposed_reselection_hash: `sha256:${"4".repeat(64)}` } }),
+				resolveExecution: async (...args) => {
+					materializations++;
+					if (materializations > 1) {
+						const attempt = await runtime.store.getAttempt(args[2].attemptId);
+						expect(attempt?.state).toBe("running");
+						expect((await runtime.store.runtimeCommand("consultant-start", { principalId: "owner" })).lease)
+							.toMatchObject({ held: true });
+					}
+					return base.resolveExecution!(...args);
+				},
+			});
+			runtime = setup.runtime;
+			const originalAppend = SessionManager.prototype.appendCustomEntry;
+			const legacyCarrier = mode === "missing_carrier"
+				? spyOn(SessionManager.prototype, "appendCustomEntry").mockImplementation(function (this: SessionManager, kind, data) {
+					return originalAppend.call(this, kind === "engine-consultant-input" ? "legacy-consultant-input" : kind, data);
+				}) : undefined;
+			const png = Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+				"base64",
+			);
+			try {
+				await runtime.attachmentUploads.stage("owner", {
+					uploadId: "consultant-image", clientMessageId: "consultant-message", name: "pixel.png",
+					mediaType: "image/png", bytes: png.length,
+					contentHash: `sha256:${Bun.SHA256.hash(png, "hex")}`, offset: 0, contentBase64: png.toString("base64"),
+				});
+				const requested = nextEngineEvent(runtime, "consultant_approval_requested");
+				const started = await admitRequest(runtime, startRequest(execution, {
+					commandId: "consultant-start", agentInstanceId: "consultant-agent",
+					agentInstanceRef: `${execution.taskRef}/agents/consultant`,
+					executionId: "consultant-execution", attemptId: "consultant-attempt",
+				}, { cwd: setup.cwd, principalId: "owner", input: "Inspect the retained pixel",
+					context: "ORIGINAL_CONSULTANT_CONTEXT", clientMessageId: "consultant-message",
+					attachmentUploadIds: ["consultant-image"] }));
+				const event = await requested;
+				if (event.kind !== "consultant_approval_requested") throw new Error("Consultant approval was not retained");
+				legacyCarrier?.mockRestore();
+				await runtime.pause({ ...started, commandId: "consultant-pause", initiator: { kind: "human" } });
+				await runtime.dispose();
+				runtime = await openRuntime(setup.options);
+				expect(runtime.getBinding(started.agentInstanceId)).toBeUndefined();
+				expect(materializations).toBe(1);
+				expect(mock.calls).toEqual([]);
+				const retained = (await runtime.store.getBinding(started.agentInstanceId))!;
+				const approval = (await runtime.store.getApproval(event.payload.id))!.request;
+				const decision = approvalDecisionFor(execution, retained, "consultant-decision", approval,
+					mode === "deny" ? "deny" : "approve");
+				await runtime.resolveApproval({ ...retained, commandId: "consultant-decision", approvalDecision: decision });
+				expect(materializations).toBe(1);
+				const resume = runtime.resume({ ...retained, commandId: "consultant-resume", initiator: { kind: "human" } });
+				if (mode === "missing_carrier") {
+					await expect(resume).rejects.toThrow("original prepared consultant input is unavailable");
+					expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+					expect(materializations).toBe(1);
+					expect(mock.calls).toEqual([]);
+					return;
+				}
+				await resume;
+				await runtime.drain();
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe(mode === "deny" ? "failed" : "completed");
+				if (mode === "deny") {
+					expect(materializations).toBe(1);
+					expect(mock.calls).toEqual([]);
+				} else {
+					expect(materializations).toBe(2);
+					expect(mock.calls).toHaveLength(1);
+					const user = mock.calls[0].context.messages.findLast(message => message.role === "user")!;
+					expect(JSON.stringify(mock.calls[0].context)).toContain("ORIGINAL_CONSULTANT_CONTEXT");
+					expect(JSON.stringify(user.content)).toContain("Inspect the retained pixel");
+					expect(Array.isArray(user.content) ? user.content.filter(part => part.type === "image") : []).toEqual(
+						await normalizeModelContextImages([{ type: "image", mimeType: "image/png", data: png.toString("base64") }],
+							{ model: mock.model }),
+					);
+					const manager = await nativeSession(runtime, started.sessionFile!);
+					await withOriginalAttachment(manager, "attachment://original/message/consultant-message/0",
+						async file => expect(await Bun.file(file).bytes()).toEqual(new Uint8Array(png)));
+				}
+			} finally {
+				legacyCarrier?.mockRestore();
+				await runtime!.dispose();
+			}
+		}, 60_000,
+	);
 
 	it("retains Q1 across Q2, drain and restart until its native request.read result is checkpointed", async () => {
 		const independent = Promise.withResolvers<void>();
@@ -1470,11 +1676,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await runtime.pause({ ...started, commandId: "pause-questions", initiator: { kind: "human" } });
 			await runtime.dispose();
 			runtime = await openRuntime(created.options);
-			const restored = runtime.getBinding(started.agentInstanceId)!;
-			expect(restored.attemptId).toBe(started.attemptId);
-			expect((await runtime.store.requestProjection(restored, q1))?.result_consumption).toBeUndefined();
+			expect(runtime.getBinding(started.agentInstanceId)).toBeUndefined();
+			const retained = (await runtime.store.getBinding(started.agentInstanceId))!;
+			expect(retained.attemptId).toBe(started.attemptId);
+			expect((await runtime.store.requestProjection(retained, q1))?.result_consumption).toBeUndefined();
 			readQ1 = true;
-			await runtime.resume({ ...restored, commandId: "resume-questions", initiator: { kind: "human" } });
+			await runtime.resume({ ...retained, commandId: "resume-questions", initiator: { kind: "human" } });
+			const restored = runtime.getBinding(started.agentInstanceId)!;
 			await runtime.drain();
 			const consumed = await runtime.store.requestProjection(restored, q1);
 			expect(consumed?.result_consumption).toMatchObject({ input_revision: consumed?.value.revision, tool_call_id: "read-q1" });

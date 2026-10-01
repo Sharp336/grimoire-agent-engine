@@ -249,8 +249,8 @@ export class ProviderAdmissionClient {
 				admitted(model, requestUrl(input), init?.signal ?? undefined, selected =>
 					this.#physical(selected, model, init?.signal ?? undefined, async (ordinal, startedAt, context, auditRequest) => {
 						const response = auditRequest
-							? await latencyPhysicalRequest.run(auditRequest, () => fetch(input, init))
-							: await fetch(input, init);
+							? await latencyPhysicalRequest.run(auditRequest, () => fetch(input, { ...init, redirect: "error" }))
+							: await fetch(input, { ...init, redirect: "error" });
 						const observed = this.#observeResponse(selected, model, response, init?.signal, context,
 							ordinal, startedAt, auditRequest);
 						attachLatencyResponse(observed, auditRequest);

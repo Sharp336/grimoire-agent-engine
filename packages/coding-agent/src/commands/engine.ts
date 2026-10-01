@@ -36,10 +36,6 @@ export default class Engine extends Command {
 		"runtime-dir": Flags.string({ description: "Engine runtime directory" }),
 		database: Flags.string({ description: "Engine SQLite path" }),
 		"nats-server": Flags.string({ description: "Absolute nats-server executable path" }),
-		"artifact-cache": Flags.string({ description: "ClientHost Artifact cache directory" }),
-		"local-credential-db": Flags.string({
-			description: "Exact ClientHost-local OMP credential database",
-		}),
 		"child-history-ttl-minutes": Flags.integer({
 			description: "Delete terminal child OMP history after this many minutes",
 			min: 1,
@@ -104,9 +100,6 @@ export default class Engine extends Command {
 		// The service keeps the bearer in its private config. Tools must not inherit it, nor the contour body root.
 		removePrivateRuntimeEnv(process.env, [tokenEnv]);
 		adoptBlobsDirFromEnv();
-		const defaultArtifactCacheRoot = process.env.LOCALAPPDATA
-			? path.join(process.env.LOCALAPPDATA, "Grimoire", "offline-cache", "default", "artifacts")
-			: undefined;
 		if (!flags["no-hosted"] && (!serverUrl || !token)) {
 			throw new Error(`Hosted mode requires --server-url and a bearer token in ${tokenEnv}`);
 		}
@@ -123,14 +116,6 @@ export default class Engine extends Command {
 						process.env.GRIMOIRE_NATS_SERVER ??
 						path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe"),
 				),
-				artifactCacheRoot: flags["artifact-cache"]
-					? path.resolve(flags["artifact-cache"])
-					: process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT
-						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
-						: defaultArtifactCacheRoot,
-				localCredentialDbPath: flags["local-credential-db"]
-					? path.resolve(flags["local-credential-db"])
-					: undefined,
 				childHistoryTtlMinutes: flags["child-history-ttl-minutes"] ?? 60,
 				childHistoryRetention: (flags["child-history-retention"] ?? "local") as "local" | "off" | "grimoire",
 				hosted:

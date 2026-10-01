@@ -90,7 +90,7 @@ describe("ProviderExecutionClient", () => {
 					}
 					return Response.json({ allowed: true });
 				});
-				resolved = await new EngineExecutionResolver(root, path.join(root, "local.sqlite"), admission, material)
+				resolved = await new EngineExecutionResolver(root, admission, material)
 					.resolve(config, config.routes.routes, identity, root);
 				resolved.setBillingPoolChanged(async change => { transitions.push(change.to.billing_pool_id); });
 				const selected = resolved.options.model!;

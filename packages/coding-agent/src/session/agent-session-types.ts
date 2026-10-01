@@ -8,6 +8,7 @@ import type {
 	MessageAttribution,
 	Model,
 	OAuthAccountSummary,
+	ServiceTier,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
@@ -164,6 +165,7 @@ export interface AgentSessionConfig {
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
+	managedServiceTier?: (model: Model) => ServiceTier | undefined;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */

@@ -1704,7 +1704,7 @@ function buildParams(
 		const seqs = options.stopSequences;
 		params.stop = seqs.length === 1 ? seqs[0] : seqs.slice(0, 4);
 	}
-	applyOpenAIServiceTier(params, options?.serviceTier, model);
+	applyOpenAIServiceTier(params, options?.serviceTier, model, options?.strictServiceTier);
 
 	if (context.tools?.length) {
 		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride, model.provider);

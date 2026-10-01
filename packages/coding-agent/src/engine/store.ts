@@ -162,6 +162,7 @@ export interface EngineToolEffectInput {
 }
 
 export interface EngineModelEffectInput {
+	source: "primary" | "primary_retry" | "side";
 	effectId: string;
 	modelCallId: string;
 	inputHash: string;

@@ -9,10 +9,12 @@ import type {
 	ModelSpec,
 	OAuthCredential,
 	PhysicalRequest,
+	ServiceTier,
 	SimpleStreamOptions,
 	StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 import { extractCursorAccessTokenUserId } from "@oh-my-pi/pi-ai/oauth/cursor";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -60,6 +62,7 @@ export interface ResolvedEngineExecution {
 		| "modelRegistry"
 		| "model"
 		| "providerRequestHook"
+		| "managedServiceTier"
 		| "thinkingLevel"
 		| "toolNames"
 		| "restrictToolNames"
@@ -74,7 +77,7 @@ export interface ResolvedEngineExecution {
 	verifyCandidate(index: number, currentExecutionDigest: string, signal?: AbortSignal): Promise<{
 		billing_pool_id: string; billing_pool_basis: "expected" | "observed";
 	}>;
-	activateCandidate(index: number, executionDigest: string): void;
+	activateCandidate(index: number, executionDigest: string): void | Promise<void>;
 	setBillingPoolChanged(callback: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>): void;
 	dispose(): void;
 }
@@ -100,7 +103,6 @@ const LOCAL_OAUTH_PROVIDER_KINDS: Record<string, ProviderAdmissionIdentity["prov
 export class EngineExecutionResolver {
 	constructor(
 		readonly credentialRoot: string,
-		readonly localCredentialDbPath: string = getAgentDbPath(),
 		readonly providerAdmissionClient?: ProviderAdmissionClient,
 		readonly providerExecutionClient?: ProviderExecutionClient,
 	) {}
@@ -197,6 +199,7 @@ export class EngineExecutionResolver {
 			const externalProviders = new Map<string, ProviderExecutionBinding>();
 			const selectors: Array<string | undefined> = [];
 			const candidateBindings: Array<ProviderExecutionBinding | undefined> = [];
+			const tierByModel = new Map<string, ServiceTier | undefined>();
 			let model: Model | undefined;
 			let thinkingLevel: ResolvedThinkingLevel | undefined;
 			for (const [index, route] of frozen.entries()) {
@@ -238,6 +241,14 @@ export class EngineExecutionResolver {
 						await authStorage.set(provider, { type: "api_key", key: marker });
 					}
 					const candidate = buildModel(toModelSpec(route, provider, material)) as Model;
+					const family = serviceTierFamily({ ...candidate, provider: route.provider });
+					if (route.service_tier !== "standard" &&
+						(!family && route.provider !== "fireworks" && candidate.api !== "openai-completions" &&
+							candidate.api !== "openai-responses" && candidate.api !== "azure-openai-responses" ||
+							route.service_tier === "flex" && (family === "anthropic" || candidate.api === "google-vertex" || route.provider === "fireworks")))
+						throw new Error("The admitted service tier is not supported by this provider API");
+					tierByModel.set(`${provider}\0${candidate.id}`, route.service_tier === "standard"
+						? family === "openai" ? "default" : undefined : route.service_tier);
 					if (externalRoute) {
 						modelRegistry.registerProvider(candidate.provider, {
 							authStorageManaged: true,
@@ -287,7 +298,7 @@ export class EngineExecutionResolver {
 					throw new ProviderExecutionError("provider_execution_identity_changed",
 						"Provider execution transport changed; start a new Attempt");
 				if (current.api !== nativeProviderApi(binding.execution.api as Api) ||
-					current.baseUrl !== binding.execution.base_url)
+					(current.mode === "owner_local" && current.baseUrl !== binding.execution.base_url))
 					throw new ProviderExecutionError("provider_execution_identity_changed",
 						"Provider execution descriptor changed; start a new Attempt");
 				binding.transport ??= executionTransport(current);
@@ -326,6 +337,11 @@ export class EngineExecutionResolver {
 					authStorage,
 					modelRegistry,
 					model,
+					managedServiceTier: runtimeModel => {
+						const key = `${runtimeModel.provider}\0${runtimeModel.id}`;
+						if (!tierByModel.has(key)) throw new Error("Model tier is outside the admitted frozen routes");
+						return tierByModel.get(key);
+					},
 					providerRequestHook: {
 						wrapFetch: (runtimeModel, fetch) => {
 							const wrapped = quotaHook.wrapFetch(runtimeModel, refreshFetch(runtimeModel, fetch));
@@ -355,7 +371,7 @@ export class EngineExecutionResolver {
 						}, signal,
 					);
 				},
-				activateCandidate: (index, executionDigest) => {
+				activateCandidate: async (index, executionDigest) => {
 					if (index === 0 && admission) admission.executionDigest = executionDigest;
 					const binding = candidateBindings[index];
 					if (binding) {
@@ -363,6 +379,20 @@ export class EngineExecutionResolver {
 						const observation = apiKeyRoutes.find(route =>
 							route.runtimeProviderId === binding.runtimeProviderId);
 						if (observation) observation.executionDigest = executionDigest;
+						if (!binding.transport) {
+							// The durable lease transfer precedes descriptor/credential access.
+							const descriptor = await this.providerExecutionClient!.describe(binding.identity);
+							if (descriptor.api !== nativeProviderApi(binding.execution.api as Api) ||
+								(descriptor.mode === "owner_local" && descriptor.baseUrl !== binding.execution.base_url))
+								throw new ProviderExecutionError("provider_execution_identity_changed", "Admitted fallback descriptor differs");
+							binding.transport = executionTransport(descriptor);
+							const candidate = buildModel(toModelSpec(frozen[index], binding.runtimeProviderId!, descriptor)) as Model;
+							modelRegistry.registerProvider(candidate.provider, {
+								authStorageManaged: true, api: candidate.api, baseUrl: candidate.baseUrl,
+								models: [toProviderModel(candidate)],
+							});
+							if (observation) observation.baseUrl = candidate.baseUrl;
+						}
 					} else if (index !== 0) throw new Error("Admitted fallback candidate is unavailable");
 				},
 				setBillingPoolChanged: callback => { billingPoolChanged = callback; },
@@ -437,7 +467,7 @@ async function resolveProviderExecutionCredential(
 	if (binding.transport && stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport))
 		throw new Error("Provider execution transport changed; start a new Attempt");
 	if (material.api !== nativeProviderApi(binding.execution.api as Api) ||
-		material.baseUrl !== binding.execution.base_url)
+		(material.mode === "owner_local" && material.baseUrl !== binding.execution.base_url))
 		throw new Error("Provider execution descriptor changed; start a new Attempt");
 	binding.transport ??= executionTransport(material);
 	return binding.transport.mode === "hosted_broker" ? BROKER_CREDENTIAL_PLACEHOLDER : material.credential;

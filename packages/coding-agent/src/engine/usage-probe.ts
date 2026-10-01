@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { OAuthCredential } from "@oh-my-pi/pi-ai";
+import { cursorUsageProvider } from "@oh-my-pi/pi-ai/usage/cursor";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
@@ -62,8 +63,20 @@ async function localOAuth(provider: string, credential: Extract<Credential, { me
 
 async function builtin(builtinId: string, account: Account, credential: Credential, signal?: AbortSignal) {
 	const provider = BUILTIN_PROVIDERS[builtinId];
-	if (!provider || !credential || credential.method !== "oauth" || account.provider_id !== provider)
-		return failure("builtin_unsupported");
+	if (!provider || !credential || account.provider_id !== provider) return failure("builtin_unsupported");
+	if (credential.method === "api_key") {
+		// ClientHost attests this exact Account-bound key; never resolve environment/config credentials.
+		if (provider !== "cursor" || !credential.value) return failure("builtin_unsupported");
+		try {
+			const report = await cursorUsageProvider.fetchUsage({
+				provider, credential: { type: "api_key", apiKey: credential.value }, signal,
+			}, { fetch: globalThis.fetch });
+			if (!report || report.provider !== provider || !Number.isFinite(report.fetchedAt)) return failure("unavailable");
+			if (account.external_id && report.metadata?.accountId && report.metadata.accountId !== account.external_id)
+				return failure("account_identity_mismatch");
+			return { status: "ready", observations: usageObservations(report, account) };
+		} catch { return failure("unavailable"); }
+	}
 	const local = await localOAuth(provider, credential).catch(() => null);
 	if (!local) return failure("credential_unavailable_on_device");
 	let storage: AuthStorage;

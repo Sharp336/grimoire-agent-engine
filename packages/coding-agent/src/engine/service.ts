@@ -9,6 +9,7 @@ import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import type { EngineChildLaunchResult } from "../tools";
 import { type EngineApprovalDecision, type EngineSemanticBindingSnapshot, EngineBindingPendingError, EngineRoutingQueuedError, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES, sameSemanticBinding, validateSemanticBinding } from "./contracts";
+import type { HumanSelectionProof } from "./contracts";
 import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer, validateEngineCommand } from "./control-query";
 import { HostedBridgeUnavailableError, HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { NatsEngineAdapter } from "./nats-adapter";
@@ -25,8 +26,6 @@ export interface EngineServiceConfig {
 	runtimeDir: string;
 	databasePath: string;
 	natsServerPath: string;
-	artifactCacheRoot?: string;
-	localCredentialDbPath?: string;
 	childHistoryTtlMinutes?: number;
 	childHistoryRetention?: "local" | "off" | "grimoire";
 	hosted?: {
@@ -68,7 +67,6 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			: undefined;
 		const executionResolver = new EngineExecutionResolver(
 			path.join(config.runtimeDir, "credentials"),
-			config.localCredentialDbPath,
 			providerAdmissionClient,
 			providerExecutionClient,
 		);
@@ -105,6 +103,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 							authContextId: string;
 							approvalSettings: { timeout_seconds: number; max_frozen_candidates: number; settings_revision: number; settings_hash: string } | null;
 							specialApproval: { kind: "consultant"; unavailable_pin: unknown; proposed_reselection_hash: string } | null;
+							humanSelection?: HumanSelectionProof | null;
 						};
 					}
 				: undefined,
@@ -136,10 +135,13 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 							!Number.isSafeInteger(reserved.requested_child_ordinal) ||
 							!Array.isArray(reserved.exceeded))
 							throw new EngineTargetError("stale_target", "Child reserve lacks exact approval subject");
-						return reserved as unknown as {
-							admission_id: string; child_dispatch_hash: string;
-							requested_depth: number; requested_child_ordinal: number;
-							exceeded: Array<"max_depth" | "max_children">; ceiling_hash: string;
+						return {
+							admission_id: reserved.admission_id,
+							child_dispatch_hash: reserved.child_dispatch_hash,
+							requested_depth: reserved.requested_depth as number,
+							requested_child_ordinal: reserved.requested_child_ordinal as number,
+							exceeded: reserved.exceeded as Array<"max_depth" | "max_children">,
+							ceiling_hash: reserved.ceiling_hash,
 						};
 					}
 				: undefined,

@@ -72,6 +72,7 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	readonly #managedServiceTier?: (model: Model) => ServiceTier | undefined;
 
 	constructor(
 		host: ModelControlsHost,
@@ -80,11 +81,13 @@ export class ModelControls {
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
+			managedServiceTier?: (model: Model) => ServiceTier | undefined;
 		},
 	) {
 		this.#host = host;
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
+		this.#managedServiceTier = options.managedServiceTier;
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
@@ -691,6 +694,7 @@ export class ModelControls {
 	 * per-family tier map down to the entry for its family.
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
+		if (this.#managedServiceTier) return model ? this.#managedServiceTier(model) : undefined;
 		if (model?.provider === "fireworks") {
 			return this.#host.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"

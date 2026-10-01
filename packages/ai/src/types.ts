@@ -398,6 +398,8 @@ export interface PhysicalRequest {
 }
 
 export interface StreamOptions {
+	/** Managed admission requires the requested tier; never silently demote it at a provider adapter. */
+	strictServiceTier?: boolean;
 	temperature?: number;
 	topP?: number;
 	topK?: number;
