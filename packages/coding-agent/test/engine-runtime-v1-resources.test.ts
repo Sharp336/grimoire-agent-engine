@@ -18,6 +18,8 @@ import { RocksNativeSessionStorage } from "../src/session/rocks-native-session-s
 import type { SessionEntry, SessionHeader } from "../src/session/session-entries";
 import {
 	active,
+	admittedExecutionFixture,
+	admittedFixtureStart,
 	binding,
 	command,
 	eventsRequest,
@@ -1012,7 +1014,6 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		const unrelated = await blobs.publish(Buffer.from("not owned by this message"));
 		await unrelated.release();
 		const agent = identity("file-resource");
-		await store.registerAgent(agent);
 		const header = {
 			type: "session",
 			version: 3,
@@ -1021,7 +1022,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			cwd: "/test",
 		};
 		const transcript = nativeTranscript(store, "file-resource", header);
-		const target = { ...binding("file-resource"), sessionFile: transcript.sessionPath };
+		const target = { ...await active(store, "file-resource"), sessionFile: transcript.sessionPath };
 		const message = {
 			type: "message",
 			id: "file-entry",
@@ -1057,14 +1058,14 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		}
 		expect(Buffer.concat(pieces)).toEqual(bytes);
 		expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
-		await expect(read({}, "other")).rejects.toThrow("authorized");
+		await expect(read({}, "other")).rejects.toMatchObject({ code: "agent_not_found" });
+		await expect(read({ attemptId: "other-attempt" })).rejects.toMatchObject({ code: "agent_not_found" });
 		for (const change of [
 			{ contentHash: `sha256:${unrelated.hash}` },
 			{ attachmentIndex: 1 },
 			{ name: "other.bin" },
 			{ mediaType: "text/plain" },
 			{ bytes: bytes.length + 1 },
-			{ attemptId: "other-attempt" },
 			{ sessionId: "other-session" },
 			{ entryId: "other-entry" },
 			{ revision: "other-lineage" },
@@ -1088,8 +1089,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		// The completed Attempt keeps its immutable native cut; the edit is visible only at a newer cut.
 		await transcript.rewrite([{ ...message, message: { role: "assistant", content: "not user owned" } }], []);
 		expect(Buffer.from(String((await read()).contentBase64), "base64")).toEqual(bytes.subarray(0, 65536));
-		const next = { ...target, attemptId: "next-attempt", executionId: "next-execution", bindingGeneration: 2 };
-		await store.commitAttemptTransition(next, "running", [{ kind: "running" }]);
+		const next = await admittedFixtureStart(store, {
+			...target, commandId: "next-file-start", attemptId: "next-attempt", executionId: "next-execution", bindingGeneration: 2,
+		}, agent.agentInstanceRef, agent.principalId, admittedExecutionFixture());
 		const replaced = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, next.attemptId);
 		expect(await nativeHistoryAttachments(replaced, agent.agentInstanceRef, blobs)).toEqual(new Map());
 		await expect(
@@ -1105,7 +1107,6 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		const unrelated = await blobs.publish(Buffer.from("not present in this history"));
 		await unrelated.release();
 		const agent = identity("image-resource");
-		await store.registerAgent(agent);
 		const header = {
 			type: "session",
 			version: 3,
@@ -1114,7 +1115,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			cwd: "/test",
 		};
 		const transcript = nativeTranscript(store, "image-resource", header);
-		const target = { ...binding("image-resource"), sessionFile: transcript.sessionPath };
+		const target = { ...await active(store, "image-resource"), sessionFile: transcript.sessionPath };
 		const message = {
 			type: "message",
 			id: "image-entry",
@@ -1152,13 +1153,13 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		}
 		expect(Buffer.concat(pieces)).toEqual(bytes);
 		expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
-		await expect(read({}, "other")).rejects.toThrow("authorized");
+		await expect(read({}, "other")).rejects.toMatchObject({ code: "agent_not_found" });
+		await expect(read({ attemptId: "other-attempt" })).rejects.toMatchObject({ code: "agent_not_found" });
 		for (const change of [
 			{ contentHash: `sha256:${unrelated.hash}` },
 			{ blockIndex: 0 },
 			{ mediaType: "image/jpeg" },
 			{ bytes: bytes.length + 1 },
-			{ attemptId: "other-attempt" },
 			{ revision: "changed-lineage" },
 		])
 			await expect(read(change)).rejects.toMatchObject({ code: "stale_target" });
@@ -1175,8 +1176,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		// The completed Attempt keeps its immutable native cut; edits are visible only at a newer cut.
 		await transcript.rewrite([{ ...message, message: { role: "user", content: "replaced" } }], []);
 		expect(Buffer.from(String((await read()).contentBase64), "base64")).toEqual(bytes.subarray(0, 65_536));
-		const next = { ...target, attemptId: "next-attempt", executionId: "next-execution", bindingGeneration: 2 };
-		await store.commitAttemptTransition(next, "running", [{ kind: "running" }]);
+		const next = await admittedFixtureStart(store, {
+			...target, commandId: "next-image-start", attemptId: "next-attempt", executionId: "next-execution", bindingGeneration: 2,
+		}, agent.agentInstanceRef, agent.principalId, admittedExecutionFixture());
 		const current = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, next.attemptId);
 		await expect(
 			read({ attemptId: next.attemptId, revision: current.lifecycleContext.lineage }),
@@ -1239,7 +1241,6 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 	it("keeps a retained Attempt history resource pinned across another binding and a store reopen", async () => {
 		let store = await createStore();
 		const agent = identity("retained-resource");
-		await store.registerAgent(agent);
 		const transcript = nativeTranscript(store, "retained-first", {
 			type: "session",
 			version: 3,
@@ -1247,7 +1248,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			timestamp: new Date(0).toISOString(),
 			cwd: "/first",
 		});
-		const first = { ...binding("retained-resource"), sessionFile: transcript.sessionPath };
+		const first = { ...await active(store, "retained-resource"), sessionFile: transcript.sessionPath };
 		const entry = {
 			type: "message",
 			id: "same-entry",
@@ -1281,15 +1282,14 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			cwd: "/next",
 		});
 		await nextTranscript.append([{ ...entry, message: { role: "assistant", content: "foreign body" } }]);
-		const next = {
+		const next = await admittedFixtureStart(store, {
 			...first,
 			sessionFile: nextTranscript.sessionPath,
 			attemptId: "next-attempt",
 			executionId: "next-execution",
 			bindingGeneration: 2,
 			commandId: "next-start",
-		};
-		await store.commitAttemptTransition(next, "running", [{ kind: "running" }]);
+		}, agent.agentInstanceRef, agent.principalId, admittedExecutionFixture());
 		await store.close();
 		store = reopen();
 		const expected = Buffer.from(JSON.stringify(entry));
@@ -1401,10 +1401,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		await store.registerAgent(root);
 		for (const name of ["quiet", "noisy"]) {
 			await store.registerAgent(identity(name, root.agentInstanceId));
-			await store.commitAttemptTransition(binding(name), "running", [{ kind: "running" }]);
 		}
-		const quiet = binding("quiet"),
-			noisy = binding("noisy");
+		const quiet = await active(store, "quiet"),
+			noisy = await active(store, "noisy");
 		await store.branchIntent(quiet.agentInstanceId, "pause-quiet", "pause", 0);
 		await store.commitAttemptTransition(quiet, "paused", [{ kind: "paused" }]);
 		const scope: RuntimeScope = {
@@ -1505,7 +1504,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		const agent = identity("root");
 		const before = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
 		async function stream(target: EngineBindingSnapshot) {
-			for (let page = 0; page < 20; page++)
+			for (let page = 0; page < 20; page++) {
+				if (!(await store.renewRouting(target.attemptId, target.engineGeneration)))
+					throw new Error("Streaming fixture lost its admitted routing lease");
 				await Promise.all(
 					Array.from({ length: 50 }, (_, offset) =>
 						store.appendEvent({
@@ -1530,6 +1531,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 						}),
 					),
 				);
+			}
 		}
 		await stream(old);
 		// An AGI-level receipt of the old Attempt: its command settles with that Attempt's frozen identity.
@@ -1540,15 +1542,14 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		await store.commitAttemptTransition(old, "completed", [{ kind: "completed" }], {
 			transcriptCheckpoint: await nativeCheckpoint(store),
 		});
-		const target = {
+		const target = await admittedFixtureStart(store, {
 			...old,
 			attemptId: "next-attempt",
 			executionId: "next-execution",
 			bindingId: "next-binding",
 			commandId: "next-command",
 			bindingGeneration: 2,
-		};
-		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		}, agent.agentInstanceRef, agent.principalId, admittedExecutionFixture());
 		await stream(target);
 		await store.startToolEffect(target, {
 			effectId: "selected-effect",
@@ -1644,8 +1645,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		expect(snapshot.agents).toHaveLength(1);
 		await store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
 		const head = (await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).watermark;
+		const unselectedBody = "heavy".repeat(20_000);
 		await store.commitAttemptTransition(binding("child"), "failed", [
-			{ kind: "failed", payload: { error: "heavy".repeat(20_000) } },
+			{ kind: "failed", payload: { error: unselectedBody } },
 		]);
 		const batch = await store.runtimeEvents({
 			...eventsRequest(snapshot.epoch, snapshot.watermark, scope),
@@ -1654,7 +1656,8 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		expect(batch.headCursor).toBe(head);
 		expect(batch.throughCursor).toBe(head);
 		expect(batch.changes.map(change => change.agentInstanceRef)).toEqual([root.agentInstanceRef]);
-		expect(batch.work.materializedBytes).toBeLessThan(10_000);
+		// Decoding even one unselected heavy detail would exceed this bound.
+		expect(batch.work.materializedBytes).toBeLessThan(Buffer.byteLength(unselectedBody, "utf8"));
 		await expect(
 			store.runtimeEvents({
 				...eventsRequest(snapshot.epoch, 0, scope),
@@ -1715,9 +1718,8 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			position = range.nextOffset === null ? offset : Number(range.nextOffset);
 		}
 		expect(Buffer.concat(chunks).toString("utf8")).toBe(expected);
-		await expect(store.runtimeResource({ principalId: "other", resource, offset: 0, limit: 4096 })).rejects.toThrow(
-			"authorized",
-		);
+		await expect(store.runtimeResource({ principalId: "other", resource, offset: 0, limit: 4096 }))
+			.rejects.toMatchObject({ code: "agent_not_found" });
 	});
 
 	it("fences input response by its exact metadata revision after newer unrelated inputs", async () => {
@@ -1805,13 +1807,13 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 			terminalResult: firstResult,
 			transcriptCheckpoint: await nativeCheckpoint(store),
 		});
-		const later = {
+		const later = await admittedFixtureStart(store, {
 			...first,
 			commandId: "later-command",
 			attemptId: "later-attempt",
 			executionId: "later-execution",
 			bindingGeneration: 2,
-		};
+		}, identity("root").agentInstanceRef, "owner", admittedExecutionFixture());
 		await store.commitAttemptTransition(later, "completed", [{ kind: "completed" }], {
 			terminalResult: { assistantFinal: "later result" },
 			transcriptCheckpoint: await nativeCheckpoint(store),
@@ -1823,10 +1825,9 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		});
 		await expect(
 			store.waitAttemptResult(first.agentInstanceId, "unrelated-command", first.attemptId),
-		).rejects.toThrow("another launch");
-		await expect(store.waitAttemptResult(first.agentInstanceId, first.commandId, later.attemptId)).rejects.toThrow(
-			"another launch",
-		);
+		).rejects.toMatchObject({ code: "stale_target" });
+		await expect(store.waitAttemptResult(first.agentInstanceId, first.commandId, later.attemptId))
+			.rejects.toMatchObject({ code: "stale_target" });
 	});
 
 	it("does not lose cancellation while the initial child state read is pending", async () => {

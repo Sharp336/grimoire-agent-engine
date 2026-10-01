@@ -524,7 +524,8 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 							],
 						};
 					expect(result.isError).not.toBeTrue();
-					expect(result.details).toMatchObject({
+					// Bun's asymmetric matchers mutate received fields; keep the live provider context untouched.
+					expect(structuredClone(result.details)).toMatchObject({
 						results: [
 							{
 								agentInstanceRef: expect.stringContaining("grimoire://tasks/grimoire/child-test/agents/"),
