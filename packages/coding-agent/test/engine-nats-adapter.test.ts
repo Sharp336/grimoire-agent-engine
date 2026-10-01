@@ -1117,15 +1117,17 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						throw new Error("Reconciliation checkpoint has no revision");
 					expect(checkpoint.revision).toBeGreaterThan(0);
 				}
-				// Receipt/checkpoint traffic may interleave; each execution transition still occurs once in order.
-				let previous = -1;
-				for (const type of ["command.accepted", "attempt.started", "model.started", "model.settled", "attempt.completed"]) {
-					const matches = events.filter(event => event.type === type);
-					expect(matches).toHaveLength(1);
-					const index = events.indexOf(matches[0]);
-					expect(index).toBeGreaterThan(previous);
-					previous = index;
-				}
+				// Receipt/checkpoint traffic may interleave without adding another execution lifecycle.
+				expect(events
+					.filter(event => event.type !== "reconcile.snapshot" && event.type !== "attempt.command_receipt")
+					.map(event => event.type)).toEqual([
+					"attempt.agent_registered",
+					"command.accepted",
+					"attempt.started",
+					"model.started",
+					"model.settled",
+					"attempt.completed",
+				]);
 			}
 			expect(dispatchCount).toBe(2);
 			expect(await runtime.sessionHistoryPage("agent-a", "grimoire://tasks/grimoire/nats/agents/a")).toMatchObject({
