@@ -278,6 +278,122 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}, 60_000);
 	}
 
+	it("TERMs a conflicting hosted claim once and advances the same lane without changing the original outcome", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-claim-conflict-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		registerMockApi("claim-conflict");
+		const mock = createMockModel({ handler: { content: ["one effect per valid Start"] } });
+		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"), ...execution.optionsFor({ deviceId: "device-1" }),
+		});
+		const original = startCommand(runtime.engineGeneration, "original-agent", "claim-original", tempDir, execution);
+		const next = startCommand(runtime.engineGeneration, "next-agent", "claim-next", tempDir, execution);
+		execution.captureCommand(original);
+		execution.captureCommand(next);
+		const conflict = structuredClone(original);
+		conflict.payload.input = "different request under the retained command ID";
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime, deviceId: original.deviceId, engineId: original.engineId, servers: broker.url,
+			authorizeCommand: () => {}, authorizeMessage: () => {}, onError: error => errors.push(error),
+		});
+		const server = await startEngineControlQueryServer({
+			runtime, runtimeDir: tempDir, deviceId: original.deviceId, engineId: original.engineId,
+			provisionMailbox: id => adapter.provisionMailbox(id),
+		});
+		const native = new EngineControlQueryClient(tempDir);
+		const client = await connect({ servers: broker.url });
+		const queued: EngineCommandEnvelope[] = [];
+		const leased = new Map<string, EngineCommandEnvelope>();
+		const acceptedOriginal: unknown[] = [];
+		const originalEvents: Array<Record<string, unknown>> = [];
+		let nextCompleted = false;
+		const bridge = await HostedEngineBridge.connect({
+			deviceId: original.deviceId, engineId: original.engineId, engineGeneration: runtime.engineGeneration,
+			servers: broker.url, eventStore: runtime.store, pollIntervalMs: 10,
+			onError: error => errors.push(error),
+			rpc: { call: async (_tool, args) => {
+				if (args.action === "claim") {
+					if (args.job_id && !leased.has(String(args.job_id)))
+						return { schema: "grimoire.agent_engine.bridge.result.v1", status: "absent",
+							job_id: args.job_id, device_id: args.device_id, engine_id: args.engine_id,
+							installation_id: args.installation_id, owner_principal_id: original.principalId };
+					if (args.job_id === next.commandId && nextCompleted) return { status: "already_terminal" };
+					const command = args.job_id
+						? leased.get(String(args.job_id))
+						: args.lane === "ordinary" ? queued.shift() : undefined;
+					if (!command) return { status: "no_job" };
+					leased.set(command.commandId, command);
+					return { status: "claimed", job_id: command.commandId, lease_token: command.commandId,
+						operation_type: "agent_engine_command", work: { kind: "command", command } };
+				}
+				if (args.action === "localize_start")
+					return { status: "localized", command: leased.get(String(args.job_id)) };
+				if (args.action === "accepted") {
+					if (args.job_id === original.commandId) acceptedOriginal.push(args.receipt);
+					return { status: "accepted" };
+				}
+				if (args.action === "event") {
+					const event = args.event as Record<string, unknown>;
+					if (args.job_id === original.commandId) originalEvents.push(event);
+					if (args.job_id === next.commandId && nextCompleted) return { status: "already_terminal" };
+					if (args.job_id === next.commandId && event.type === "attempt.completed") {
+						nextCompleted = true;
+						return { status: "completed" };
+					}
+					return { status: nextCompleted && args.job_id === next.commandId ? "already_terminal" : "running" };
+				}
+				if (args.action === "heartbeat") return { status: "renewed" };
+				throw new Error("Unexpected bridge action");
+			} },
+		});
+		try {
+			await native.request("command", { command: original });
+			await waitFor(async () => (await runtime.store.getAttempt(original.attemptId!))?.state === "completed");
+			await runtime.drain();
+			await adapter.flushEvents();
+			await waitFor(async () => (await runtime.store.pendingEventsForSink("hosted-binding")).events.length === 0);
+			const originalReceipt = await runtime.store.runtimeCommand(original.commandId);
+			const originalAttempt = await runtime.store.getAttempt(original.attemptId!);
+			const terminated: Array<Record<string, unknown>> = [];
+			const subscription = client.subscribe(
+				`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.${ENGINE_COMMAND_STREAM}.engine_${adapter.engineRoute}`,
+				{ callback: (_error, message) => terminated.push(JSON.parse(new TextDecoder().decode(message.data))) },
+			);
+			await client.flush();
+			queued.push(conflict, next);
+			await waitFor(() => nextCompleted && terminated.length === 1);
+			const info = await (await jetstreamManager(client)).consumers.info(
+				ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}`,
+			);
+			expect(info.delivered.consumer_seq).toBe(2);
+			expect(info.num_redelivered).toBe(0);
+			expect(terminated[0].reason).toBe("command_id_conflict");
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toBeInstanceOf(EngineCommandConflictError);
+			expect(acceptedOriginal).toEqual([]);
+			expect(originalEvents).toEqual([]);
+			expect(await runtime.store.runtimeCommand(original.commandId)).toEqual(originalReceipt);
+			expect(await runtime.store.getAttempt(original.attemptId!)).toEqual(originalAttempt);
+			expect((await runtime.store.getAttempt(next.attemptId!))?.state).toBe("completed");
+			expect(mock.calls).toHaveLength(2);
+			subscription.unsubscribe();
+			// The conflicting job stays uncertain; the independent valid claim has nevertheless completed.
+		} finally {
+			await bridge.dispose();
+			await server.close();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			auth.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
 	it("acknowledges oversized retained receipts through NATS and native IPC without starting another Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);

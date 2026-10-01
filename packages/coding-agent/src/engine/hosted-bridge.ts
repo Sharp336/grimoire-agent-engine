@@ -25,6 +25,7 @@ import {
 import type { RocksEngineStore } from "./rocks-runtime-store";
 import { engineRouteToken } from "./route";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
+import { EngineCommandConflictError } from "./store";
 import { waitForEngineWake } from "./wake";
 
 interface BridgeClaim {
@@ -450,9 +451,16 @@ export class HostedEngineBridge {
 			claim.work.command = command;
 		}
 		const envelope = command as EngineCommandEnvelope;
-		const retained = await this.#options.eventStore?.settledCommandReceipt(
-			envelope.commandId, engineCommandIdentity(envelope).canonicalHash,
-		);
+		let retained: Record<string, unknown> | undefined;
+		if (this.#options.eventStore) {
+			const canonicalHash = engineCommandIdentity(envelope).canonicalHash;
+			try {
+				retained = await this.#options.eventStore.settledCommandReceipt(envelope.commandId, canonicalHash);
+			} catch (error) {
+				// The broker's existing conflict path reports and TERMs without rejecting the original job.
+				if (!(error instanceof EngineCommandConflictError)) throw error;
+			}
+		}
 		if (retained) {
 			await this.#acceptReceipt(claim, retained);
 			claim.published = true;
