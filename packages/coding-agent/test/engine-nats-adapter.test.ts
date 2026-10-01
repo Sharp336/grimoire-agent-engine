@@ -248,13 +248,48 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				await bridge.drain();
 				expect(claimed).toBe(false);
 				errors.length = 0;
-				const originalEvents = (await runtime.store.pendingEventsForSink("replay-audit")).events.map(event => event.eventId);
+				const originalEvents = (await runtime.store.pendingEventsForSink("replay-audit")).events;
 				const originalAttempt = await runtime.store.getAttempt(command.attemptId!);
 				managed = true;
 				await waitFor(() => receipts.length > 0);
 				expect(receipts[0].stage).toBe(phase === "terminal" ? "execution_terminal" : "applied");
-				expect((await runtime.store.pendingEventsForSink("replay-audit")).events.map(event => event.eventId))
-					.toEqual(originalEvents);
+				const replayEvents = (await runtime.store.pendingEventsForSink("replay-audit")).events;
+				expect(replayEvents.slice(0, originalEvents.length)).toEqual(originalEvents);
+				if (phase === "terminal") {
+					expect(replayEvents).toEqual(originalEvents);
+				} else {
+					// Original message_end/user-append checkpoint writes can finish while the model is gated.
+					// Replay must not regenerate any command, execution, model, tool or terminal event.
+					const checkpointed = await runtime.store.getAttempt(command.attemptId!);
+					if (!originalAttempt || !checkpointed?.transcript_native ||
+						!checkpointed.transcript_session_id || !checkpointed.transcript_path ||
+						!checkpointed.transcript_leaf_entry_id)
+						throw new Error("Running IPC fixture lost its original native checkpoint");
+					for (const event of replayEvents.slice(originalEvents.length)) {
+						if (event.kind !== "history_checkpoint" && event.kind !== "reconciled")
+							throw new Error(`Retained Start replay emitted ${event.kind}`);
+						expect(event).toMatchObject({
+							agentInstanceId: command.agentInstanceId,
+							causationCommandId: command.commandId,
+							attemptId: originalAttempt.attempt_id,
+							executionId: originalAttempt.execution_id,
+							bindingId: originalAttempt.binding_id,
+							engineGeneration: originalAttempt.engine_generation,
+							bindingGeneration: originalAttempt.binding_generation,
+							authorityGeneration: originalAttempt.authority_generation,
+							payload: { transcriptCheckpoint: {
+								sessionId: checkpointed.transcript_session_id,
+								sessionPath: checkpointed.transcript_path,
+								leafEntryId: checkpointed.transcript_leaf_entry_id,
+								native: checkpointed.transcript_native,
+							} },
+						});
+						const checkpoint = event.payload?.transcriptCheckpoint as { revision: number };
+						expect(Number.isSafeInteger(checkpoint.revision)).toBeTrue();
+						expect(checkpoint.revision).toBeGreaterThan(0);
+						expect(checkpoint.revision).toBeLessThanOrEqual(checkpointed.transcript_revision ?? 0);
+					}
+				}
 				if (phase === "running") {
 					expect(terminalResult).toBeUndefined();
 					expect((await runtime.store.getAttempt(command.attemptId!))?.state).toBe("running");
@@ -1359,11 +1394,11 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 				expect((await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).num_redelivered).toBe(0);
 				await adapter.flushEvents();
 				expect(eventsA.filter(event =>
-					event.causationCommandId === settlementCommand.commandId ||
+					(event.causationCommandId === settlementCommand.commandId && event.type !== "attempt.command_receipt") ||
 					(event.type === "command.rejected" && event.causationCommandId === commandA.commandId),
 				)).toEqual([]);
 				expect((await runtime.store.pendingEventsForSink("test-settlement-conflict-audit")).events.filter(event =>
-					event.causationCommandId === settlementCommand.commandId ||
+					(event.causationCommandId === settlementCommand.commandId && event.kind !== "command_receipt") ||
 					(event.kind === "rejected" && event.causationCommandId === commandA.commandId),
 				)).toEqual([]);
 				expect(await runtime.store.admitCommand(engineCommandIdentity(commandA), runtime.engineGeneration)).toEqual(originalAReceipt);
