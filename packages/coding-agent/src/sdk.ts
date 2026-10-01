@@ -19,6 +19,7 @@ import type {
 	Message,
 	Model,
 	ModelUsageHealth,
+	PhysicalRequest,
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
@@ -648,6 +649,8 @@ export interface CreateAgentSessionOptions {
 
 export interface ProviderRequestHook {
 	wrapFetch(model: Model, fetch: NonNullable<SimpleStreamOptions["fetch"]>): NonNullable<SimpleStreamOptions["fetch"]>;
+	/** Same admission/accounting boundary for a physical request that does not use `fetch`. */
+	wrapRequest(model: Model, request: PhysicalRequest): Promise<number | null>;
 }
 
 /** Result from createAgentSession */
@@ -3397,6 +3400,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								? { codexSseMaxAttempts: 1, providerRetryWait: deferNestedProviderRetry }
 								: {}),
 							fetch: providerRequestHook.wrapFetch(streamModel, streamOptions?.fetch ?? globalThis.fetch),
+							physicalRequest: request => providerRequestHook.wrapRequest(streamModel, request),
 						}),
 					)
 			: settingsAwareStreamFn;

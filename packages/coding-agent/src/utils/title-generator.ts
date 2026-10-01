@@ -4,7 +4,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -12,6 +12,7 @@ import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { helperCompletion } from "../session/helper-completion";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
@@ -266,7 +267,9 @@ export async function generateTitleOnline(
 
 		const response = await retryTransientCompletion(
 			() =>
-				completeSimple(
+				helperCompletion(
+					settings,
+					"providers.tinyModel",
 					model,
 					{
 						systemPrompt,

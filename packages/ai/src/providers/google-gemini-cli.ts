@@ -893,6 +893,8 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							cacheWrite: 0,
 							totalTokens: responseData.usageMetadata.totalTokenCount || 0,
 							...(thinkingTokens > 0 ? { reasoningTokens: thinkingTokens } : {}),
+							// Proto3 JSON omits zero counts: absent means a reported 0. No cache-write bucket exists.
+							reportedFields: ["input", "output", "cacheRead", "reasoning"],
 							cost: {
 								input: 0,
 								output: 0,

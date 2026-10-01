@@ -1967,6 +1967,7 @@ function mapOptionsForApi<TApi extends Api>(
 		onSseEvent: options?.onSseEvent,
 		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
+		physicalRequest: options?.physicalRequest,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,

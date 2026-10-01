@@ -1647,6 +1647,29 @@ export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLi
 	}
 }
 
+/**
+ * Union the token buckets an Anthropic usage snapshot actually carried; an explicit 0
+ * counts, null/absent never does. Thinking is billed inside output, so `reasoning` is
+ * never reported. The `message_start` output count is a placeholder, so it is excluded.
+ */
+function markAnthropicReportedFields(
+	usage: Usage,
+	source: {
+		input_tokens?: number | null;
+		output_tokens?: number | null;
+		cache_read_input_tokens?: number | null;
+		cache_creation_input_tokens?: number | null;
+	},
+	finalOutput: boolean,
+): void {
+	const reported = new Set(usage.reportedFields);
+	if (typeof source.input_tokens === "number") reported.add("input");
+	if (finalOutput && typeof source.output_tokens === "number") reported.add("output");
+	if (typeof source.cache_read_input_tokens === "number") reported.add("cacheRead");
+	if (typeof source.cache_creation_input_tokens === "number") reported.add("cacheWrite");
+	usage.reportedFields = [...reported];
+}
+
 function parseAnthropicWireUsage(value: unknown): AnthropicWireUsage | undefined {
 	if (!isRecord(value)) return undefined;
 	const cacheCreation = isRecord(value.cache_creation)
@@ -2077,6 +2100,7 @@ const streamAnthropicOnce = (
 				output.usage.cacheRead = wireUsage.cache_read_input_tokens ?? 0;
 				output.usage.cacheWrite = wireUsage.cache_creation_input_tokens ?? 0;
 				delete output.usage.unavailable;
+				markAnthropicReportedFields(output.usage, wireUsage, true);
 				applyAnthropicUsageExtras(output.usage, wireUsage);
 				output.usage.totalTokens =
 					output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
@@ -2315,6 +2339,7 @@ const streamAnthropicOnce = (
 							sawStartUsage = typeof startUsage?.input_tokens === "number";
 							if (startUsage) {
 								applyAnthropicUsageExtras(output.usage, startUsage);
+								markAnthropicReportedFields(output.usage, startUsage, false);
 								output.usage.input = startUsage.input_tokens || 0;
 								output.usage.output = startUsage.output_tokens || 0;
 								output.usage.cacheRead = startUsage.cache_read_input_tokens || 0;
@@ -2645,6 +2670,7 @@ const streamAnthropicOnce = (
 								if (sawStartUsage && typeof deltaUsage.output_tokens === "number")
 									delete output.usage.unavailable;
 								applyAnthropicUsageExtras(output.usage, deltaUsage);
+								markAnthropicReportedFields(output.usage, deltaUsage, true);
 								output.usage.totalTokens =
 									output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 								if (serverSideFallback) {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, SimpleStreamOptions, StoredAuthCredential } from "@oh-my-pi/pi-ai";
+import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, PhysicalRequest, SimpleStreamOptions, StoredAuthCredential } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -74,6 +74,12 @@ const BROKER_CREDENTIAL_PLACEHOLDER = "gri_pbr_pending";
 
 const LOCAL_OMP_REF = /^clientcred:\/\/localomp\.[a-f0-9]{64}$/;
 const CLIENT_CREDENTIAL_REF = /^(?:wincred|clientcred):\/[/]?[A-Za-z0-9][A-Za-z0-9._~-]{0,254}$/;
+/** Owner-local OMP OAuth providers whose execution Core admits, keyed to Core provider_kind. */
+const LOCAL_OAUTH_PROVIDER_KINDS: Record<string, ProviderAdmissionIdentity["providerKind"] | undefined> = {
+	"openai-codex": "openai_codex_subscription",
+	anthropic: "anthropic_subscription",
+	cursor: "cursor_subscription",
+};
 
 /**
  * Materializes the admitted frozen route units of a normalized dispatch into one native session.
@@ -104,32 +110,32 @@ export class EngineExecutionResolver {
 		const localRef = primary.execution.credential.local_ref;
 		const local = typeof localRef === "string" && LOCAL_OMP_REF.test(localRef);
 		if (local && !this.providerExecutionClient) throw new Error("Owner-local credential proof is unavailable");
+		// Every Engine provider request must be admitted and recorded; there is no unobserved fallback.
+		if (!this.providerAdmissionClient) throw new Error("Provider quota admission is unavailable");
 		const localDescriptor = local ? await this.providerExecutionClient!.describe(
 			{ ...attempt, ...routeIdentity(primary), modelId: primary.modelId }, signal) : undefined;
 		const localOAuth = localDescriptor?.localOAuth;
-		if (local && (!localOAuth || localDescriptor?.mode !== "owner_local" ||
-			primary.provider !== "openai-codex"))
+		const localProviderKind = LOCAL_OAUTH_PROVIDER_KINDS[primary.provider];
+		if (local && (!localOAuth || localDescriptor?.mode !== "owner_local" || !localProviderKind))
 			throw new Error("Owner-local OAuth credential binding differs");
 		const admission: ProviderAdmissionIdentity | undefined =
-			local && primary.execution.account_binding_id
+			local && primary.execution.account_binding_id && localProviderKind
 				? {
 						...attempt,
 						...routeIdentity(primary),
-						providerKind: "openai_codex_subscription",
+						providerKind: localProviderKind,
 						accountBindingId: primary.execution.account_binding_id,
 					}
 				: undefined;
-		if (admission) {
-			if (!this.providerAdmissionClient) throw new Error("Provider quota admission is unavailable");
-			admission.executionPin = await this.providerAdmissionClient.pin(admission, primary.modelId, signal);
-		}
+		if (admission) admission.executionPin = await this.providerAdmissionClient.pin(admission, primary.modelId, signal);
 		const sessionSettings = await Settings.loadReadOnly({
 			cwd,
 			overrides: {
 				disabledProviders: settings.disabledCapabilityProviders,
 				"lsp.shared": settings.lspShared,
 				"task.maxRecursionDepth": maxSpawnDepth,
-				...(admission ? { "providers.openaiWebsockets": "off" } : {}),
+				// The SSE transport sends every model request through the observed fetch boundary.
+				"providers.openaiWebsockets": "off",
 			},
 		});
 		const attemptDir = path.join(this.credentialRoot, attempt.attemptId);
@@ -251,26 +257,34 @@ export class EngineExecutionResolver {
 					selectors.push(undefined);
 				}
 			}
-			const quotaHook = this.providerAdmissionClient?.createHook(
-				admission, authStorage, primary.execution.base_url, apiKeyRoutes, localOAuth?.accountId,
+			const quotaHook = this.providerAdmissionClient.createHook(
+				admission, authStorage, primary.execution.base_url, apiKeyRoutes,
+				localOAuth ? { accountId: localOAuth.accountId, credentialId: localOAuth.credentialId } : undefined,
 				async (proposal, signal) => {
 					if (!billingPoolChanged) throw new Error("Billing transition is not bound to the admitted Attempt");
 					await billingPoolChanged(proposal, signal);
 				},
 			);
+			// Every physical request rechecks live Engine admission and current Core ACL/credential/pool fences.
+			// A changed descriptor refuses before anything is sent.
+			const currentMaterial = async (binding: ProviderExecutionBinding, signal?: AbortSignal) => {
+				const current = await gatedMaterial(binding, signal);
+				if (binding.transport &&
+					stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
+					throw new ProviderExecutionError("provider_execution_identity_changed",
+						"Provider execution transport changed; start a new Attempt");
+				if (current.api !== nativeProviderApi(binding.execution.api as Api) ||
+					current.baseUrl !== binding.execution.base_url)
+					throw new ProviderExecutionError("provider_execution_identity_changed",
+						"Provider execution descriptor changed; start a new Attempt");
+				binding.transport ??= executionTransport(current);
+				return current;
+			};
 			const refreshFetch = (runtimeModel: Model, fetch: Fetch): Fetch => async (input, init) => {
 				const binding = externalProviders.get(runtimeModel.provider);
 				if (!binding) return fetch(input, init);
-				// Every physical request rechecks live Engine admission and current Core ACL/credential/pool fences.
-				const current = await gatedMaterial(binding, init?.signal ?? undefined);
-				if (binding.transport &&
-					stableStringifyJson(executionTransport(current)) !== stableStringifyJson(binding.transport))
-					throw new Error("Provider execution transport changed; start a new Attempt");
-				if (current.api !== nativeProviderApi(binding.execution.api as Api) ||
-					current.baseUrl !== binding.execution.base_url)
-					throw new Error("Provider execution descriptor changed; start a new Attempt");
-				binding.transport ??= executionTransport(current);
-				if (binding.transport.mode !== "hosted_broker") return fetch(input, init);
+				const current = await currentMaterial(binding, init?.signal ?? undefined);
+				if (binding.transport?.mode !== "hosted_broker") return fetch(input, init);
 				const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
 				let replaced = false;
 				for (const [key, value] of headers) {
@@ -278,8 +292,20 @@ export class EngineExecutionResolver {
 					headers.set(key, value.replaceAll(BROKER_CREDENTIAL_PLACEHOLDER, current.credential));
 					replaced = true;
 				}
-				if (!replaced) throw new Error("Hosted broker request has no replaceable authorization header");
+				if (!replaced)
+					throw new ProviderExecutionError("provider_transport_unsupported",
+						"Hosted broker request has no replaceable authorization header");
 				return fetch(input, { ...init, headers });
+			};
+			const refreshRequest = async (runtimeModel: Model, request: PhysicalRequest): Promise<number | null> => {
+				const binding = externalProviders.get(runtimeModel.provider);
+				if (!binding) return await request.send();
+				await currentMaterial(binding, request.signal);
+				// A non-fetch transport cannot carry the broker's header substitution.
+				if (binding.transport?.mode === "hosted_broker")
+					throw new ProviderExecutionError("provider_transport_unsupported",
+						"Hosted broker routes cannot carry this provider transport");
+				return await request.send();
 			};
 			return {
 				options: {
@@ -289,10 +315,11 @@ export class EngineExecutionResolver {
 					model,
 					providerRequestHook: {
 						wrapFetch: (runtimeModel, fetch) => {
-							const guarded = refreshFetch(runtimeModel, fetch);
-							const wrapped = quotaHook ? quotaHook.wrapFetch(runtimeModel, guarded) : guarded;
+							const wrapped = quotaHook.wrapFetch(runtimeModel, refreshFetch(runtimeModel, fetch));
 							return (input, init) => withProviderBillingRequest(() => wrapped(input, init));
 						},
+						wrapRequest: (runtimeModel, request) => withProviderBillingRequest(() =>
+							quotaHook.wrapRequest(runtimeModel, { ...request, send: () => refreshRequest(runtimeModel, request) })),
 					},
 					thinkingLevel,
 					toolNames: settings.restrictToolNames ? settings.toolNames : undefined,

@@ -1,4 +1,4 @@
-import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -7,6 +7,7 @@ import type { Settings } from "../config/settings";
 import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
 import { isTinyCompletionLocalModelKey, ONLINE_COMPLETION_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
+import { helperCompletion } from "./helper-completion";
 
 const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
 
@@ -99,7 +100,9 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 
 	const response = await retryTransientCompletion(
 		() =>
-			completeSimple(
+			helperCompletion(
+				deps.settings,
+				"providers.unexpectedStopModel",
 				model,
 				{
 					systemPrompt: [CLASSIFIER_SYSTEM_PROMPT],

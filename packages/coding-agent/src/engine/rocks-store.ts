@@ -104,6 +104,9 @@ import {
 	type EnginePendingStartCancellation,
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
+	type ModelRequestFact,
+	type ModelRequestState,
+	type ModelUsageFact,
 } from "./store";
 
 type EventTarget = Pick<
@@ -177,8 +180,27 @@ function censusState(kind: StorageRuntimeKind, value: StoragePayload | null): st
 	}
 }
 
+/**
+ * Request tracking is explicit: `v1` effects carry every registered request (a request still
+ * `planned` when its effect closes was never proven sent or refused, and `[]` proves none was
+ * sent); an effect persisted before tracking existed is `absent`, its consumption unknown.
+ */
 function modelEffectPayload(effect: RocksEffect): Record<string, unknown> {
-	return { effectId: effect.effect_id, modelCallId: effect.tool_call_id };
+	const base = { effectId: effect.effect_id, modelCallId: effect.tool_call_id };
+	if (!Array.isArray(effect.requests)) return { ...base, requestTracking: "absent" };
+	return {
+		...base,
+		requestTracking: "v1",
+		requests: effect.requests.map(request =>
+			request.state === "planned" ? { ...request, state: "send_unknown" } : request),
+		usage: effect.usage ?? null,
+	};
+}
+
+/** Usage belongs to the last responded physical request; without one no usage is attributable. */
+function modelUsage(effect: RocksEffect, usage: Omit<ModelUsageFact, "ordinal"> | null | undefined): ModelUsageFact | null {
+	const responded = (effect.requests ?? []).findLast(request => request.state === "responded");
+	return usage && responded ? { ...usage, ordinal: responded.ordinal } : null;
 }
 
 function toolEffectPayload(effect: RocksEffect): Record<string, unknown> {
@@ -2454,6 +2476,8 @@ export class RocksEngineMutations {
 					created_at: Date.now(),
 					updated_at: Date.now(),
 					runtime_event_id: 0,
+					// Tracking exists before any network: `[]` proves no request was registered or sent.
+					...(model ? { requests: [] } : {}),
 				};
 				await tx.put("effect", input.effectId, row);
 				await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
@@ -2540,6 +2564,7 @@ export class RocksEngineMutations {
 		id: string,
 		outcome: RocksEffect["outcome"],
 		options: { error?: string; jobIds?: string[] } = {},
+		usage?: Omit<ModelUsageFact, "ordinal"> | null,
 	): Promise<EngineEvent> {
 		await this.assertFence(tx, target);
 		const row = await tx.get<RocksEffect>("effect", id);
@@ -2549,18 +2574,20 @@ export class RocksEngineMutations {
 			(row.state !== "started" && !(row.state === "planned" && (outcome === "denied" || outcome === "cancelled")))
 		)
 			throw new EngineEffectConflictError(id);
-		await tx.put("effect", id, {
+		const settled: RocksEffect = {
 			...row,
 			state: outcome === "unknown" ? "unknown" : "settled",
 			outcome,
 			...options,
+			...(row.effect_kind === "model" ? { usage: modelUsage(row, usage) } : {}),
 			updated_at: Date.now(),
-		});
+		};
+		await tx.put("effect", id, settled);
 		await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", -1);
 		return this.append(tx, target, {
 			kind: row.effect_kind === "model" ? "model_settled" : "tool_settled",
 			payload: {
-				...(row.effect_kind === "model" ? modelEffectPayload(row) : toolEffectPayload(row)),
+				...(row.effect_kind === "model" ? modelEffectPayload(settled) : toolEffectPayload(row)),
 				status: outcome,
 				...options,
 			},
@@ -2585,13 +2612,53 @@ export class RocksEngineMutations {
 		outcome: "completed" | "failed",
 		error?: string,
 		checkpoint?: SessionDurabilityCheckpoint,
+		usage?: Omit<ModelUsageFact, "ordinal"> | null,
 	): Promise<EngineEvent> {
 		if (outcome === "completed" && !checkpoint?.native) throw new EngineEffectConflictError(effect.effectId);
 		return this.mutation(
 			target.agentInstanceId,
-			tx => this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}),
+			tx => this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}, usage),
 			this.checkpointDependencies(checkpoint),
 		);
+	}
+	/** Durable before the request is sent: a failed write means nothing may be sent. */
+	async registerModelRequest(
+		target: EventTarget,
+		effectId: string,
+		request: Pick<ModelRequestFact, "ordinal" | "executionDigest" | "routeRef" | "accountRef">,
+	): Promise<void> {
+		await this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const row = await tx.get<RocksEffect>("effect", effectId);
+			const requests = row?.requests;
+			if (!row || row.effect_kind !== "model" || row.state !== "started" || !this.sameFence(row, target) ||
+				!Array.isArray(requests) || request.ordinal !== requests.length + 1)
+				throw new EngineEffectConflictError(effectId);
+			await tx.put("effect", effectId, {
+				...row,
+				requests: [...requests, { ...request, state: "planned", statusCode: null }],
+				updated_at: Date.now(),
+			});
+		});
+	}
+	async settleModelRequest(
+		target: EventTarget,
+		effectId: string,
+		ordinal: number,
+		state: Exclude<ModelRequestState, "planned">,
+		statusCode: number | null,
+	): Promise<void> {
+		await this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const row = await tx.get<RocksEffect>("effect", effectId);
+			const request = row?.requests?.[ordinal - 1];
+			if (!row || row.effect_kind !== "model" || row.state !== "started" || !this.sameFence(row, target) ||
+				request?.ordinal !== ordinal || request.state !== "planned")
+				throw new EngineEffectConflictError(effectId);
+			const requests = [...row.requests!];
+			requests[ordinal - 1] = { ...request, state, statusCode };
+			await tx.put("effect", effectId, { ...row, requests, updated_at: Date.now() });
+		});
 	}
 	/**
 	 * One decisive CAS on the requester's own approval record. The decision (or cancellation) is saved

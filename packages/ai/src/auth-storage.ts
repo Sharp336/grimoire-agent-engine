@@ -3943,6 +3943,35 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Fresh usage of exactly one stored credential row. Unlike the aggregate
+	 * readers, this never falls back to env/runtime keys, another stored row, a
+	 * store-level aggregate hook, or a last-good cached report: no exact row,
+	 * usage provider or current answer means `null`.
+	 */
+	async fetchCredentialUsageReport(
+		provider: Provider,
+		credentialId: number,
+		options: { signal?: AbortSignal; baseUrl?: string } = {},
+	): Promise<UsageReport | null> {
+		const providerImpl = this.#resolveUsageProvider(provider);
+		const entry = this.#getStoredCredentials(provider).find(candidate => candidate.id === credentialId);
+		if (!providerImpl || !entry) return null;
+		let request: UsageRequestDescriptor;
+		if (entry.credential.type === "api_key") {
+			const apiKey = await this.#configValueResolver(entry.credential.key);
+			if (!apiKey) return null;
+			request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, options.baseUrl);
+		} else {
+			request = this.#buildUsageRequestForOauth(provider, entry.credential, options.baseUrl);
+		}
+		if (providerImpl.supports && !providerImpl.supports(request)) return null;
+		return await raceUsageWithSignal(
+			this.#fetchUsageCached(request, { timeoutMs: this.#usageRequestTimeoutMs, forceRefresh: true }),
+			options.signal,
+		);
+	}
+
+	/**
 	 * The {@link UsageProvider} registered for `provider`, or undefined when the
 	 * provider has no usage endpoint at all. Lets callers tell "a credential we
 	 * could have fetched usage for but didn't" apart from "a provider with no

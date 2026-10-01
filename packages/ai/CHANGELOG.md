@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Usage.reportedFields` lists the token buckets a provider response actually reported (explicit zeros included) for OpenAI Completions/Responses (including Codex and Azure), Anthropic, Google (proto3 omitted counts are zero) and Bedrock.
+- `SimpleStreamOptions.physicalRequest` wraps a provider request that does not use `fetch`; the Cursor HTTP/2 transport now opens its proxy, session and stream inside it. Without the option behaviour is unchanged.
+- `AuthStorage.fetchCredentialUsageReport` reads fresh usage for exactly one stored credential row, with no env/runtime fallback and no last-good report.
+- Cursor login and token refresh return the access token user id as `accountId`.
+
 ### Fixed
 
 - Codex Responses marks missing usage as unavailable on initial responses and internal retries; a provider-reported zero remains measured zero.

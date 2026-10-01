@@ -108,7 +108,7 @@ describe("ProviderExecutionClient", () => {
 						await expect(fetch(`${selected.baseUrl}/chat/completions`))
 							.rejects.toMatchObject({ code: "billing_pool_changed", retryable: false });
 					}
-				});
+				}, undefined, { register: async () => {}, settle: async () => {} });
 				expect(transitions).toEqual(scenario === "independent_requests" ? ["pool-1", "pool-2"] : ["pool-1"]);
 				expect(providerCalls).toBe(scenario === "independent_requests" ? 2 : 0);
 				expect(materialCalls).toBe(2);

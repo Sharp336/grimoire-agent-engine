@@ -769,6 +769,10 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				cacheWrite: 0,
 				totalTokens: chunk.usageMetadata.totalTokenCount || 0,
 				...(thinkingTokens > 0 ? { reasoningTokens: thinkingTokens } : {}),
+				// Proto3 JSON omits zero-valued counts, so an absent count in a present
+				// usageMetadata is a reported 0 (https://protobuf.dev/programming-guides/proto3/#json).
+				// Gemini has no cache-write token bucket; it stays unreported.
+				reportedFields: ["input", "output", "cacheRead", "reasoning"],
 				cost: {
 					input: 0,
 					output: 0,

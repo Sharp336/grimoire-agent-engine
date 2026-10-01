@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Model, PhysicalRequest, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractRetryHint, isRetryableStatus } from "@oh-my-pi/pi-utils";
 import type { ProviderRequestHook } from "../sdk";
@@ -136,6 +136,42 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 				}
 				return await admittedFetch(input, init);
 			};
+		},
+		async wrapRequest(model: Model, request: PhysicalRequest): Promise<number | null> {
+			const state = providerRetryBudget.getStore();
+			const budgeted: PhysicalRequest = {
+				...request,
+				send: async () => {
+					if (!state) return await request.send();
+					if (request.signal?.aborted) throw abortError();
+					if (state.attempts >= state.maxAttempts) {
+						throw new EngineProviderRetryError(
+							PROVIDER_RETRY_EXHAUSTED_CODE,
+							`exhausted after ${state.maxAttempts} physical requests`,
+						);
+					}
+					state.attempts++;
+					try {
+						return await request.send();
+					} catch (error) {
+						if (request.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+						state.failure =
+							error && typeof error === "object" && Reflect.get(error, "retryable") === false
+								? error
+								: deferredError(error instanceof Error ? error.message : String(error), { cause: error });
+						throw state.failure;
+					}
+				},
+			};
+			if (request.signal?.aborted) throw abortError();
+			// An exhausted budget refuses before admission, so no physical request fact is opened.
+			if (state && state.attempts >= state.maxAttempts) {
+				throw new EngineProviderRetryError(
+					PROVIDER_RETRY_EXHAUSTED_CODE,
+					`exhausted after ${state.maxAttempts} physical requests`,
+				);
+			}
+			return inner ? await inner.wrapRequest(model, budgeted) : await budgeted.send();
 		},
 	};
 }

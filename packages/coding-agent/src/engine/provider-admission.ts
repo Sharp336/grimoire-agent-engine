@@ -11,6 +11,7 @@ import {
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import { ProviderExecutionError, parseBillingPoolProposal, type BillingPoolProposal, type ProviderExecutionIdentity } from "./provider-execution";
+import type { ModelRequestState } from "./store";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const ADMISSION_TIMEOUT_MS = 10_000;
@@ -70,7 +71,7 @@ class ProviderSseOutcome {
 
 export interface ProviderAdmissionIdentity extends Omit<ProviderExecutionIdentity, "modelId"> {
 	executionPin?: string;
-	providerKind: "openai_codex_subscription";
+	providerKind: "openai_codex_subscription" | "anthropic_subscription" | "cursor_subscription";
 	accountBindingId: string;
 }
 
@@ -87,12 +88,28 @@ interface ProviderAdmissionDecision {
 	billing?: unknown;
 }
 
+/** Durable per-effect physical request facts; supplied by the Engine for every model effect. */
+export interface ProviderRequestRecord {
+	register(
+		effectId: string,
+		ordinal: number,
+		frozen: { executionDigest: string; routeRef: string; accountRef: string },
+	): Promise<void>;
+	settle(
+		effectId: string,
+		ordinal: number,
+		state: Exclude<ModelRequestState, "planned">,
+		statusCode: number | null,
+	): Promise<void>;
+}
+
 interface ProviderObservationContext {
 	effectId: string;
 	modelCallId: string;
 	physicalRequestOrdinal: number;
 	readonly pending: Set<Promise<unknown>>;
 	readonly audit?: LatencyAudit;
+	readonly record?: ProviderRequestRecord;
 	pendingBillingRequest?: { reconciled: boolean };
 }
 
@@ -129,9 +146,10 @@ export async function withProviderObservationContext<T>(
 	identity: { effectId: string; modelCallId: string },
 	callback: () => Promise<T>,
 	audit?: LatencyAudit,
+	record?: ProviderRequestRecord,
 ): Promise<T> {
 	return await providerObservationContext.run(
-		{ ...identity, physicalRequestOrdinal: 0, pending: new Set(), audit },
+		{ ...identity, physicalRequestOrdinal: 0, pending: new Set(), audit, record },
 		async () => {
 			let completed = false;
 			try {
@@ -204,44 +222,77 @@ export class ProviderAdmissionClient {
 		authStorage: AuthStorage,
 		baseUrl: string,
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[] = [],
-		localAccountId?: string,
+		localCredential?: { accountId: string; credentialId: number },
 		onBillingPoolChanged?: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>,
 	): ProviderRequestHook {
+		const admitted = <T>(model: Model, url: string, signal: AbortSignal | undefined,
+			send: (selected: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) => Promise<T>) =>
+			this.#admitted(identity, authStorage, baseUrl, apiKeyRoutes, localCredential, onBillingPoolChanged,
+				model, url, signal, send);
 		return {
-			wrapFetch: (model, fetch) =>
-				this.#wrapFetch(identity, authStorage, baseUrl, apiKeyRoutes, localAccountId, onBillingPoolChanged, model, fetch),
+			wrapFetch: (model, fetch) => (input, init) =>
+				admitted(model, requestUrl(input), init?.signal ?? undefined, selected =>
+					this.#physical(selected, model, init?.signal ?? undefined, async (ordinal, startedAt, context, auditRequest) => {
+						const response = auditRequest
+							? await latencyPhysicalRequest.run(auditRequest, () => fetch(input, init))
+							: await fetch(input, init);
+						const observed = this.#observeResponse(selected, model, response, init?.signal, context,
+							ordinal, startedAt, auditRequest);
+						attachLatencyResponse(observed, auditRequest);
+						return { status: response.status, value: observed };
+					})),
+			wrapRequest: (model, request) =>
+				admitted(model, request.url, request.signal, selected =>
+					this.#physical(selected, model, request.signal, async (ordinal, startedAt, context) => {
+						const status = await request.send();
+						this.#queueObservation(selected, model, context, ordinal, startedAt, {
+							outcome: status === null || (status >= 200 && status < 300) ? "success"
+								: status === 429 ? "rate_limited"
+									: status === 408 || status === 504 ? "timeout" : "provider_error",
+							...(status === null ? {} : { statusCode: status }),
+						});
+						return { status, value: status };
+					})),
 		};
 	}
 
-	#wrapFetch(
+	/**
+	 * One admission for both physical request shapes: exact route selection,
+	 * request-boundary check, quota before-phase, one billing re-ask, and the
+	 * after-phase. `send` performs the durable physical request.
+	 */
+	#admitted<T>(
 		identity: ProviderAdmissionIdentity | undefined,
 		authStorage: AuthStorage,
 		baseUrl: string,
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[],
-		localAccountId: string | undefined,
+		localCredential: { accountId: string; credentialId: number } | undefined,
 		onBillingPoolChanged: ((proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>) | undefined,
 		model: Model,
-		fetch: Fetch,
-	): Fetch {
-		return (input, init) => withProviderBillingRequest(async () => {
+		url: string,
+		signal: AbortSignal | undefined,
+		send: (selected: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) => Promise<T>,
+	): Promise<T> {
+		return withProviderBillingRequest(async () => {
 			const apiKeyRoute = apiKeyRoutes.find(route => matchesApiKeyRoute(model, route));
 			const selected = apiKeyRoute ?? (identity && model.provider === identity.providerId ? identity : undefined);
 			if (!selected) throw new ProviderAdmissionError(
 				"provider_identity_mismatch", "The provider request does not match the admitted account");
-			const signal = init?.signal ?? undefined;
+			// Only model requests under the admitted descriptor base are physical model facts;
+			// any other egress through the hook (token exchanges, ambient metadata) is refused.
+			if (!isUnderAdmittedBase(url, selected === identity ? baseUrl : (selected as ProviderApiKeyRouteIdentity).baseUrl))
+				throw new ProviderAdmissionError("provider_egress_unadmitted",
+					"The provider request leaves the admitted provider endpoint");
 			let report: UsageReport | undefined;
-			if (selected === identity && localAccountId) {
+			if (selected === identity && localCredential) {
 				const admissionSignal = signal
 					? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
 					: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
 				markProviderLatency("usage_refresh_start");
 				try {
-					await raceWithSignal(authStorage.invalidateUsageCache(identity.providerId, admissionSignal), admissionSignal);
-					const reports = await raceWithSignal(authStorage.fetchUsageReports({
-						baseUrlResolver: provider => (provider === identity.providerId ? baseUrl : undefined),
-						signal: admissionSignal,
-					}), admissionSignal);
-					report = selectExactUsageReport(reports, identity, localAccountId);
+					report = await raceWithSignal(authStorage.fetchCredentialUsageReport(identity.providerId,
+						localCredential.credentialId, { baseUrl, signal: admissionSignal }), admissionSignal) ?? undefined;
+					if (report?.metadata?.accountId !== localCredential.accountId) report = undefined;
 				} catch (error) {
 					if (signal?.aborted) throw error;
 					// Usage endpoint availability is telemetry, not a denial of an admitted effect.
@@ -275,12 +326,12 @@ export class ProviderAdmissionClient {
 			}
 			try {
 				try {
-					return await this.#observedFetch(selected, model, fetch, input, init);
+					return await send(selected);
 				} catch (error) {
 					if (!(error instanceof ProviderExecutionError) || error.code !== "billing_pool_changed")
 						throw error;
 					await reask(error.billing);
-					return await this.#observedFetch(selected, model, fetch, input, init);
+					return await send(selected);
 				}
 			} finally {
 				if (selected === identity) {
@@ -291,22 +342,40 @@ export class ProviderAdmissionClient {
 		});
 	}
 
-	async #observedFetch(
+	/**
+	 * One physical request: its ordinal and frozen identity are durable before
+	 * `send`; a failed write sends nothing. The settled state records whether the
+	 * request was refused locally, answered, or has an unknown fate.
+	 */
+	async #physical<T>(
 		identity: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity,
 		model: Model,
-		fetch: Fetch,
-		input: string | URL | Request,
-		init: RequestInit | undefined,
-	): Promise<Response> {
+		signal: AbortSignal | null | undefined,
+		send: (
+			ordinal: number,
+			startedAt: number,
+			context: ProviderObservationContext,
+			auditRequest: LatencyRequest | undefined,
+		) => Promise<{ status: number | null; value: T }>,
+	): Promise<T> {
 		const context = providerObservationContext.getStore();
-		if (!context) return await fetch(input, init);
-		const ordinal = ++context.physicalRequestOrdinal;
+		if (!context?.record)
+			throw new ProviderAdmissionError("provider_effect_unadmitted",
+				"A provider request requires an admitted model effect");
+		const effectId = context.effectId;
+		const ordinal = context.physicalRequestOrdinal + 1;
+		await context.record.register(effectId, ordinal, {
+			executionDigest: identity.executionDigest,
+			routeRef: identity.routeRef,
+			accountRef: identity.providerAccountRef,
+		});
+		context.physicalRequestOrdinal = ordinal;
 		const auditRequest: LatencyRequest | undefined = context.audit
 			? {
 					audit: context.audit,
 					first: new Set(),
 					fields: {
-						effectId: context.effectId,
+						effectId,
 						modelCallId: context.modelCallId,
 						physicalRequestOrdinal: ordinal,
 						api: model.api,
@@ -317,29 +386,17 @@ export class ProviderAdmissionClient {
 				}
 			: undefined;
 		const startedAt = performance.now();
+		let result: { status: number | null; value: T };
 		try {
-			const response = auditRequest
-				? await latencyPhysicalRequest.run(auditRequest, () => fetch(input, init))
-				: await fetch(input, init);
-			const observed = this.#observeResponse(
-				identity,
-				model,
-				response,
-				init?.signal,
-				context,
-				ordinal,
-				startedAt,
-				auditRequest,
-			);
-			attachLatencyResponse(observed, auditRequest);
-			return observed;
+			result = await send(ordinal, startedAt, context, auditRequest);
 		} catch (error) {
 			if (error instanceof ProviderExecutionError || error instanceof ProviderAdmissionError) {
-				if (context.physicalRequestOrdinal === ordinal) context.physicalRequestOrdinal--;
+				await context.record.settle(effectId, ordinal, "not_sent", null);
 				throw error;
 			}
-			if (init?.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			const status = httpStatusFromError(error);
+			await context.record.settle(effectId, ordinal, status ? "responded" : "send_unknown", status ?? null);
+			if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			this.#queueObservation(identity, model, context, ordinal, startedAt, {
 				outcome:
 					status === 429
@@ -353,6 +410,8 @@ export class ProviderAdmissionClient {
 			});
 			throw error;
 		}
+		await context.record.settle(effectId, ordinal, result.status === null ? "send_unknown" : "responded", result.status);
+		return result.value;
 	}
 
 	#observeResponse(
@@ -518,6 +577,23 @@ function matchesApiKeyRoute(model: Model, route: ProviderApiKeyRouteIdentity): b
 	return model.provider === route.runtimeProviderId && model.id === route.modelId && model.baseUrl === route.baseUrl;
 }
 
+function requestUrl(input: string | URL | Request): string {
+	return input instanceof Request ? input.url : String(input);
+}
+
+/** Same origin and the base path itself or a sub-path, after WHATWG dot-segment normalization. */
+export function isUnderAdmittedBase(url: string, baseUrl: string): boolean {
+	try {
+		const request = new URL(url);
+		const base = new URL(baseUrl);
+		if (request.origin !== base.origin) return false;
+		const basePath = base.pathname.replace(/\/+$/, "");
+		return basePath === "" || request.pathname === basePath || request.pathname.startsWith(`${basePath}/`);
+	} catch {
+		return false;
+	}
+}
+
 function providerObservationIdentity(identity: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) {
 	return {
 		expectedPrincipalId: identity.expectedPrincipalId,
@@ -556,18 +632,6 @@ async function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: nu
 	} finally {
 		if (timeout) clearTimeout(timeout);
 	}
-}
-
-function selectExactUsageReport(
-	reports: UsageReport[] | null,
-	identity: ProviderAdmissionIdentity,
-	localAccountId: string,
-): UsageReport | undefined {
-	return reports?.find(report => {
-		if (report.provider !== identity.providerId) return false;
-		const metadata = report.metadata;
-		return typeof metadata?.accountId === "string" && metadata.accountId === localAccountId;
-	});
 }
 
 function withoutRaw(report: UsageReport): Omit<UsageReport, "raw"> {

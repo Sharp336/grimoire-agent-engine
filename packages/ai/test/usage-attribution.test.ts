@@ -89,6 +89,28 @@ describe("openai-completions parseChunkUsage", () => {
 		expect(usage.output).toBe(25);
 	});
 
+	it("reports only buckets present on the wire, keeping explicit zeros", () => {
+		// Unreported cache/reasoning counts stay zero placeholders and are not listed.
+		expect(parseChunkUsage({ prompt_tokens: 50, completion_tokens: 25 }, OPENAI_MODEL, undefined).reportedFields)
+			.toEqual(["input", "output"]);
+		expect(
+			parseChunkUsage(
+				{
+					prompt_tokens: 50,
+					completion_tokens: 0,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+				},
+				OPENAI_MODEL,
+				undefined,
+			).reportedFields,
+		).toEqual(["input", "cacheRead", "output", "reasoning"]);
+		// A partial response reports what it carried and stays marked unavailable.
+		const partial = parseChunkUsage({ prompt_tokens: 50 }, OPENAI_MODEL, undefined);
+		expect(partial.unavailable).toBe(true);
+		expect(partial.reportedFields).toEqual(["input"]);
+	});
+
 	it("attributes OpenRouter cache_write_tokens to cacheWrite, not input", () => {
 		// OpenRouter (https://openrouter.ai/docs/guides/best-practices/prompt-caching)
 		// reports cache writes via prompt_tokens_details.cache_write_tokens and
@@ -371,6 +393,8 @@ describe("openai-responses usage attribution", () => {
 		expect(output.usage.output).toBe(29);
 		expect(output.usage.orchestration).toEqual({ input: 5_629 });
 		expect(output.usage.totalTokens).toBe(185_882);
+		// Cached tokens were on the wire; reasoning and cache-write counts were not.
+		expect(output.usage.reportedFields).toEqual(["input", "output", "cacheRead"]);
 	});
 });
 

@@ -14,13 +14,14 @@
  * Throws on any failure (no model, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
-import { type AssistantMessage, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { helperCompletion } from "../session/helper-completion";
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
 import { clampAutoThinkingEffort } from "../thinking";
@@ -127,7 +128,9 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 
 	const response = await retryTransientCompletion(
 		() =>
-			completeSimple(
+			helperCompletion(
+				deps.settings,
+				"providers.autoThinkingModel",
 				model,
 				{
 					systemPrompt: [difficultySystemPromptFor(ceiling)],

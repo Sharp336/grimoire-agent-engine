@@ -16,9 +16,11 @@ import {
 import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
+	type ProviderRequestRecord,
 	withProviderObservationContext,
 	type ProviderAdmissionIdentity,
 } from "../src/engine/provider-admission";
+import { ProviderExecutionError } from "../src/engine/provider-execution";
 import type { AuthStorage } from "../src/session/auth-storage";
 import { createProviderRetryBudgetHook, withProviderRetryBudget } from "../src/session/provider-retry-budget";
 
@@ -131,6 +133,7 @@ describe("ProviderAdmissionClient", () => {
 					return output;
 				},
 				probe,
+				recorder().record,
 			);
 		};
 		try {
@@ -215,14 +218,7 @@ describe("ProviderAdmissionClient", () => {
 		const audit = new LatencyAudit({ effectId: "budget-effect", modelCallId: "model-1" });
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/admission", "token", async () =>
 			Response.json({ allowed: true }),
-		).createHook(
-			identity(),
-			{
-				invalidateUsageCache: async () => {},
-				fetchUsageReports: async () => [usageReport()],
-			} as unknown as AuthStorage,
-			"",
-		);
+		).createHook(identity(), { invalidateUsageCache: async () => {} } as unknown as AuthStorage, "https://provider.invalid");
 		let rawCalls = 0;
 		await withProviderRetryBudget(1, () =>
 			withProviderObservationContext(
@@ -242,6 +238,7 @@ describe("ProviderAdmissionClient", () => {
 					await expect(wrapped("https://provider.invalid")).rejects.toThrow("retry");
 				},
 				audit,
+				recorder().record,
 			),
 		);
 		expect(rawCalls).toBe(1);
@@ -278,27 +275,37 @@ describe("ProviderAdmissionClient", () => {
 			invalidateUsageCache: async () => {
 				invalidations += 1;
 			},
-			fetchUsageReports: async () => {
+			fetchCredentialUsageReport: async (provider: string, credentialId: number) => {
+				expect({ provider, credentialId }).toEqual({ provider: "openai-codex", credentialId: 7 });
 				usageReads += 1;
-				return [usageReport()];
+				return usageReport();
 			},
 		} as unknown as AuthStorage;
 		const wrapped = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", admissionFetch)
-			.createHook({ ...identity(), executionPin: "a".repeat(64) }, authStorage, "https://chatgpt.com/backend-api")
+			.createHook({ ...identity(), executionPin: "a".repeat(64) }, authStorage, "https://chatgpt.com/backend-api",
+				[], { accountId: "acct-1", credentialId: 7 })
 			.wrapFetch(model(), async () => {
 				providerCalls += 1;
 				return new Response("ok");
 			});
-		await wrapped("https://chatgpt.com/backend-api/codex/responses");
-		await wrapped("https://chatgpt.com/backend-api/codex/responses");
+		const { requests, record } = recorder();
+		await withProviderObservationContext({ effectId: "model_effect_admit", modelCallId: "model-1" }, async () => {
+			await wrapped("https://chatgpt.com/backend-api/codex/responses");
+			await wrapped("https://chatgpt.com/backend-api/codex/responses");
+		}, undefined, record);
 		await Promise.resolve();
 		expect({ admissionBefore, usageReads, providerCalls }).toEqual({
 			admissionBefore: 2,
 			usageReads: 2,
 			providerCalls: 2,
 		});
-		expect(invalidations).toBe(4);
+		// The exact credential reader is already fresh; only the after-phase invalidates.
+		expect(invalidations).toBe(2);
 		expect(admissionAfter).toBe(2);
+		expect(requests.map(({ ordinal, state, statusCode }) => ({ ordinal, state, statusCode }))).toEqual([
+			{ ordinal: 1, state: "responded", statusCode: 200 },
+			{ ordinal: 2, state: "responded", statusCode: 200 },
+		]);
 	});
 
 	it("rejects missing or denied launch pins instead of admitting a mutable subscription profile", async () => {
@@ -324,10 +331,7 @@ describe("ProviderAdmissionClient", () => {
 
 	it("fails closed with a permanent typed error before provider dispatch", async () => {
 		const admissionFetch = async () => Response.json({ allowed: false, status: "codex_weekly_ceiling_reached" });
-		const authStorage = {
-			invalidateUsageCache: async () => {},
-			fetchUsageReports: async () => [usageReport()],
-		} as unknown as AuthStorage;
+		const authStorage = { invalidateUsageCache: async () => {} } as unknown as AuthStorage;
 		let providerCalls = 0;
 		const wrapped = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", admissionFetch)
 			.createHook(identity(), authStorage, "https://chatgpt.com/backend-api")
@@ -344,10 +348,7 @@ describe("ProviderAdmissionClient", () => {
 	it("requires current admission for an exact pinned API-key fallback and refuses foreign routes", async () => {
 		let admissionCalls = 0;
 		let providerCalls = 0;
-		const authStorage = {
-			invalidateUsageCache: async () => {},
-			fetchUsageReports: async () => [usageReport()],
-		} as unknown as AuthStorage;
+		const authStorage = { invalidateUsageCache: async () => {} } as unknown as AuthStorage;
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async () => {
 			admissionCalls += 1;
 			return Response.json({ allowed: true });
@@ -371,7 +372,8 @@ describe("ProviderAdmissionClient", () => {
 			providerCalls += 1;
 			return new Response("ok");
 		});
-		await fallbackFetch("https://cheapai.invalid/v1/responses");
+		await withProviderObservationContext({ effectId: "model_effect_fallback", modelCallId: "model-1" },
+			() => fallbackFetch("https://cheapai.invalid/v1/responses"), undefined, recorder().record);
 		expect({ admissionCalls, providerCalls }).toEqual({ admissionCalls: 1, providerCalls: 1 });
 
 		for (const foreignSubscription of [
@@ -390,13 +392,13 @@ describe("ProviderAdmissionClient", () => {
 		const controller = new AbortController();
 		const authStorage = {
 			invalidateUsageCache: async () => {},
-			fetchUsageReports: () => new Promise<UsageReport[] | null>(() => {}),
+			fetchCredentialUsageReport: () => new Promise<UsageReport | null>(() => {}),
 		} as unknown as AuthStorage;
 		let providerCalls = 0;
 		const wrapped = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async () =>
 			Response.json({ allowed: true }),
 		)
-			.createHook(identity(), authStorage, "https://chatgpt.com/backend-api")
+			.createHook(identity(), authStorage, "https://chatgpt.com/backend-api", [], { accountId: "acct-1", credentialId: 7 })
 			.wrapFetch(model(), async () => {
 				providerCalls += 1;
 				return new Response("unexpected");
@@ -447,6 +449,8 @@ describe("ProviderAdmissionClient", () => {
 				const response = await wrapped("https://cheapai.invalid/v1/chat/completions");
 				return { url: response.url, answer: await response.text() };
 			},
+			undefined,
+			recorder().record,
 		);
 		expect(result.url).toBe("https://cheapai.invalid/v1/chat/completions");
 		expect(result.answer).toBe("completed answer");
@@ -498,6 +502,8 @@ describe("ProviderAdmissionClient", () => {
 			await withProviderObservationContext(
 				{ effectId: "model_effect_rejected", modelCallId: "model-rejected" },
 				async () => await (await wrapped("https://cheapai.invalid/v1/chat/completions")).text(),
+				undefined,
+				recorder().record,
 			);
 			expect(requests).toHaveLength(2);
 			expect(requests[0]).toEqual(requests[1]);
@@ -544,7 +550,7 @@ describe("ProviderAdmissionClient", () => {
 		const startedAt = performance.now();
 		await expect(
 			withProviderObservationContext({ effectId: "model_effect_2", modelCallId: "model-2" }, async () =>
-				wrapped("https://cheapai.invalid/v1/chat/completions"),
+				wrapped("https://cheapai.invalid/v1/chat/completions"), undefined, recorder().record,
 			),
 		).rejects.toThrow("HTTP 429");
 		expect(performance.now() - startedAt).toBeLessThan(1_000);
@@ -606,6 +612,8 @@ describe("ProviderAdmissionClient", () => {
 					apiKey: "dummy-test-key",
 					fetch: providerFetch as FetchImpl,
 				}).result(),
+			undefined,
+			recorder().record,
 		);
 		expect(result.stopReason).toBe("error");
 		expect(observations.length).toBeGreaterThan(0);
@@ -655,8 +663,120 @@ describe("ProviderAdmissionClient", () => {
 				controller.abort();
 				await reader.cancel();
 			},
+			undefined,
+			recorder().record,
 		);
 		expect(observations).toEqual([]);
+	});
+
+	it("makes each physical request durable before sending and settles its fate", async () => {
+		const route = {
+			...identity(),
+			providerAccountRef: "gctx:4444444444444444",
+			routeRef: "gctx:5555555555555555",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async () =>
+			Response.json({ allowed: true }),
+		).createHook(undefined, {} as AuthStorage, "", [route]);
+		const routeModel = { id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model;
+		const sent: string[] = [];
+		const outcomes: Array<() => Promise<Response>> = [
+			async () => new Response("first", { status: 200 }),
+			async () => {
+				throw new ProviderExecutionError("provider_execution_denied", "material refused before sending");
+			},
+			async () => {
+				throw new Error("HTTP 503 upstream unavailable");
+			},
+			async () => {
+				throw new Error("socket reset");
+			},
+		];
+		const wrapped = hook.wrapFetch(routeModel, async input => {
+			sent.push(String(input));
+			return await outcomes[sent.length - 1]!();
+		});
+		const { requests, record } = recorder();
+		await withProviderObservationContext({ effectId: "model_effect_facts", modelCallId: "model-facts" }, async () => {
+			await (await wrapped("https://cheapai.invalid/v1/chat/completions")).text();
+			await expect(wrapped("https://cheapai.invalid/v1/chat/completions")).rejects.toBeInstanceOf(ProviderExecutionError);
+			await expect(wrapped("https://cheapai.invalid/v1/chat/completions")).rejects.toThrow("HTTP 503");
+			await expect(wrapped("https://cheapai.invalid/v1/chat/completions")).rejects.toThrow("socket reset");
+			// Off-boundary egress (dot segments are resolved) is refused before any record or send.
+			await expect(wrapped("https://cheapai.invalid/v1/../token")).rejects.toMatchObject({
+				code: "provider_egress_unadmitted",
+			});
+			await expect(wrapped("https://oauth2.googleapis.com/token")).rejects.toMatchObject({
+				code: "provider_egress_unadmitted",
+			});
+		}, undefined, record);
+		expect(sent).toHaveLength(4);
+		expect(requests).toEqual([
+			{ ordinal: 1, executionDigest: route.executionDigest, routeRef: route.routeRef, accountRef: route.providerAccountRef, state: "responded", statusCode: 200 },
+			{ ordinal: 2, executionDigest: route.executionDigest, routeRef: route.routeRef, accountRef: route.providerAccountRef, state: "not_sent", statusCode: null },
+			{ ordinal: 3, executionDigest: route.executionDigest, routeRef: route.routeRef, accountRef: route.providerAccountRef, state: "responded", statusCode: 503 },
+			{ ordinal: 4, executionDigest: route.executionDigest, routeRef: route.routeRef, accountRef: route.providerAccountRef, state: "send_unknown", statusCode: null },
+		]);
+
+		// A failed durable registration sends nothing; without an effect record nothing is sent either.
+		const failing: ProviderRequestRecord = {
+			register: async () => {
+				throw new Error("durable write failed");
+			},
+			settle: async () => {},
+		};
+		await expect(withProviderObservationContext({ effectId: "model_effect_unwritten", modelCallId: "model-x" },
+			() => wrapped("https://cheapai.invalid/v1/chat/completions"), undefined, failing)).rejects.toThrow("durable write failed");
+		await expect(wrapped("https://cheapai.invalid/v1/chat/completions")).rejects.toMatchObject({
+			code: "provider_effect_unadmitted",
+		});
+		expect(sent).toHaveLength(4);
+	});
+
+	it("admits a non-fetch physical request through the same boundary and facts", async () => {
+		const route = {
+			...identity(),
+			providerAccountRef: "gctx:4444444444444444",
+			routeRef: "gctx:5555555555555555",
+			providerId: "cursor",
+			runtimeProviderId: "artel-cursor",
+			modelId: "composer-2",
+			baseUrl: "https://api2.cursor.sh",
+		};
+		let admissions = 0;
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
+			if (JSON.parse(String(init?.body)).phase === "before") admissions += 1;
+			return Response.json({ allowed: true });
+		}).createHook(undefined, {} as AuthStorage, "", [route]);
+		const routeModel = { id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model;
+		let sends = 0;
+		const { requests, record } = recorder();
+		await withProviderObservationContext({ effectId: "model_effect_h2", modelCallId: "model-h2" }, async () => {
+			const status = await hook.wrapRequest(routeModel, {
+				url: "https://api2.cursor.sh/agent.v1.AgentService/Run",
+				send: async () => {
+					sends += 1;
+					return 200;
+				},
+			});
+			expect(status).toBe(200);
+			await expect(hook.wrapRequest(routeModel, {
+				url: "https://api2.cursor.sh/agent.v1.AgentService/Run",
+				send: async () => {
+					sends += 1;
+					throw new Error("stream killed mid-flight");
+				},
+			})).rejects.toThrow("stream killed");
+		}, undefined, record);
+		expect({ admissions, sends }).toEqual({ admissions: 2, sends: 2 });
+		expect(requests.map(({ ordinal, state, statusCode }) => ({ ordinal, state, statusCode }))).toEqual([
+			{ ordinal: 1, state: "responded", statusCode: 200 },
+			{ ordinal: 2, state: "send_unknown", statusCode: null },
+		]);
 	});
 });
 
@@ -689,4 +809,28 @@ function usageReport(): UsageReport {
 		limits: [],
 		raw: { accessToken: "must-not-cross-boundary" },
 	};
+}
+
+/** The durable request record every Engine model effect supplies, kept in memory. */
+function recorder() {
+	const requests: Array<{
+		ordinal: number;
+		executionDigest: string;
+		routeRef: string;
+		accountRef: string;
+		state: string;
+		statusCode: number | null;
+	}> = [];
+	const record: ProviderRequestRecord = {
+		register: async (_effectId, ordinal, frozen) => {
+			expect(ordinal).toBe(requests.length + 1);
+			requests.push({ ordinal, ...frozen, state: "planned", statusCode: null });
+		},
+		settle: async (_effectId, ordinal, state, statusCode) => {
+			const request = requests[ordinal - 1]!;
+			expect(request.state).toBe("planned");
+			Object.assign(request, { state, statusCode });
+		},
+	};
+	return { requests, record };
 }

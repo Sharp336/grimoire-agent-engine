@@ -739,6 +739,13 @@ function handleMetadata(event: MetadataEvent, model: Model<"bedrock-converse-str
 		output.usage.cacheRead = event.usage.cacheReadInputTokens || 0;
 		output.usage.cacheWrite = event.usage.cacheWriteInputTokens || 0;
 		output.usage.totalTokens = event.usage.totalTokens || output.usage.input + output.usage.output;
+		// Bedrock TokenUsage requires input/output counts; cache counts are optional and only reported when present.
+		output.usage.reportedFields = [
+			...(typeof event.usage.inputTokens === "number" ? ["input" as const] : []),
+			...(typeof event.usage.outputTokens === "number" ? ["output" as const] : []),
+			...(typeof event.usage.cacheReadInputTokens === "number" ? ["cacheRead" as const] : []),
+			...(typeof event.usage.cacheWriteInputTokens === "number" ? ["cacheWrite" as const] : []),
+		];
 		calculateCost(model, output.usage);
 	}
 }

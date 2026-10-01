@@ -3738,8 +3738,16 @@ export function populateResponsesUsageFromResponse(
 	// premium-request accounting): the failed/cancelled paths throw right after
 	// this call with no later chance to re-apply.
 	const premiumRequests = output.usage.premiumRequests;
+	// Only buckets present on the wire are reported; an explicit 0 counts, an absent field never does.
+	const reportedFields: NonNullable<AssistantMessage["usage"]["reportedFields"]> = ["input", "output"];
+	if (typeof details?.cached_tokens === "number" || typeof usage.prompt_cache_hit_tokens === "number")
+		reportedFields.push("cacheRead");
+	if (typeof details?.cache_write_tokens === "number" || typeof usage.prompt_cache_miss_tokens === "number")
+		reportedFields.push("cacheWrite");
+	if (typeof outputDetails?.reasoning_tokens === "number") reportedFields.push("reasoning");
 	output.usage = {
 		...accounting,
+		reportedFields,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	if (premiumRequests !== undefined) {

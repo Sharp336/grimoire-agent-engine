@@ -95,6 +95,13 @@ export type ThinkingBudgets = { [key in Effort]?: number };
 export interface Usage {
 	/** Provider accounting is incomplete; numeric placeholders must not be displayed as measured usage/cost. */
 	unavailable?: boolean;
+	/**
+	 * The token buckets the provider's response actually reported, including
+	 * explicit zeros. Buckets not listed are zero-initialized placeholders, not
+	 * measurements. Undefined means the parser does not track this, so no bucket
+	 * is proven reported.
+	 */
+	reportedFields?: Array<"input" | "output" | "cacheRead" | "cacheWrite" | "reasoning">;
 	/** Non-cached conversation input tokens (matches the bucket the provider bills as new input). */
 	input: number;
 	/** Total conversation output tokens for the turn, including thinking, assistant text, and tool-call argument tokens. */

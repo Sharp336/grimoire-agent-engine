@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { OAuthCredential, UsageReport } from "@oh-my-pi/pi-ai";
+import { extractCursorAccessTokenUserId } from "@oh-my-pi/pi-ai/oauth/cursor";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
@@ -27,6 +28,12 @@ const observationFields: Record<string, true> = {
 };
 const failure = (status: string) => ({ status, observations: [] as Observation[] });
 const codexLimitId = /^openai-codex:(?:primary|secondary|[a-z0-9-]+:(?:primary|secondary))$/;
+/** Exact builtin readers: each reads only its claimed local OMP OAuth row of one provider. */
+const BUILTIN_PROVIDERS: Record<string, string> = {
+	openai_codex_usage: "openai-codex",
+	anthropic_claude_usage: "anthropic",
+	cursor_usage: "cursor",
+};
 
 function validObservation(item: unknown, account: Account, observedAt: string): Observation | null {
 	if (!item || typeof item !== "object" || Array.isArray(item)) return null;
@@ -49,12 +56,12 @@ function validObservation(item: unknown, account: Account, observedAt: string): 
 		window_end: row.window_end as string | null };
 }
 
-async function localOAuth(credential: Extract<Credential, { method: "oauth" }>) {
+async function localOAuth(provider: string, credential: Extract<Credential, { method: "oauth" }>) {
 	if (!path.isAbsolute(credential.agentDir) || !Number.isSafeInteger(credential.credentialId) || credential.credentialId < 1)
 		return null;
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath(credential.agentDir));
 	try {
-		const selected = store.listAuthCredentials("openai-codex").find(item => item.id === credential.credentialId &&
+		const selected = store.listAuthCredentials(provider).find(item => item.id === credential.credentialId &&
 			item.credential.type === "oauth" && item.credential.accountId === credential.accountId);
 		if (!selected) { store.close(); return null; }
 		return { store, credential: selected.credential as OAuthCredential };
@@ -64,37 +71,50 @@ async function localOAuth(credential: Extract<Credential, { method: "oauth" }>) 
 	}
 }
 
-async function builtin(account: Account, credential: Credential, signal?: AbortSignal) {
-	if (!credential || credential.method !== "oauth" || account.provider_id !== "openai-codex")
+/** The report answers for the claimed account only when the provider's own identity matches the claim. */
+function sameAccount(provider: string, report: UsageReport, credential: OAuthCredential, accountId: string): boolean {
+	if (provider === "cursor") return extractCursorAccessTokenUserId(credential.access) === accountId;
+	return report.metadata?.accountId === accountId;
+}
+
+function matchingLimit(provider: string, report: UsageReport, window: Account["quota_windows"][number]) {
+	return report.limits.find(item => item.id === window.window_id &&
+		(provider === "openai-codex" ? codexLimitId.test(item.id) : item.id.startsWith(`${provider}:`)) &&
+		(provider === "openai-codex" || item.window?.durationMs !== undefined
+			? item.window?.durationMs === window.window_seconds * 1000 : true));
+}
+
+async function builtin(builtinId: string, account: Account, credential: Credential, signal?: AbortSignal) {
+	const provider = BUILTIN_PROVIDERS[builtinId];
+	if (!provider || !credential || credential.method !== "oauth" || account.provider_id !== provider)
 		return failure("builtin_unsupported");
-	const local = await localOAuth(credential).catch(() => null);
+	const local = await localOAuth(provider, credential).catch(() => null);
 	if (!local) return failure("credential_unavailable_on_device");
 	let storage: AuthStorage;
 	try {
-		storage = new AuthStorage(exactCredentialStore(local.store, "openai-codex", credential.credentialId));
+		storage = new AuthStorage(exactCredentialStore(local.store, provider, credential.credentialId));
 	} catch {
 		local.store.close();
 		return failure("unavailable");
 	}
 	try {
 		await storage.reload();
-		await storage.invalidateUsageCache("openai-codex", signal);
-		const reports = await storage.fetchUsageReports({ signal });
-		const report: UsageReport | undefined = reports?.find(item => item.provider === "openai-codex" &&
-			item.metadata?.accountId === credential.accountId);
-		if (!report || !Number.isFinite(report.fetchedAt)) return failure("unavailable");
+		const report = await storage.fetchCredentialUsageReport(provider, credential.credentialId, { signal });
+		if (!report || report.provider !== provider || !Number.isFinite(report.fetchedAt)) return failure("unavailable");
+		if (!sameAccount(provider, report, local.credential, credential.accountId))
+			return failure("account_identity_mismatch");
 		const meterStates = report.metadata?.meterStates as Record<string, { allowed?: boolean; limitReached?: boolean }> | undefined;
 		const observedAt = new Date(report.fetchedAt).toISOString();
 		const observations: Observation[] = [];
 		for (const window of account.quota_windows) {
-			const limit: UsageReport["limits"][number] | undefined = report.limits.find(item =>
-				codexLimitId.test(item.id) &&
-				item.id === window.window_id && item.window?.durationMs === window.window_seconds * 1000);
+			const limit = matchingLimit(provider, report, window);
 			if (!limit) continue;
-			const prefix: string = limit.id.slice("openai-codex:".length).replace(/:(?:primary|secondary)$/, "");
-			const meter = prefix === "primary" || prefix === "secondary" ? "chat" : prefix;
-			const exhausted = limit.status === "exhausted" ||
-				meterStates?.[meter]?.allowed === false && meterStates[meter]?.limitReached === true;
+			let exhausted = limit.status === "exhausted";
+			if (provider === "openai-codex") {
+				const prefix: string = limit.id.slice("openai-codex:".length).replace(/:(?:primary|secondary)$/, "");
+				const meter = prefix === "primary" || prefix === "secondary" ? "chat" : prefix;
+				exhausted ||= meterStates?.[meter]?.allowed === false && meterStates[meter]?.limitReached === true;
+			}
 			const resets_at = limit.window?.resetsAt === undefined ? null : new Date(limit.window.resetsAt).toISOString();
 			const base = { dimension: "quota_window" as const, dimension_id: window.window_id,
 				observed_at: observedAt, resets_at, window_start: null, window_end: null };
@@ -116,7 +136,7 @@ async function moduleProbe(modulePath: string, accountRef: string, account: Acco
 	let opened: LocalOAuth | null = null;
 	if (credential?.method === "api_key") moduleCredential = credential;
 	if (credential?.method === "oauth") {
-		opened = await localOAuth(credential).catch(() => null);
+		opened = await localOAuth(account.provider_id, credential).catch(() => null);
 		if (!opened) return failure("credential_unavailable_on_device");
 		moduleCredential = { method: "oauth", access_token: opened.credential.access };
 	}
@@ -165,8 +185,9 @@ export async function runUsageProbe(store: RocksEngineMutations, deviceId: strin
 	if (!input.principalId || !input.accountRef || !input.account ||
 		!Array.isArray(input.account.pools) || !Array.isArray(input.account.quota_windows)) return failure("invalid_request");
 	if (input.kind === "builtin") {
-		if (input.builtinId !== "openai_codex_usage" || input.builtinVersion !== 1) return failure("builtin_unsupported");
-		return builtin(input.account, input.credential ?? null, signal);
+		if (!input.builtinId || !BUILTIN_PROVIDERS[input.builtinId] || input.builtinVersion !== 1)
+			return failure("builtin_unsupported");
+		return builtin(input.builtinId, input.account, input.credential ?? null, signal);
 	}
 	if (input.kind !== "module" || !Number.isSafeInteger(input.bindingRevision)) return failure("invalid_request");
 	const binding = await store.getUsageProbeBinding(input.principalId, deviceId, input.accountRef);

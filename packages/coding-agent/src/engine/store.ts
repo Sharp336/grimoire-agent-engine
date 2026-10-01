@@ -1,3 +1,4 @@
+import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import type {
 	ApprovalDecision,
@@ -164,6 +165,40 @@ export interface EngineModelEffectInput {
 	effectId: string;
 	modelCallId: string;
 	inputHash: string;
+}
+
+export type ModelRequestState = "planned" | "not_sent" | "responded" | "send_unknown";
+
+/** One physical provider request of a model effect, durable before it is sent. */
+export interface ModelRequestFact {
+	/** Monotonic per model effect, never reused. */
+	ordinal: number;
+	state: ModelRequestState;
+	/** Frozen from the observed execution identity when the request was registered. */
+	executionDigest: string;
+	routeRef: string;
+	accountRef: string;
+	/** HTTP status actually received; null when no response status is known. */
+	statusCode: number | null;
+}
+
+export type ModelTokenField = "input" | "output" | "cacheRead" | "cacheWrite" | "reasoning";
+
+/** Provider-reported usage of the request that produced the settled assistant message. */
+export interface ModelUsageFact {
+	ordinal: number;
+	providerResponseId: string | null;
+	/** null = not reported by the provider; never zero-filled. */
+	tokens: Record<ModelTokenField, number | null>;
+	cost:
+		| {
+				status: "estimated";
+				currency: "USD";
+				amount: number;
+				basis: { source: "engine_catalog"; modelId: string; ratesPerMTok: Model["cost"]; serviceTier: string | null };
+				computedAt: string;
+		  }
+		| { status: "unknown"; reason: "tokens_incomplete" | "price_unknown" };
 }
 
 export interface EngineEffectRow {

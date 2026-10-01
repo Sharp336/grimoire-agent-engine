@@ -3,7 +3,15 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type AgentMessage, AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, AssistantMessageEvent, ImageContent, Model } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type Context,
+	completeSimple,
+	type ImageContent,
+	type Model,
+	type SimpleStreamOptions,
+} from "@oh-my-pi/pi-ai";
 import {
 	enqueueStreamWork,
 	runWithStreamAdmission,
@@ -23,6 +31,7 @@ import {
 } from "@oh-my-pi/pi-utils/latency-audit";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { withSettingsScope } from "../config/settings";
 import {
 	type ExtensionAskDialogQuestion,
@@ -47,6 +56,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BlobStore } from "../session/blob-store";
 import { NativeSessionWriteRejectedError } from "../session/native-session-storage";
+import { withHelperCompletionExecutor } from "../session/helper-completion";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import { decodeNativeEntry, parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import type {
@@ -114,7 +124,12 @@ import {
 	type WorkTarget,
 } from "./contracts";
 import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
-import { markProviderLatency, setProviderObservationModel, withProviderObservationContext } from "./provider-admission";
+import {
+	markProviderLatency,
+	type ProviderRequestRecord,
+	setProviderObservationModel,
+	withProviderObservationContext,
+} from "./provider-admission";
 import type { BillingPoolProposal } from "./provider-execution";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { beginRestoreRebind, type RestoreWorkspaceReceipt, resolveRestoreWorkspace } from "./rocks-restore-workspace";
@@ -146,6 +161,8 @@ import {
 	type EngineModelEffectInput,
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
+	type ModelTokenField,
+	type ModelUsageFact,
 } from "./store";
 import { waitForEngineWake } from "./wake";
 
@@ -313,6 +330,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	consultantEffectId?: string;
 	modelCallSequence: number;
 	modelEffect?: EngineModelEffectInput;
+	/** The Engine-composed admission/fact hook every model request of this binding must use. */
+	providerRequestHook: NonNullable<CreateAgentSessionOptions["providerRequestHook"]>;
 	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
 	execution: {
 		config: EngineExecutionConfiguration;
@@ -2052,7 +2071,9 @@ export class EngineRuntime {
 			await this.store.assertIntent(target.agentInstanceId, expectedIntentRevision, true);
 			const binding = this.#requireTarget(target);
 			const before = binding.session.getContextBreakdown();
-			const result = await this.#withSessionScope(binding, () => binding.session.compact());
+			const result = await this.#auxiliaryModelEffect(binding,
+				sha256(stableStringifyJson({ compaction: binding.session.messages })), undefined,
+				() => this.#withSessionScope(binding, () => binding.session.compact()));
 			const after = binding.session.getContextBreakdown();
 			return {
 				schema: "grimoire.engine.session_compaction.v1",
@@ -3061,24 +3082,33 @@ export class EngineRuntime {
 				outputSchema: config.continuationConfiguration.outputSchema ?? undefined,
 				requireYieldTool: config.continuationConfiguration.requireYieldTool,
 				...resolved.options,
-				providerRequestHook: {
-					wrapFetch: (model, fetch) => {
-						const wrapped = createProviderRetryBudgetHook(
-							resolved?.options.providerRequestHook ?? this.#sessionDefaults?.providerRequestHook,
-						).wrapFetch(model, (input, init) => latencyFetch(fetch, input, init));
-						return async (input, init) => {
-							if (!liveBinding) throw new Error("Provider boundary has no Engine binding");
-							markProviderLatency("intent_admission_start");
-							await this.#admitEffect(
-								liveBinding,
-								() => this.store.assertIntent(liveBinding!.agentInstanceId, undefined, true),
-								init?.signal ?? undefined,
-							);
-							markProviderLatency("intent_admission_done");
-							return await wrapped(input, init);
-						};
-					},
-				},
+				providerRequestHook: (() => {
+					const inner = resolved?.options.providerRequestHook ?? this.#sessionDefaults?.providerRequestHook;
+					const admitIntent = async (signal: AbortSignal | undefined) => {
+						if (!liveBinding) throw new Error("Provider boundary has no Engine binding");
+						markProviderLatency("intent_admission_start");
+						await this.#admitEffect(
+							liveBinding,
+							() => this.store.assertIntent(liveBinding!.agentInstanceId, undefined, true),
+							signal,
+						);
+						markProviderLatency("intent_admission_done");
+					};
+					return {
+						wrapFetch: (model, fetch) => {
+							const wrapped = createProviderRetryBudgetHook(inner)
+								.wrapFetch(model, (input, init) => latencyFetch(fetch, input, init));
+							return async (input, init) => {
+								await admitIntent(init?.signal ?? undefined);
+								return await wrapped(input, init);
+							};
+						},
+						wrapRequest: async (model, request) => {
+							await admitIntent(request.signal);
+							return await createProviderRetryBudgetHook(inner).wrapRequest(model, request);
+						},
+					} satisfies NonNullable<CreateAgentSessionOptions["providerRequestHook"]>;
+				})(),
 				disableExtensionDiscovery: true,
 				extensions: [],
 				additionalExtensionPaths: [],
@@ -3327,6 +3357,7 @@ export class EngineRuntime {
 				disposeExecution: resolved.dispose,
 				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice,
 					verifyCandidate: resolved.verifyCandidate, activateCandidate: resolved.activateCandidate },
+				providerRequestHook: sessionOptions.providerRequestHook!,
 				requireYieldTool: config.continuationConfiguration.requireYieldTool,
 				outputSchema: sessionOptions.outputSchema,
 				pauseGate,
@@ -3379,7 +3410,7 @@ export class EngineRuntime {
 						void this.#queueBindingWrite(binding, entry.id, async () => {
 							await this.#settleActiveModelEffect(binding,
 								message.stopReason === "error" || message.stopReason === "aborted" ? "failed" : "completed",
-								message.errorMessage);
+								message.errorMessage, message);
 						});
 					}
 					if (entry.type === "message" && entry.message.role === "user") {
@@ -4687,10 +4718,68 @@ export class EngineRuntime {
 		};
 	}
 
+	/** Physical request facts are written under the same fence as the model effect they belong to. */
+	#requestRecord(binding: LiveBinding): ProviderRequestRecord {
+		return {
+			register: (effectId, ordinal, frozen) =>
+				this.store.registerModelRequest(this.#snapshot(binding), effectId, { ordinal, ...frozen }),
+			settle: (effectId, ordinal, state, statusCode) =>
+				this.store.settleModelRequest(this.#snapshot(binding), effectId, ordinal, state, statusCode),
+		};
+	}
+
+	/**
+	 * Provider-reported usage of a settled message. Only buckets the provider parser lists in
+	 * `reportedFields` are measurements (explicit zeros included); zero-initialized placeholders
+	 * stay null, so a failed message keeps its real usage and a synthetic one has none. The store
+	 * attributes it to the effect's last responded request, or drops it when none responded.
+	 */
+	#modelUsage(binding: LiveBinding, message: AssistantMessage | undefined): Omit<ModelUsageFact, "ordinal"> | null {
+		if (!message) return null;
+		const usage = message.usage;
+		const known = (field: ModelTokenField) => usage.reportedFields?.includes(field) === true;
+		const tokens: ModelUsageFact["tokens"] = {
+			input: known("input") ? usage.input : null,
+			output: known("output") ? usage.output : null,
+			cacheRead: known("cacheRead") ? usage.cacheRead : null,
+			cacheWrite: known("cacheWrite") ? usage.cacheWrite : null,
+			// Parsers omit `reasoningTokens` when the reported count is 0.
+			reasoning: known("reasoning") ? usage.reasoningTokens ?? 0 : null,
+		};
+		if (Object.values(tokens).every(value => value === null)) return null;
+		const model = binding.session.model;
+		const priced = model && model.id === message.model && model.provider === message.provider &&
+			Object.values(model.cost).some(rate => rate > 0) ? model : undefined;
+		// The estimate needs every bucket the catalog charges for; an unbilled bucket may stay unreported.
+		const complete = (["input", "output", "cacheRead", "cacheWrite"] as const)
+			.every(field => tokens[field] !== null || (priced !== undefined && priced.cost[field] === 0));
+		return {
+			providerResponseId: message.responseId ?? null,
+			tokens,
+			cost: !priced
+				? { status: "unknown", reason: "price_unknown" }
+				: !complete
+					? { status: "unknown", reason: "tokens_incomplete" }
+					: {
+							status: "estimated",
+							currency: "USD",
+							amount: usage.cost.total,
+							basis: {
+								source: "engine_catalog",
+								modelId: priced.id,
+								ratesPerMTok: priced.cost,
+								serviceTier: currentIdentity(binding.execution.choice).service_tier ?? null,
+							},
+							computedAt: new Date().toISOString(),
+						},
+		};
+	}
+
 	async #settleActiveModelEffect(
 		binding: LiveBinding,
 		outcome: "completed" | "failed",
 		error?: string,
+		message?: AssistantMessage,
 	): Promise<EngineEvent | undefined> {
 		const effect = binding.modelEffect;
 		if (!effect) return;
@@ -4698,6 +4787,7 @@ export class EngineRuntime {
 			? undefined : await this.#effectCheckpoint(binding);
 		const event = await this.store.settleModelEffect(
 			this.#snapshot(binding), effect, outcome, error?.slice(0, 2_048), checkpoint,
+			this.#modelUsage(binding, message),
 		);
 		binding.modelEffect = undefined;
 		this.#notifyEvents([event]);
@@ -4755,6 +4845,7 @@ export class EngineRuntime {
 								: this.#dispatchPrompt(binding.session, input, identity, kind, images),
 						),
 					audit,
+					this.#requestRecord(binding),
 				);
 				await binding.session.settleInFlightMessagePersistence();
 				await binding.traceWriteTail;
@@ -4773,10 +4864,14 @@ export class EngineRuntime {
 					binding.messageWriteError ??= persistenceError;
 				}
 				await binding.traceWriteTail;
-				await this.#settleActiveModelEffect(binding, "failed", message);
+				const failedMessage = binding.session.getLastAssistantMessage();
+				await this.#settleActiveModelEffect(binding, "failed", message,
+					failedMessage !== previous ? failedMessage : undefined);
 				throw error;
 			}
-			const settled = await this.#settleActiveModelEffect(binding, "completed");
+			const latest = binding.session.getLastAssistantMessage();
+			const settled = await this.#settleActiveModelEffect(binding, "completed", undefined,
+				latest !== previous ? latest : undefined);
 			audit?.mark("model_completed", { eventId: settled?.eventId });
 			return dispatched;
 		} finally {
@@ -4798,10 +4893,81 @@ export class EngineRuntime {
 				() =>
 					withLspSessionScope(
 						{ shared: settings.get("lsp.shared"), ownerId: binding.engineAgentId, realm: "engine" },
-						callback,
+						() => withHelperCompletionExecutor((model, context, options) =>
+							this.#helperCompletion(binding, model, context, options), callback),
 					),
 			),
 		);
+	}
+
+	/**
+	 * A model call outside the agent loop (manual compaction, an explicitly configured
+	 * helper) is its own model effect of the same Attempt: admitted, with durable
+	 * physical request facts and settled usage. The effect opens at its first physical
+	 * request, so work that needs no provider request (local snapshot compaction) is
+	 * never blocked; a provider request without an admitted Attempt is refused.
+	 */
+	async #auxiliaryModelEffect<T>(
+		binding: LiveBinding,
+		inputHash: string,
+		signal: AbortSignal | undefined,
+		work: () => Promise<T>,
+		message: (value: T) => AssistantMessage | undefined = () => undefined,
+	): Promise<T> {
+		const effect = this.#nextModelEffect(binding, inputHash);
+		const records = this.#requestRecord(binding);
+		let opening: Promise<void> | undefined;
+		let opened = false;
+		const record: ProviderRequestRecord = {
+			register: async (effectId, ordinal, frozen) => {
+				opening ??= (async () => {
+					const checkpoint = await this.#effectCheckpoint(binding);
+					this.#notifyEvents([await this.#admitEffect(binding,
+						() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), signal)]);
+					opened = true;
+				})();
+				await opening;
+				await records.register(effectId, ordinal, frozen);
+			},
+			settle: records.settle,
+		};
+		let value: T;
+		try {
+			value = await withProviderObservationContext(effect, work, undefined, record);
+		} catch (error) {
+			if (opened) {
+				const checkpoint = binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
+				this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "failed",
+					(error instanceof Error ? error.message : String(error)).slice(0, 2_048), checkpoint, null)]);
+			}
+			throw error;
+		}
+		if (opened)
+			this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed",
+				undefined, await this.#effectCheckpoint(binding), this.#modelUsage(binding, message(value)))]);
+		return value;
+	}
+
+	/** Explicit helpers run only on one of this Attempt's admitted route models; others make no request. */
+	async #helperCompletion(
+		binding: LiveBinding,
+		model: Model,
+		context: Context,
+		options: SimpleStreamOptions,
+	): Promise<AssistantMessage | undefined> {
+		const key = formatModelStringWithRouting(model);
+		if (!binding.execution.selectors.some(selector => selector === key || selector?.startsWith(`${key}:`))) {
+			binding.session.emitNotice("warning",
+				`helper_model_unadmitted: ${key} is not an admitted route of this Attempt`, "engine");
+			return undefined;
+		}
+		const hook = binding.providerRequestHook;
+		return await this.#auxiliaryModelEffect(binding, sha256(stableStringifyJson(context)), options.signal,
+			() => completeSimple(model, context, {
+				...options,
+				fetch: hook.wrapFetch(model, options.fetch ?? globalThis.fetch),
+				physicalRequest: request => hook.wrapRequest(model, request),
+			}), message => message);
 	}
 
 	async #sendCommandContext(

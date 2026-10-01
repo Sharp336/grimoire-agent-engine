@@ -108,6 +108,10 @@ describe("Engine provider retry budget", () => {
 				admissions += 1;
 				return await fetch(input, init);
 			},
+			wrapRequest: async (_model, request) => {
+				admissions += 1;
+				return await request.send();
+			},
 		};
 		const hook = createProviderRetryBudgetHook(admission);
 		const model = { provider: "openai-codex", id: "gpt-5.5" } as Model;
@@ -142,6 +146,7 @@ describe("Engine provider retry budget", () => {
 				admissions += 1;
 				return await fetch(input, init);
 			},
+			wrapRequest: (_model, request) => request.send(),
 		});
 		await withProviderRetryBudget(4, async () => {
 			const fetch = hook.wrapFetch({ provider: "anthropic", id: "claude-test" } as Model, async () => {

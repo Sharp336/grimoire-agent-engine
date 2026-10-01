@@ -13,10 +13,11 @@
  * 94% under 150 lines; smol fixed 99% with one feedback retry, with ~12% of
  * raw candidates being reverts — hence the explicit revert rejection.
  */
-import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { helperCompletion } from "../session/helper-completion";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
@@ -312,7 +313,9 @@ export async function attemptEditAutoRepair(options: {
 	const complete = async (builtPrompt: string): Promise<string> => {
 		const response = await retryTransientCompletion(
 			() =>
-				completeSimple(
+				helperCompletion(
+					session.settings,
+					"edit.autoRepair.enabled",
 					model,
 					{ messages: [{ role: "user", content: builtPrompt, timestamp: Date.now() }] },
 					{

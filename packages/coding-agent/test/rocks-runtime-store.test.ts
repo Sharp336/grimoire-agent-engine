@@ -80,7 +80,28 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [{ kind: "completed" }]),
 			).rejects.toThrow();
 			expect((await store.getAttempt(binding.attemptId))?.state).toBe("running");
-			await store.settleModelEffect(binding, effect, "completed", undefined, checkpoint);
+			const frozen = { executionDigest: `sha256:${"d".repeat(64)}`, routeRef: "gctx:route", accountRef: "gctx:account" };
+			// Ordinals are dense and durable before send; only planned requests settle, once.
+			await expect(store.registerModelRequest(binding, effect.effectId, { ordinal: 2, ...frozen })).rejects.toThrow();
+			await store.registerModelRequest(binding, effect.effectId, { ordinal: 1, ...frozen });
+			await store.settleModelRequest(binding, effect.effectId, 1, "not_sent", null);
+			await expect(store.settleModelRequest(binding, effect.effectId, 1, "responded", 200)).rejects.toThrow();
+			await store.registerModelRequest(binding, effect.effectId, { ordinal: 2, ...frozen });
+			await store.settleModelRequest(binding, effect.effectId, 2, "responded", 200);
+			const tokens = { input: 12, output: null, cacheRead: null, cacheWrite: null, reasoning: null };
+			const settledModel = await store.settleModelEffect(binding, effect, "completed", undefined, checkpoint, {
+				providerResponseId: "resp-1",
+				tokens,
+				cost: { status: "unknown", reason: "tokens_incomplete" },
+			});
+			expect(settledModel.payload).toMatchObject({
+				requestTracking: "v1",
+				requests: [
+					{ ordinal: 1, state: "not_sent", statusCode: null },
+					{ ordinal: 2, state: "responded", statusCode: 200 },
+				],
+				usage: { ordinal: 2, providerResponseId: "resp-1", tokens },
+			});
 			await store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [{ kind: "completed" }], {
 				transcriptCheckpoint: checkpoint,
 			});
@@ -139,8 +160,11 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				origin: { messageId: "assistant-message-1", blockId: "assistant-block-1" },
 			};
 			const recoveryModelEffect = { ...effect, effectId: `z-open-model-${suffix}` };
+			const unsentModelEffect = { ...effect, effectId: `z-unsent-model-${suffix}`, modelCallId: "call-2" };
 			await store.startToolEffect(active, recoveryToolEffect, checkpoint);
 			await store.startModelEffect(active, recoveryModelEffect, checkpoint);
+			await store.startModelEffect(active, unsentModelEffect, checkpoint);
+			await store.registerModelRequest(active, recoveryModelEffect.effectId, { ordinal: 1, ...frozen });
 			await store.branchIntent(recoveryAgent, `pause-${suffix}`, "pause", 0);
 			const nextGeneration = await store.nextEngineGeneration();
 			let notifications = 0;
@@ -175,7 +199,17 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				modelCallId: recoveryModelEffect.modelCallId,
 				status: "unknown",
 				error: "engine_lost",
+				// Registered but never settled: the crash leaves its fate unknown, with no zero usage.
+				requestTracking: "v1",
+				requests: [{ ordinal: 1, ...frozen, state: "send_unknown", statusCode: null }],
+				usage: null,
 			});
+			// Tracking initialized with the effect proves that no request was registered, so none is invented.
+			expect(
+				recoveryEvents.find(
+					event => event.kind === "model_settled" && event.payload?.effectId === unsentModelEffect.effectId,
+				)?.payload,
+			).toMatchObject({ requestTracking: "v1", requests: [], usage: null, status: "unknown" });
 			expect(
 				(await store.records.get("metadata", `effects:${active.attemptId}:${active.bindingId}`)).value,
 			).toMatchObject({ count: 0 });

@@ -98,11 +98,13 @@ export async function loginCursor(
 	const { accessToken, refreshToken } = await pollCursorAuth(uuid, verifier);
 
 	const expiresAt = getTokenExpiry(accessToken);
+	const accountId = extractCursorAccessTokenUserId(accessToken);
 
 	return {
 		access: accessToken,
 		refresh: refreshToken,
 		expires: expiresAt,
+		...(accountId ? { accountId } : {}),
 	};
 }
 
@@ -130,11 +132,13 @@ export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<
 	};
 
 	const expiresAt = getTokenExpiry(data.accessToken);
+	const accountId = extractCursorAccessTokenUserId(data.accessToken);
 
 	return {
 		access: data.accessToken,
 		refresh: data.refreshToken || apiKeyOrRefreshToken,
 		expires: expiresAt,
+		...(accountId ? { accountId } : {}),
 	};
 }
 

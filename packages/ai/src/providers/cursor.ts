@@ -744,22 +744,21 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
-			const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
-			if (proxyUrl) {
-				const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
-					signal: options?.signal,
-					timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+			const sendHeartbeat = () => {
+				if (!h2Request || h2Request.closed) {
+					return;
+				}
+				const heartbeatMessage = create(AgentClientMessageSchema, {
+					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
-				h2Client = http2.connect(baseUrl, {
-					createConnection: () => tlsSocket,
-				});
-			} else {
-				h2Client = http2.connect(baseUrl);
-			}
-			h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
+				h2Request.write(frameConnectMessage(heartbeatBytes));
+			};
 
-			h2Request = h2Client.request(requestHeaders);
-
+			const closeDebugLog = async (): Promise<void> => {
+				const log = await debugResponseLogPromise;
+				await log?.close();
+			};
 			stream.push({ type: "start", partial: output });
 
 			let pendingBuffer: Buffer = Buffer.alloc(0);
@@ -805,14 +804,39 @@ function streamCursorWithWireMode(
 				conversationStateCache.set(conversationId!, checkpoint);
 			};
 
-			h2Request.on("response", headers => {
+			// The physical request: proxy tunnel, HTTP/2 session, stream and the first
+			// frame are all opened inside `send`, so an admission wrapper decides before
+			// any byte reaches the provider. Listeners attach synchronously with the
+			// stream; the response status resolves `send`.
+			const send = async (): Promise<number | null> => {
+				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
+				if (proxyUrl) {
+					const tlsSocket = await connectProxiedSocket(proxyUrl, baseUrl, {
+						signal: options?.signal,
+						timeoutMs: CURSOR_PROXY_TUNNEL_TIMEOUT_MS,
+					});
+					h2Client = http2.connect(baseUrl, {
+						createConnection: () => tlsSocket,
+					});
+				} else {
+					h2Client = http2.connect(baseUrl);
+				}
+				h2Client.on("error", error => settleH2(mapH2TransportError(error, baseUrl)));
+
+				const request = h2Client.request(requestHeaders);
+				h2Request = request;
+				const responded = Promise.withResolvers<number | null>();
+
+			request.on("response", headers => {
+				const status = Number(headers[":status"]);
+				responded.resolve(Number.isInteger(status) ? status : null);
 				debugResponseLogPromise = debugSession?.openResponseLog(
 					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
 					headers,
 				);
 			});
 
-			h2Request.on("data", (chunk: Buffer) => {
+			request.on("data", (chunk: Buffer) => {
 				if (debugResponseLogPromise) {
 					void debugResponseLogPromise.then(log => {
 						log?.write(chunk);
@@ -884,23 +908,7 @@ function streamCursorWithWireMode(
 				}
 			});
 
-			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
-					return;
-				}
-				const heartbeatMessage = create(AgentClientMessageSchema, {
-					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
-				});
-				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
-			};
-
-			const closeDebugLog = async (): Promise<void> => {
-				const log = await debugResponseLogPromise;
-				await log?.close();
-			};
-
-			h2Request.on("trailers", trailers => {
+			request.on("trailers", trailers => {
 				const status = trailers["grpc-status"];
 				const msg = trailers["grpc-message"];
 				if (status && status !== "0" && !endStreamError) {
@@ -911,13 +919,13 @@ function streamCursorWithWireMode(
 				}
 			});
 
-			h2Request.on("end", () => {
+			request.on("end", () => {
 				void closeDebugLog()
 					.then(() => settleH2())
 					.catch(error => settleH2(error));
 			});
 
-			h2Request.on("error", error => {
+			request.on("error", error => {
 				const mapped = mapH2TransportError(error, baseUrl);
 				void closeDebugLog().finally(() => settleH2(mapped));
 			});
@@ -931,7 +939,14 @@ function streamCursorWithWireMode(
 				});
 			}
 
-			h2Request.write(frameConnectMessage(requestBytes));
+				request.write(frameConnectMessage(requestBytes));
+				return await Promise.race([responded.promise, h2Completion.promise.then(() => null)]);
+			};
+			await (options?.physicalRequest ?? (physical => physical.send()))({
+				url: new URL(requestPath, baseUrl).toString(),
+				...(options?.signal ? { signal: options.signal } : {}),
+				send,
+			});
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {

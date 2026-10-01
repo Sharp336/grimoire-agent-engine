@@ -636,6 +636,24 @@ export class HostedEngineBridge {
 			return true;
 		}
 		const jobId = await this.#eventJobId(event);
+		// Physical provider requests are durable facts even when the job is already terminal,
+		// absent or never admitted: ClientHost must persist them before any ACK shortcut below.
+		// Only tracked `[]` proves no request was sent; absent or invalid tracking is delivered
+		// so ClientHost records it as unknown or quarantines it, never as a silent zero.
+		const payload = event.payload;
+		if (event.type === "model.settled" &&
+			!(payload?.requestTracking === "v1" && Array.isArray(payload.requests) && payload.requests.length === 0)) {
+			const recorded = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "consumption",
+				installation_id: event.bindingSnapshot?.installationId ?? null,
+				device_id: this.#options.deviceId,
+				engine_id: this.#options.engineId,
+				job_id: jobId,
+				event,
+			});
+			if (!["recorded", "duplicate", "quarantined"].includes(String(recorded.status)))
+				throw new Error(`Model consumption was not durably recorded: ${String(recorded.status)}`);
+		}
 		let claim = this.#active.get(jobId);
 		if (
 			!claim &&

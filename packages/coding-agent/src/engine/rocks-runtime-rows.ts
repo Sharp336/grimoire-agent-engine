@@ -7,7 +7,14 @@ import type {
 	ExecutorChoice,
 } from "./contracts";
 import type { RuntimeIdentityRow } from "./runtime-projection";
-import type { EngineAttemptRecord, EngineCommandIdentity, EngineCommandReceipt, EngineEffectRow } from "./store";
+import type {
+	EngineAttemptRecord,
+	EngineCommandIdentity,
+	EngineCommandReceipt,
+	EngineEffectRow,
+	ModelRequestFact,
+	ModelUsageFact,
+} from "./store";
 
 export interface RocksIdentity extends RuntimeIdentityRow {
 	created_at: number;
@@ -84,6 +91,10 @@ export interface RocksEffect extends EngineEffectRow {
 	error?: string | null;
 	job_ids?: string[];
 	runtime_event_id: number;
+	/** Physical provider requests of a model effect, in ordinal order. */
+	requests?: ModelRequestFact[];
+	/** Usage of the responded request that produced the settled message; null when unavailable. */
+	usage?: ModelUsageFact | null;
 }
 export interface RocksInbox extends EngineInboxItem {
 	subtype: "item";

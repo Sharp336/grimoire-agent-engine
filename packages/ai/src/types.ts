@@ -389,6 +389,14 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/** One non-fetch physical provider request, sent only through {@link PhysicalRequest.send}. */
+export interface PhysicalRequest {
+	url: string;
+	signal?: AbortSignal;
+	/** Opens the transport; resolves the response status when headers arrive, or null when none is known. */
+	send(): Promise<number | null>;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -585,6 +593,14 @@ export interface StreamOptions {
 	 * channel) silently ignore the override.
 	 */
 	fetch?: FetchImpl;
+	/**
+	 * Optional wrapper for a physical provider request that does not use
+	 * `fetch` (Cursor's HTTP/2 channel). The provider calls it once per
+	 * request with `send`, which opens the transport and resolves the response
+	 * `:status`; a wrapper may refuse before calling `send`. When unset the
+	 * provider calls `send` directly.
+	 */
+	physicalRequest?: (request: PhysicalRequest) => Promise<number | null>;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
 	cwd?: string;
 

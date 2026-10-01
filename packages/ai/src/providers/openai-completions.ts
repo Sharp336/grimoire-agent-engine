@@ -1883,9 +1883,24 @@ export function parseChunkUsage(
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
 		hasDeepSeekCacheHitAndMiss: typeof promptCacheHitTokens === "number" && typeof promptCacheMissTokens === "number",
 	});
+	const unavailable = typeof promptTokens !== "number" || typeof completionTokens !== "number";
+	// Only buckets present on the wire are reported; an explicit 0 counts, an absent field never does.
+	const reportedFields: NonNullable<AssistantMessage["usage"]["reportedFields"]> = [];
+	if (typeof promptTokens === "number") {
+		reportedFields.push("input");
+		if ([cachedTokens, promptCacheHitTokens, promptTokenCachedTokens, cachedContentTokenCount]
+			.some(value => typeof value === "number")) reportedFields.push("cacheRead");
+		if (typeof cacheWriteTokens === "number" || typeof promptCacheMissTokens === "number")
+			reportedFields.push("cacheWrite");
+	}
+	if (typeof completionTokens === "number") {
+		reportedFields.push("output");
+		if (typeof completionReasoningTokens === "number") reportedFields.push("reasoning");
+	}
 	const usage: AssistantMessage["usage"] = {
 		...accounting,
-		...(typeof promptTokens !== "number" || typeof completionTokens !== "number" ? { unavailable: true } : {}),
+		...(unavailable ? { unavailable: true } : {}),
+		reportedFields,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
