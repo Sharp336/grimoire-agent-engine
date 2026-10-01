@@ -21,6 +21,7 @@
 - A conflicting retained command follows the broker's existing report-and-TERM path without rejecting the original job or blocking later claims on the same delivery lane.
 - Binding idle checkpoints carry the exact runtime contract hash. Missing or mismatched retained checkpoints cannot authorize adoption and require a fresh census; historical receipts are not rewritten.
 - NATS integration fixtures wait within their existing startup deadline for a complete ports manifest; partial JSON publication no longer aborts readiness, while other reader errors still propagate.
+- Native task child preparation carries the actual persisted ToolEffect identity and input hash over the existing private transport; public task arguments and ordinary dispatch identities remain unchanged.
 - Managed Engine sessions treat omitted context files, skills, prompt templates, slash commands, and rules as empty arrays instead of discovering ambient instructions; explicit arrays and non-Engine discovery remain unchanged.
 - Executor rule recovery replays the exact admitted transition history and original event IDs without duplicating archived messages. Fallback rules reach the next provider request durably while failed assistant context is removed; compaction replaces all raw rule messages with current-route L1 in its original priority order.
 - A paused fallback resumes on its retained current route and execution digest, without retrying the exhausted candidate prefix or changing its admitted prompt baseline.

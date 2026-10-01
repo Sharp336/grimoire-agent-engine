@@ -262,6 +262,10 @@ export async function launchLocalEngineChild(
 		throw new EngineTargetError("invalid_request", "Child launch requires the admitted principal");
 	if (!request.target.task_ref || (request.target.work_step_id !== null && !request.target.work_step_id))
 		throw new EngineTargetError("invalid_request", "Child launch requires a real Task or WorkStep");
+	if (request.toolName !== "task" || typeof request.effectId !== "string" ||
+		!/^tool_[0-9a-f]{32}$/.test(request.effectId) || typeof request.inputHash !== "string" ||
+		!/^[0-9a-f]{64}$/.test(request.inputHash))
+		throw new EngineTargetError("invalid_request", "Child launch requires its native task effect proof");
 	const preparation = {
 		parentAgentInstanceRef: request.parentAgentInstanceRef,
 		parentAttemptId: request.parentAttemptId,
@@ -271,6 +275,9 @@ export async function launchLocalEngineChild(
 		target: request.target,
 		assignment,
 		toolCallId: request.toolCallId,
+		effectId: request.effectId,
+		inputHash: request.inputHash,
+		toolName: request.toolName,
 		cwd: request.cwd,
 		...(request.spawnApprovalReceiptId ? { spawnApprovalReceiptId: request.spawnApprovalReceiptId } : {}),
 	};

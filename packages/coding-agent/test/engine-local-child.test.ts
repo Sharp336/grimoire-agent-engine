@@ -32,7 +32,7 @@ function localChildPrepareServer(options: {
 	deviceId: string;
 	engineId: string;
 }) {
-	const prepared = new Map<string, { input: string; command: EngineCommandEnvelope }>();
+	const prepared = new Map<string, { input: string; proof: string; command: EngineCommandEnvelope }>();
 	const claims = new Map<string, {
 		command: EngineCommandEnvelope;
 		leaseToken: string;
@@ -84,7 +84,9 @@ function localChildPrepareServer(options: {
 					typeof args.target.task_ref !== "string" ||
 					(args.target.work_step_id !== null && typeof args.target.work_step_id !== "string") ||
 					typeof args.assignment !== "string" || typeof args.toolCallId !== "string" ||
-					typeof args.cwd !== "string")
+					typeof args.cwd !== "string" ||
+					(args.reserve !== true && (typeof args.effectId !== "string" || !/^tool_[0-9a-f]{32}$/.test(args.effectId) ||
+						typeof args.inputHash !== "string" || !/^[0-9a-f]{64}$/.test(args.inputHash) || args.toolName !== "task")))
 					throw new EngineTargetError("invalid_request", "Prepare needs exact parent and child target");
 				validateRuntimeValue("bindingSnapshot", args.parentBindingSnapshot);
 				const parentBindingSnapshot = args.parentBindingSnapshot as unknown as EngineSemanticBindingSnapshot;
@@ -103,9 +105,31 @@ function localChildPrepareServer(options: {
 				});
 				if (args.reserve === true)
 					return Response.json({ error: "Child reservation is outside this fixture" }, { status: 400 });
+				const effect = await runtime.store.getEffect(String(args.effectId));
+				const parent = await runtime.store.getAttempt(args.parentAttemptId);
+				if (!effect || !parent || effect.effect_kind !== "tool" ||
+					effect.agent_instance_id !== engineAgentInstanceId(args.parentAgentInstanceRef) ||
+					effect.attempt_id !== parent.attempt_id || effect.binding_id !== parent.binding_id ||
+					effect.execution_id !== parent.execution_id || effect.command_id !== parent.command_id ||
+					effect.tool_call_id !== args.toolCallId || effect.tool_name !== args.toolName ||
+					effect.input_hash !== args.inputHash)
+					return Response.json({ error: "Native child effect proof differs" }, { status: 409 });
+				const authority = await runtime.store.runtimeCommand(parent.command_id, undefined, undefined, {
+					effectId: effect.effect_id, toolCallId: effect.tool_call_id, toolName: effect.tool_name,
+				});
+				const proof = storage.storageCanonicalJson({
+					effectId: effect.effect_id, inputHash: effect.input_hash, toolName: effect.tool_name,
+				});
 				const prior = prepared.get(key);
-				if (prior && prior.input !== input)
+				if (prior && (prior.input !== input || prior.proof !== proof))
 					return Response.json({ error: "Prepared child request changed on replay" }, { status: 409 });
+				if (!isRecord(authority.effect) || authority.effect.started !== true) {
+					if (!prior) return Response.json({ error: "Child needs a started native effect" }, { status: 409 });
+					const accepted = await runtime.store.runtimeCommand(prior.command.commandId);
+					if (accepted.lookup !== "known" || !isRecord(accepted.receipt) || accepted.receipt.outcome !== "applied" ||
+						accepted.rawCanonicalHash !== engineCommandIdentity(prior.command).canonicalHash)
+						return Response.json({ error: "Retained child lacks its accepted native outcome" }, { status: 409 });
+				}
 				let command = prior?.command;
 				if (!command) {
 					const agentInstanceRef = `${target.task_ref}/agents/agent-${crypto.randomUUID()}`;
@@ -128,7 +152,7 @@ function localChildPrepareServer(options: {
 					command = startEnvelope(runtime, childExecution, typed, {
 						deviceId: options.deviceId, engineId: options.engineId,
 					});
-					prepared.set(key, { input, command });
+					prepared.set(key, { input, proof, command });
 				}
 				result = {
 					status: "prepared", command,
@@ -379,18 +403,32 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			if (!parentBindingSnapshot) throw new Error("Admitted parent lost its semantic binding");
 			expect(parentStarted.attemptId).toBe(parentAttemptId);
 			const enrolled = new Set<string>();
+			const taskEffect = {
+				effectId: `tool_${crypto.randomUUID().replaceAll("-", "")}`,
+				toolCallId: "call-1", toolName: "task" as const, policy: "tracked" as const,
+				inputHash: new Bun.CryptoHasher("sha256").update(storage.storageCanonicalJson({
+					target: { task_ref: parentTaskRef, work_step_id: null }, assignment: "Inspect local evidence 42",
+				})).digest("hex"),
+			};
+			await runtime.store.startToolEffect(parentStarted, taskEffect);
 			const request = {
 				parentAgentInstanceId, parentAgentInstanceRef,
 				parentAttemptId: parentStarted.attemptId, parentBindingSnapshot,
 				principalId: "test-owner", authorityGeneration: parentStarted.authorityGeneration,
 				target: { task_ref: parentTaskRef, work_step_id: null },
 				assignment: "Inspect local evidence 42", toolCallId: "call-1", cwd,
+				effectId: taskEffect.effectId, inputHash: taskEffect.inputHash, toolName: taskEffect.toolName,
 				deviceId: "fixture-device", engineId: "fixture-engine",
 				enrollChild: async (ref: string, attemptId?: string) => {
 					if (!attemptId) throw new Error("Child enrollment lost its Attempt");
 					enrolled.add(`${ref}:${attemptId}`);
 				},
 			};
+			await expect(launchLocalEngineChild(runtime, hosted.rpc, { ...request, effectId: "" }))
+				.rejects.toMatchObject({ code: "invalid_request" });
+			await expect(launchLocalEngineChild(runtime, hosted.rpc, { ...request, inputHash: "0".repeat(64) }))
+				.rejects.toMatchObject({ code: "stale_target" });
+			expect(calls).toBe(0);
 			const [first, duplicate] = await Promise.all([
 				launchLocalEngineChild(runtime, hosted.rpc, request),
 				launchLocalEngineChild(runtime, hosted.rpc, request),
@@ -424,6 +462,11 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 			).rejects.toMatchObject({ code: "stale_target" });
 			const committedHash = command.canonicalHash;
 			expect(engineCommandIdentity(JSON.parse(command.serializedCommand!)).canonicalHash).toBe(committedHash);
+			const parentSession = runtime.agentRegistry.get(parentStarted.engineAgentId)?.session;
+			if (!parentSession) throw new Error("Direct parent session is unavailable");
+			await runtime.store.settleToolEffect(parentStarted, taskEffect.effectId, "completed", {
+				checkpoint: await parentSession.sessionManager.flushAndCheckpoint(),
+			});
 			directParentRelease.resolve();
 			await runtime.drain();
 			await runtime.dispose();

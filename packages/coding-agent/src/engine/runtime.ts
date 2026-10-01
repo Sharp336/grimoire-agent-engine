@@ -512,6 +512,10 @@ export interface EngineRuntimeOptions {
 		target: WorkTarget;
 		assignment: string;
 		toolCallId: string;
+		/** Runtime-owned evidence from the persisted native task invocation, never model arguments. */
+		effectId: string;
+		inputHash: string;
+		toolName: "task";
 		cwd: string;
 		signal?: AbortSignal;
 		spawnApprovalReceiptId?: string;
@@ -2975,10 +2979,34 @@ export class EngineRuntime {
 									(spawn.max_depth < 1 ||
 										(!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren)))
 									throw new EngineTargetError("capacity_unavailable", "Child spawn ceiling reached");
+								let invocation: ToolInvocationRecord | undefined;
+								for (const record of this.#toolInvocations.values()) {
+									if (record.settled || record.toolCallId !== child.toolCallId ||
+										record.target.agentInstanceId !== parent.agentInstanceId ||
+										record.target.attemptId !== parent.attemptId || record.target.bindingId !== parent.bindingId)
+										continue;
+									if (invocation || record.toolName !== "task")
+										throw new EngineTargetError("stale_target", "Child call has no unique native task invocation");
+									invocation = record;
+								}
+								const effect = invocation ? await this.store.getEffect(invocation.invocationId) : undefined;
+								if (!invocation || effect?.state !== "started" || effect.effect_kind !== "tool" ||
+									effect.effect_id !== invocation.invocationId || effect.agent_instance_id !== parent.agentInstanceId ||
+									effect.attempt_id !== parent.attemptId || effect.binding_id !== parent.bindingId ||
+									effect.execution_id !== parent.executionId || effect.command_id !== parent.commandId ||
+									effect.engine_generation !== invocation.target.engineGeneration ||
+									effect.binding_generation !== invocation.target.bindingGeneration ||
+									effect.authority_generation !== invocation.target.authorityGeneration ||
+									effect.tool_call_id !== child.toolCallId || effect.tool_name !== "task" ||
+									effect.input_hash !== invocation.inputHash)
+									throw new EngineTargetError("stale_target", "Child call lacks its persisted started ToolEffect");
 								parent.childLaunches.add(child.toolCallId);
 								try {
 									return await this.#launchChild!({
 										...child,
+										effectId: effect.effect_id,
+										inputHash: effect.input_hash,
+										toolName: "task",
 										...(spawnApprovalReceiptId ? { spawnApprovalReceiptId } : {}),
 										parentAgentInstanceId: parent.agentInstanceId,
 										parentAgentInstanceRef: request.agentInstanceRef,
