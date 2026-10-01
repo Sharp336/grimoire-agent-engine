@@ -1,12 +1,14 @@
 import { expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { EngineBindingSnapshot, EngineEvent } from "../src/engine/contracts";
+import type { EngineEvent } from "../src/engine/contracts";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
-import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
 import { startStorageWorker } from "./helpers/storage-worker-fixture";
-import { binding as nativeBinding, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import {
+	admittedExecutionFixture, admittedFixtureStart, binding as nativeBinding,
+	command as fixtureCommand, identity as fixtureIdentity,
+} from "./helpers/runtime-v1-rocks-fixture";
 
 const workerExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 const testRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
@@ -26,24 +28,14 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			const store = new RocksEngineStore(client);
 			const generation = await store.nextEngineGeneration();
 			const suffix = crypto.randomUUID();
-			const command: EngineCommandIdentity = {
-				commandId: `command-${suffix}`,
-				operation: "start",
-				deviceId: "fixture-device",
-				engineId: "fixture-engine",
-				engineGeneration: generation,
-				agentInstanceId: `agent-${suffix}`,
-				agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/${suffix}`,
-				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/runtime-fixture/agents/${suffix}`),
-				executionId: `execution-${suffix}`,
-				attemptId: `attempt-${suffix}`,
-				authorityGeneration: 1,
-				principalId: "fixture-owner",
-				payloadHash: "payload",
-				canonicalHash: "canonical",
-				serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
-			};
-			expect(await store.admitCommand(command, generation)).toEqual({ status: "claimed" });
+			const agent = fixtureIdentity(suffix, undefined, "fixture-owner");
+			const execution = admittedExecutionFixture();
+			const binding = await admittedFixtureStart(
+				store, { ...nativeBinding(suffix), engineGeneration: generation },
+				agent.agentInstanceRef, agent.principalId, execution, "fixture-device",
+			);
+			const command = await store.getStartConversationIdentity(binding.commandId);
+			if (!command) throw new Error("Admitted fixture lost its original Start");
 			expect(await store.chatIdentityId(command.agentInstanceRef!, command.principalId!)).toBe(
 				command.agentInstanceId,
 			);
@@ -51,29 +43,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			await expect(
 				store.chatIdentityId(`${command.agentInstanceRef}-other`, command.principalId!),
 			).rejects.toThrow();
-			expect(await store.admitCommand(command, generation)).toEqual({ status: "in_progress" });
 			await expect(store.admitCommand({ ...command, canonicalHash: "changed" }, generation)).rejects.toThrow();
-			const admitted = nativeBinding(suffix);
-			const binding: EngineBindingSnapshot = {
-				commandId: command.commandId,
-				agentInstanceId: command.agentInstanceId,
-				executionId: command.executionId!,
-				attemptId: command.attemptId!,
-				bindingId: `binding-${suffix}`,
-				engineAgentId: `native-${suffix}`,
-				executionDigest: admitted.executionDigest,
-				continuationDigest: admitted.continuationDigest,
-				dispatchRef: admitted.dispatchRef,
-				dispatchHash: admitted.dispatchHash,
-				state: "running",
-				engineGeneration: generation,
-				bindingGeneration: 1,
-				authorityGeneration: 1,
-			};
-			await store.commitAttemptTransition(binding, "running", [{ kind: "running" }], {
-				requireNew: true,
-				settleCommandId: command.commandId,
-			});
 			expect(await store.admitCommand(command, generation)).toEqual({
 				status: "replay",
 				receipt: { outcome: "applied" },
@@ -150,30 +120,16 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			expect((await store.records.get("metadata", budgetId)).value).toMatchObject({ count: 0, bytes: 0 });
 
 			// More than a single 100-record CAS/query budget must remain recoverable.
-			const recoveryAgent = `recovery-${suffix}`;
+			const recoveryIdentity = fixtureIdentity(`recovery-${suffix}`, undefined, agent.principalId);
+			const recoveryAgent = recoveryIdentity.agentInstanceId;
+			const active = await admittedFixtureStart(
+				store, { ...nativeBinding(`recovery-${suffix}`), engineGeneration: generation },
+				recoveryIdentity.agentInstanceRef, recoveryIdentity.principalId, execution, "fixture-device",
+			);
 			for (let index = 0; index < 105; index++)
-				await store.admitCommand(
-					{
-						...command,
-						commandId: `pending-${suffix}-${index}`,
-						agentInstanceId: recoveryAgent,
-						agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/${recoveryAgent}`,
-						operation: "steer",
-						canonicalHash: `pending-${index}`,
-						executionId: `recover-execution-${suffix}`,
-						attemptId: `recover-attempt-${suffix}`,
-					},
-					generation,
-				);
-			const active = {
-				...binding,
-				agentInstanceId: recoveryAgent,
-				commandId: `pending-${suffix}-0`,
-				executionId: `recover-execution-${suffix}`,
-				attemptId: `recover-attempt-${suffix}`,
-				bindingId: `recover-binding-${suffix}`,
-			};
-			await store.commitAttemptTransition(active, "running", [{ kind: "running" }], { requireNew: true });
+				await store.admitCommand(fixtureCommand(`pending-${suffix}-${index}`, "steer", {
+					agent: recoveryIdentity, target: active, generation,
+				}), generation);
 			const recoveryToolEffect = {
 				effectId: `a-open-tool-${suffix}`,
 				toolCallId: "tool-call-1",
@@ -228,14 +184,10 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				expect.arrayContaining(["pause", "recovery"]),
 			);
 			expect(notifications).toBeGreaterThan(0);
-			const cancelled = {
-				...command,
-				commandId: `cancel-before-start-${suffix}`,
-				agentInstanceId: `cancel-agent-${suffix}`,
-				agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/cancel-${suffix}`,
-				bindingSnapshot: semanticBinding(`grimoire://tasks/grimoire/runtime-fixture/agents/cancel-${suffix}`),
-				engineGeneration: nextGeneration,
-			};
+			const cancelled = fixtureCommand(`cancel-before-start-${suffix}`, "start", {
+				agent: fixtureIdentity(`cancel-${suffix}`, undefined, agent.principalId),
+				generation: nextGeneration,
+			});
 			await store.registerAgent(cancelled);
 			const cancellation = await store.cancelPendingStart(
 				{

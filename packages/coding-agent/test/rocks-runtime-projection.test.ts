@@ -21,7 +21,9 @@ import {
 	type StorageRuntimeQueryResponse,
 	type StorageRuntimeRecord,
 } from "../src/session/storage-protocol";
-import { binding as nativeBinding, semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
+import {
+	binding as nativeBinding, command as fixtureCommand, identity as fixtureIdentity, semanticBinding,
+} from "./helpers/runtime-v1-rocks-fixture";
 
 class Rows extends RuntimeRecords {
 	readonly values = new Map<string, StorageRuntimeRecord>();
@@ -125,9 +127,22 @@ function fixture(): Rows {
 		membership_revision: 1,
 	});
 	rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt" });
+	const start = fixtureCommand(target.commandId, "start", {
+		agent: { ...fixtureIdentity("a", undefined, "p"), agentInstanceId: "a" },
+		target,
+	});
+	// Historical access is owned by the retained original Start, not today's mutable Agent head.
+	rows.seed("command", start.commandId, {
+		command_id: start.commandId, agent_instance_id: "a", operation: "start",
+		identity: start, canonical_hash: start.canonicalHash, state: "settled",
+		receipt: { outcome: "applied" }, processor_generation: null, engine_generation: 1,
+		payload_bytes: Buffer.byteLength(start.serializedCommand!), control_admission: 0,
+		pending_accounted: false, received_at: 1, updated_at: 1,
+	} satisfies RocksCommand);
 	rows.seed("attempt", "attempt", {
 		agent_instance_id: "a",
 		attempt_id: "attempt",
+		command_id: start.commandId,
 		execution_id: "execution",
 		binding_id: "binding",
 		engine_generation: 1,
@@ -486,7 +501,6 @@ describe("Rocks runtime atomic public projections", () => {
 		};
 		expect(await store.admitCommand(start, 1)).toEqual({ status: "claimed" });
 		const detail = { code: "invalid_request", message: "refused" };
-		// A non-browser Start emits no receipt event, so the transition event carries the last summary.
 		await store.commitEvent(
 			target,
 			{ kind: "rejected", payload: detail, causationCommandId: start.commandId },

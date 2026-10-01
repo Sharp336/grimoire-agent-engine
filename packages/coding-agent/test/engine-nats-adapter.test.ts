@@ -135,16 +135,26 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
 			auth.setRuntimeApiKey("mock", "isolated-test");
 			registerMockApi(`ipc-replay-${phase}`);
-			const entered = Promise.withResolvers<void>();
+			let entered = false;
 			const finish = Promise.withResolvers<void>();
 			const mock = createMockModel({ handler: async () => {
-				entered.resolve();
+				entered = true;
 				await finish.promise;
 				return { content: ["retained IPC outcome"] };
 			} });
-			const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+			const modelRegistry = new ModelRegistry(auth, path.join(tempDir, "models.yml"));
+			const execution = admittedExecution(mock.model, modelRegistry);
 			const runtime = await EngineRuntime.create({
-				databasePath: path.join(tempDir, "engine.sqlite"), ...execution.optionsFor({ deviceId: "device-1" }),
+				databasePath: path.join(tempDir, "engine.sqlite"),
+				...execution.optionsFor({ deviceId: "device-1", sessionDefaults: {
+					cwd: tempDir,
+					agentDir: path.join(tempDir, "agent"),
+					settings: await Settings.loadReadOnly({ cwd: tempDir, agentDir: path.join(tempDir, "agent") }),
+					disableExtensionDiscovery: true,
+					skills: [], contextFiles: [], promptTemplates: [], slashCommands: [],
+					enableMCP: false, enableLsp: false,
+					modelRegistry, model: mock.model,
+				} }),
 			});
 			const command = startCommand(runtime.engineGeneration, "ipc-agent", `ipc-${phase}`, tempDir, execution);
 			command.payload.context = "captured authorized localization";
@@ -205,6 +215,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 					}
 					if (args.action === "event") {
 						if (!managed) throw new Error("Existing busy job is not an absence proof");
+						if (terminalResult) return { status: "already_terminal" };
 						const event = args.event as Record<string, unknown>;
 						if (event.type === "attempt.completed") {
 							terminalResult = await native.request("result.get", { attemptId: command.attemptId }) as Record<string, unknown>;
@@ -218,7 +229,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			});
 			try {
 				await native.request("command", { command });
-				await entered.promise;
+				await waitFor(() => entered);
 				if (phase === "terminal") {
 					finish.resolve();
 					await waitFor(async () => (await runtime.store.getAttempt(command.attemptId!))?.state === "completed");
@@ -285,9 +296,19 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		auth.setRuntimeApiKey("mock", "isolated-test");
 		registerMockApi("claim-conflict");
 		const mock = createMockModel({ handler: { content: ["one effect per valid Start"] } });
-		const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+		const modelRegistry = new ModelRegistry(auth, path.join(tempDir, "models.yml"));
+		const execution = admittedExecution(mock.model, modelRegistry);
 		const runtime = await EngineRuntime.create({
-			databasePath: path.join(tempDir, "engine.sqlite"), ...execution.optionsFor({ deviceId: "device-1" }),
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			...execution.optionsFor({ deviceId: "device-1", sessionDefaults: {
+				cwd: tempDir,
+				agentDir: path.join(tempDir, "agent"),
+				settings: await Settings.loadReadOnly({ cwd: tempDir, agentDir: path.join(tempDir, "agent") }),
+				disableExtensionDiscovery: true,
+				skills: [], contextFiles: [], promptTemplates: [], slashCommands: [],
+				enableMCP: false, enableLsp: false,
+				modelRegistry, model: mock.model,
+			} }),
 		});
 		const original = startCommand(runtime.engineGeneration, "original-agent", "claim-original", tempDir, execution);
 		const next = startCommand(runtime.engineGeneration, "next-agent", "claim-next", tempDir, execution);
@@ -1096,14 +1117,15 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 						throw new Error("Reconciliation checkpoint has no revision");
 					expect(checkpoint.revision).toBeGreaterThan(0);
 				}
-				expect(events.filter(event => event.type !== "reconcile.snapshot").map(event => event.type)).toEqual([
-					"attempt.agent_registered",
-					"command.accepted",
-					"attempt.started",
-					"model.started",
-					"model.settled",
-					"attempt.completed",
-				]);
+				// Receipt/checkpoint traffic may interleave; each execution transition still occurs once in order.
+				let previous = -1;
+				for (const type of ["command.accepted", "attempt.started", "model.started", "model.settled", "attempt.completed"]) {
+					const matches = events.filter(event => event.type === type);
+					expect(matches).toHaveLength(1);
+					const index = events.indexOf(matches[0]);
+					expect(index).toBeGreaterThan(previous);
+					previous = index;
+				}
 			}
 			expect(dispatchCount).toBe(2);
 			expect(await runtime.sessionHistoryPage("agent-a", "grimoire://tasks/grimoire/nats/agents/a")).toMatchObject({

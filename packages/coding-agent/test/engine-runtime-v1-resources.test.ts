@@ -1581,10 +1581,17 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 receipts, queues and nativ
 		expect(batch.throughCursor).toBe(head);
 		expect(batch.hasMore).toBeFalse();
 		expect(batch.work.scannedRows).toBeLessThan(32);
-		expect(batch.changes.filter(change => change.kind === "state").map(change => change.value.state)).toEqual([
-			"running",
-			"paused",
-		]);
+		const states = batch.changes.filter(change => change.kind === "state");
+		expect(states[0]?.value.state).toBe("running");
+		expect(states.at(-1)).toMatchObject({
+			cursor: pause[0].eventId,
+			value: { state: "paused", attemptId: target.attemptId },
+		});
+		// Native receipt snapshots may repeat running; the selected Attempt must only advance to its pause.
+		expect(states.every(change =>
+			change.value.attemptId === target.attemptId &&
+			(change.value.state === "running" || change.cursor === pause[0].eventId),
+		)).toBeTrue();
 		const receipts = batch.changes.filter(change => change.kind === "receipt").map(change => change.value);
 		expect(receipts.map(value => value.stage)).toEqual(["engine_accepted", "applied"]);
 		for (const value of receipts)
