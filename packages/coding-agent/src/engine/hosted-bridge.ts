@@ -450,6 +450,14 @@ export class HostedEngineBridge {
 			claim.work.command = command;
 		}
 		const envelope = command as EngineCommandEnvelope;
+		const retained = await this.#options.eventStore?.settledCommandReceipt(
+			envelope.commandId, engineCommandIdentity(envelope).canonicalHash,
+		);
+		if (retained) {
+			await this.#acceptReceipt(claim, retained);
+			claim.published = true;
+			return;
+		}
 		await js.publish(commandSubject(envelope), encode(envelope), {
 			msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
 		});
@@ -463,6 +471,31 @@ export class HostedEngineBridge {
 		});
 		this.#active.delete(claim.jobId);
 		await waitForEngineWake(this.#stop.promise, 1_000, this.#admissionCancellation.signal);
+	}
+
+	async #acceptReceipt(claim: BridgeClaim, value: Record<string, unknown>): Promise<void> {
+		const receipt = typeof value.payloadHash === "string"
+			? { ...value, browserPayloadHash: value.payloadHash }
+			: value;
+		const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+			action: "accepted",
+			installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,
+			device_id: this.#options.deviceId,
+			engine_id: this.#options.engineId,
+			job_id: claim.jobId,
+			lease_token: claim.leaseToken,
+			receipt,
+		});
+		if (accepted.status !== "accepted") throw new Error("Hosted command receipt was not persisted");
+		claim.accepted = true;
+		if (receipt.stage === "rejected" || receipt.stage === "execution_terminal" ||
+			(receipt.stage === "applied" && claim.work.command?.op !== "start"))
+			this.#active.delete(claim.jobId);
+		while (this.#active.size > runtimeLimits.devicePendingRecords) {
+			const old = [...this.#active.values()].find(item => item.accepted);
+			if (!old) break;
+			this.#active.delete(old.jobId);
+		}
 	}
 
 	async #eventLoop(messages: ConsumerMessages): Promise<void> {
@@ -602,9 +635,13 @@ export class HostedEngineBridge {
 		)
 			return true;
 		if (!claim) {
+			const identity = await this.#options.eventStore?.getStartConversationIdentity(jobId);
+			const installationId = identity?.bindingSnapshot
+				? identity.bindingSnapshot.installationId
+				: event.bindingSnapshot?.installationId ?? null;
 			const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "claim",
-				installation_id: event.bindingSnapshot?.installationId ?? null,
+				installation_id: installationId,
 				device_id: this.#options.deviceId,
 				engine_id: this.#options.engineId,
 				engine_generation: this.#options.engineGeneration,
@@ -612,10 +649,19 @@ export class HostedEngineBridge {
 				job_id: jobId,
 				lease_ttl_seconds: 90,
 			});
+			if (recovered.status === "absent") {
+				if (!identity || recovered.schema !== "grimoire.agent_engine.bridge.result.v1" ||
+					recovered.job_id !== jobId || recovered.device_id !== this.#options.deviceId ||
+					recovered.engine_id !== this.#options.engineId || recovered.installation_id !== installationId ||
+					typeof recovered.owner_principal_id !== "string" || !recovered.owner_principal_id.trim() ||
+					(identity.principalId !== undefined && recovered.owner_principal_id !== identity.principalId))
+					throw new Error("Hosted absence proof does not match the exact native command scope");
+				return true;
+			}
 			if (recovered.status !== "claimed") {
 				const terminal = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 					action: "event",
-					installation_id: event.bindingSnapshot?.installationId ?? null,
+					installation_id: installationId,
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
 					job_id: jobId,
@@ -647,31 +693,7 @@ export class HostedEngineBridge {
 		this.#active.set(claim.jobId, claim);
 		if (event.type === "attempt.command_receipt" && event.payload) {
 			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
-			const receipt = typeof value.payloadHash === "string"
-				? { ...value, browserPayloadHash: value.payloadHash }
-				: value;
-			const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-				action: "accepted",
-				installation_id: claim.work.command?.bindingSnapshot?.installationId ?? null,
-				device_id: this.#options.deviceId,
-				engine_id: this.#options.engineId,
-				job_id: claim.jobId,
-				lease_token: claim.leaseToken,
-				receipt,
-			});
-			if (accepted.status !== "accepted") throw new Error("Hosted command receipt was not persisted");
-			claim.accepted = true;
-			if (
-				receipt.stage === "rejected" ||
-				receipt.stage === "execution_terminal" ||
-				(receipt.stage === "applied" && claim.work.command?.op !== "start")
-			)
-				this.#active.delete(claim.jobId);
-			while (this.#active.size > runtimeLimits.devicePendingRecords) {
-				const old = [...this.#active.values()].find(item => item.accepted);
-				if (!old) break;
-				this.#active.delete(old.jobId);
-			}
+			await this.#acceptReceipt(claim, value);
 			return true;
 		}
 

@@ -1232,6 +1232,21 @@ export class RocksEngineStore extends RocksEngineMutations {
 			}
 		}
 	}
+	/** A later delivery of an exact local command observes its retained outcome, never re-executes it. */
+	async settledCommandReceipt(commandId: string, canonicalHash: string): Promise<Record<string, unknown> | undefined> {
+		const row = await this.row<RocksCommand>("command", commandId);
+		if (!row) return undefined;
+		if (row.canonical_hash !== canonicalHash) throw new EngineCommandConflictError(commandId);
+		if (row.state !== "settled") return undefined;
+		if (!row.receipt) throw new Error("Settled command has no receipt");
+		const attempt = row.identity.attemptId
+			? await this.row<RocksAttempt>("attempt", row.identity.attemptId)
+			: undefined;
+		return row.identity.browserPayloadHash === undefined
+			? nativeCommandReceipt(row, attempt)
+			: runtimeReceipt(row, await this.row<RocksIdentity>("identity", row.agent_instance_id), attempt);
+	}
+
 	async runtimeCommand(
 		commandId: string,
 		access?: RuntimeAccess,

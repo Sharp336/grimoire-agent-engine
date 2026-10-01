@@ -128,6 +128,156 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}
 	}, 30_000);
 
+	for (const phase of ["running", "terminal"] as const) {
+		it(`recovers an exact ${phase} IPC Start through later Core delivery without another execution`, async () => {
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-ipc-replay-${Snowflake.next()}-`));
+			const broker = await startNatsServer(tempDir);
+			const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+			auth.setRuntimeApiKey("mock", "isolated-test");
+			registerMockApi(`ipc-replay-${phase}`);
+			const entered = Promise.withResolvers<void>();
+			const finish = Promise.withResolvers<void>();
+			const mock = createMockModel({ handler: async () => {
+				entered.resolve();
+				await finish.promise;
+				return { content: ["retained IPC outcome"] };
+			} });
+			const execution = admittedExecution(mock.model, new ModelRegistry(auth, path.join(tempDir, "models.yml")));
+			const runtime = await EngineRuntime.create({
+				databasePath: path.join(tempDir, "engine.sqlite"), ...execution.optionsFor({ deviceId: "device-1" }),
+			});
+			const command = startCommand(runtime.engineGeneration, "ipc-agent", `ipc-${phase}`, tempDir, execution);
+			command.payload.context = "captured authorized localization";
+			execution.captureCommand(command);
+			const coreCommand = structuredClone(command);
+			delete coreCommand.payload.context;
+			const canonicalHash = engineCommandIdentity(command).canonicalHash;
+			expect(engineCommandIdentity(coreCommand).canonicalHash).not.toBe(canonicalHash);
+			const errors: Error[] = [];
+			const adapter = await NatsEngineAdapter.connect({
+				runtime, deviceId: command.deviceId, engineId: command.engineId, servers: broker.url,
+				authorizeCommand: () => {}, authorizeMessage: () => {}, onError: error => errors.push(error),
+			});
+			const server = await startEngineControlQueryServer({
+				runtime, runtimeDir: tempDir, deviceId: command.deviceId, engineId: command.engineId,
+				provisionMailbox: id => adapter.provisionMailbox(id),
+			});
+			const native = new EngineControlQueryClient(tempDir);
+			const client = await connect({ servers: broker.url });
+			let managed = false;
+			let claimed = false;
+			let disposition: "busy" | "wrong_scope" | "absent" = phase === "terminal" ? "busy" : "absent";
+			let terminalResult: Record<string, unknown> | undefined;
+			const receipts: Array<Record<string, unknown>> = [];
+			const bridge = await HostedEngineBridge.connect({
+				deviceId: command.deviceId, engineId: command.engineId, engineGeneration: runtime.engineGeneration,
+				servers: broker.url, eventStore: runtime.store, pollIntervalMs: 10,
+				onError: error => errors.push(error),
+				rpc: { call: async (tool, args) => {
+					if (tool !== "grimoire_agent_engine_bridge") throw new Error("Unexpected bridge tool");
+					if (args.action === "claim") {
+						if (args.job_id && !managed) {
+							if (disposition === "busy") return { status: "no_job" };
+							return { schema: "grimoire.agent_engine.bridge.result.v1", status: "absent",
+								job_id: args.job_id, device_id: args.device_id, engine_id: args.engine_id,
+								installation_id: args.installation_id,
+								owner_principal_id: disposition === "wrong_scope" ? "another-owner" : command.principalId };
+						}
+						if (!managed || claimed || args.lane === "control") return { status: "no_job" };
+						claimed = true;
+						return { status: "claimed", job_id: command.commandId, lease_token: "later-Core-claim",
+							operation_type: "agent_engine_command", work: { kind: "command", command: coreCommand } };
+					}
+					if (args.action === "localize_start") {
+						expect(args.job_id).toBe(command.commandId);
+						expect(args.lease_token).toBe("later-Core-claim");
+						return { status: "localized", command };
+					}
+					if (args.action === "accepted") {
+						expect(args.job_id).toBe(command.commandId);
+						expect(args.lease_token).toBe("later-Core-claim");
+						const receipt = args.receipt as Record<string, unknown>;
+						expect(receipt.rawCanonicalHash).toBe(canonicalHash);
+						receipts.push(receipt);
+						if (receipt.stage === "execution_terminal")
+							terminalResult = await native.request("result.get", { attemptId: command.attemptId }) as Record<string, unknown>;
+						return { status: "accepted" };
+					}
+					if (args.action === "event") {
+						if (!managed) throw new Error("Existing busy job is not an absence proof");
+						const event = args.event as Record<string, unknown>;
+						if (event.type === "attempt.completed") {
+							terminalResult = await native.request("result.get", { attemptId: command.attemptId }) as Record<string, unknown>;
+							return { status: "completed" };
+						}
+						return { status: "running" };
+					}
+					if (args.action === "heartbeat") return { status: "renewed" };
+					throw new Error("Unexpected bridge action");
+				} },
+			});
+			try {
+				await native.request("command", { command });
+				await entered.promise;
+				if (phase === "terminal") {
+					finish.resolve();
+					await waitFor(async () => (await runtime.store.getAttempt(command.attemptId!))?.state === "completed");
+					await waitFor(() => errors.length > 0);
+					expect((await runtime.store.pendingEventsForSink("hosted-binding")).events
+						.some(event => event.kind === "command_receipt")).toBe(true);
+					errors.length = 0;
+					disposition = "wrong_scope";
+					await waitFor(() => errors.length > 0, 10_000);
+					expect((await runtime.store.pendingEventsForSink("hosted-binding")).events
+						.some(event => event.kind === "command_receipt")).toBe(true);
+					disposition = "absent";
+				}
+				await adapter.flushEvents();
+				await waitFor(async () => (await runtime.store.pendingEventsForSink("hosted-binding")).events.length === 0, 15_000);
+				await bridge.drain();
+				expect(claimed).toBe(false);
+				errors.length = 0;
+				const originalEvents = (await runtime.store.pendingEventsForSink("replay-audit")).events.map(event => event.eventId);
+				const originalAttempt = await runtime.store.getAttempt(command.attemptId!);
+				managed = true;
+				await waitFor(() => receipts.length > 0);
+				expect(receipts[0].stage).toBe(phase === "terminal" ? "execution_terminal" : "applied");
+				expect((await runtime.store.pendingEventsForSink("replay-audit")).events.map(event => event.eventId))
+					.toEqual(originalEvents);
+				if (phase === "running") {
+					expect(terminalResult).toBeUndefined();
+					expect((await runtime.store.getAttempt(command.attemptId!))?.state).toBe("running");
+					finish.resolve();
+				}
+				await waitFor(() => terminalResult?.state === "completed");
+				await bridge.drain();
+				expect(terminalResult).toMatchObject({
+					attemptId: command.attemptId, state: "completed", assistantText: "retained IPC outcome",
+				});
+				expect(mock.calls).toHaveLength(1);
+				expect((await runtime.store.getAttempt(command.attemptId!))?.binding_id).toBe(originalAttempt?.binding_id);
+				const info = await (await jetstreamManager(client)).consumers.info(
+					ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}`,
+				);
+				expect(info.delivered.consumer_seq).toBe(0);
+				await expect(runtime.store.settledCommandReceipt(
+					command.commandId, engineCommandIdentity(coreCommand).canonicalHash,
+				)).rejects.toBeInstanceOf(EngineCommandConflictError);
+				expect(errors).toEqual([]);
+			} finally {
+				finish.resolve();
+				await bridge.dispose();
+				await server.close();
+				await client.drain();
+				await adapter.dispose();
+				await runtime.dispose();
+				auth.close();
+				broker.process.kill();
+				await broker.process.exited;
+			}
+		}, 60_000);
+	}
+
 	it("acknowledges oversized retained receipts through NATS and native IPC without starting another Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
