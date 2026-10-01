@@ -1396,7 +1396,7 @@ export class RocksEngineMutations {
 				}
 			}
 			if (bindingPending) return { status: "binding_pending" };
-			if (command.browserPayloadHash) await this.receiptEvent(tx, command.commandId);
+			await this.receiptEvent(tx, command.commandId);
 			if (command.engineGeneration < processorGeneration && !ownedStart) {
 				return {
 					status: "replay",
