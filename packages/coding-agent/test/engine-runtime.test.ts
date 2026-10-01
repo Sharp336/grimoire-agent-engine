@@ -17,6 +17,7 @@ import type {
 import { EngineTargetError, validateStartRequest } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	EngineControlQueryClient,
+	runEngineCommand,
 	startEngineControlQueryServer,
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import {
@@ -129,7 +130,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 
 	async function createRuntime(
 		execution: AdmittedExecutionFixture,
-		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true,
+		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = undefined,
 		overrides: Partial<EngineRuntimeOptions> = {},
 		additionalExecutions: readonly AdmittedExecutionFixture[] = [],
 	) {
@@ -1400,7 +1401,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	});
 
-	it("removes a prepared history fork when execution resolution fails and preserves the source", async () => {
+	it("queues an unbound prepared history fork for reclamation after resolution fails and preserves the source", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const execution = admittedExecution(mock.model, modelRegistry);
 		// The failing branch resolution uses its own admitted execution whose resolver refuses after the fork.
@@ -1454,7 +1455,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const prepared = await fork.mock.results[0]!.value as SessionManager;
 			const abandoned = prepared.getSessionFile();
 			if (!abandoned) throw new Error("Prepared fork has no native locator");
-			await expect(nativeSession(runtime, abandoned)).rejects.toThrow();
+			const { familyId, generationId } = parseNativeSessionLocator(abandoned);
+			const tombstoneId = new Bun.CryptoHasher("sha256").update(`${familyId}\0${generationId}`).digest("hex");
+			expect((await runtime.store.records.get("metadata", `native-delete:${tombstoneId}`)).value)
+				.toMatchObject({ subtype: "native_tombstone", family_id: familyId, generation_id: generationId });
+			await expect(runtime.sessionHistoryPage("cleanup-branch",
+				"grimoire://tasks/grimoire/fork-cleanup/agents/cleanup-branch", undefined, undefined, "cleanup-branch"))
+				.rejects.toMatchObject({ code: "history_expired" });
 			expect((await runtime.store.getBinding("cleanup-branch"))?.sessionFile).toBeUndefined();
 			expect(await runtime.store.getAttempt("cleanup-branch")).toMatchObject({ state: "failed" });
 			expect(await nativeHistory(runtime, source.agentInstanceId)).toEqual(history);
@@ -1544,6 +1551,88 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await blocked.store.close();
 		}
 	}, 15000);
+
+	it("queues after failed pre-session material without changing its owner or replaying the failed Attempt", async () => {
+		const mock = createMockModel({ handler: { content: ["queued input completed"] } });
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const resolver = execution.optionsFor({}).resolveExecution!;
+		const { runtime, cwd } = await createRuntime(execution, undefined, {
+			resolveExecution: (config, frozen, attempt, resolverCwd, signal) => {
+				if (attempt.attemptId === "failed-material-attempt") throw new Error("Fixture material is unavailable");
+				return resolver(config, frozen, attempt, resolverCwd, signal);
+			},
+		});
+		const agentInstanceId = "failed-material-agent";
+		const agentInstanceRef = `${execution.taskRef}/agents/${agentInstanceId}`;
+		try {
+			await expect(admitRequest(runtime, startRequest(execution, {
+				commandId: "failed-material-start", agentInstanceId, agentInstanceRef,
+				executionId: "failed-material-execution", attemptId: "failed-material-attempt",
+			}, { cwd, principalId: "owner", input: "initial material failure" }))).rejects.toThrow();
+			const binding = (await runtime.store.getBinding(agentInstanceId))!;
+			expect(binding.sessionFile).toBeUndefined();
+			const revision = (await runtime.store.intent(agentInstanceId)).intentRevision;
+			const enqueue = (commandId: string, principalId: string, generation: number) => execution.captureCommand({
+				schema: "grimoire.engine.command.v1", op: "enqueue", commandId,
+				deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+				engineGeneration: generation, authorityGeneration: binding.authorityGeneration,
+				agentInstanceId, agentInstanceRef, bindingSnapshot: binding.bindingSnapshot,
+				principalId, issuedAt: Date.now(),
+				payload: { originReceiptId: `origin:${commandId}`, clientMessageId: commandId,
+					text: "queued after material failure", expectedIntentRevision: revision },
+			});
+			const transport = { runtime, deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine" };
+			await expect(runEngineCommand(transport, enqueue("foreign-pending-input", "foreign", runtime.engineGeneration)))
+				.rejects.toThrow();
+			await expect(runEngineCommand(transport, enqueue("stale-pending-input", "owner", runtime.engineGeneration - 1)))
+				.rejects.toThrow();
+			expect(await runtime.store.listInboxItems(`pending:${agentInstanceId}`)).toEqual([]);
+			expect((await runEngineCommand(transport, enqueue("owned-pending-input", "owner", runtime.engineGeneration))).outcome)
+				.toBe("applied");
+			const [queued] = await runtime.store.listInboxItems(`pending:${agentInstanceId}`);
+			expect(queued).toMatchObject({ attemptId: binding.attemptId, bindingId: binding.bindingId,
+				bindingGeneration: binding.bindingGeneration, disposition: "pending" });
+			await admitRequest(runtime, startRequest(execution, {
+				commandId: "material-ready-start", agentInstanceId, agentInstanceRef,
+				executionId: "material-ready-execution", attemptId: "material-ready-attempt",
+			}, { cwd, principalId: "owner", queueId: queued!.queueId, expectedRevision: queued!.revision,
+				mutationId: "material-ready-consume", expectedIntentRevision: revision, explicitContinue: true }));
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(1);
+			expect((await runtime.store.getAttempt("failed-material-attempt"))?.state).toBe("failed");
+			expect((await runtime.store.getAttempt("material-ready-attempt"))?.state).toBe("completed");
+			expect((await runtime.store.getInboxItemByQueueId(queued!.queueId))?.disposition).toBe("acknowledged");
+		} finally { await runtime.dispose(); }
+	});
+
+	it.each([undefined, 0, 3])("projects original Start revision fields as an exact native target pair: %s", async expected => {
+		const execution = admittedExecution(createMockModel().model, modelRegistry);
+		const { runtime, cwd } = await createRuntime(execution, async () => true);
+		const agentInstanceRef = `${execution.taskRef}/agents/native-target`;
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		await runtime.store.registerAgent({ agentInstanceId, agentInstanceRef, principalId: "owner", authorityGeneration: 1 });
+		for (let revision = 0; revision < (expected ?? 0); revision++)
+			await runtime.store.branchIntent(agentInstanceId, `target-hold-${revision}`, "pause", revision);
+		const request = startRequest(execution, { commandId: "target-start", agentInstanceId, agentInstanceRef,
+			executionId: "target-execution", attemptId: "target-attempt" },
+			{ cwd, principalId: "owner", input: "native target proof",
+				expectedIntentRevision: expected, explicitContinue: expected !== undefined });
+		const command = startEnvelope(runtime, execution, request);
+		await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+		const params = { principalId: "owner", agentInstanceRef, attemptId: request.attemptId };
+		const pending = await runtime.store.runtimeTarget({ principalId: "owner", agentInstanceRef });
+		validateRuntimeValue("nativeTarget", pending);
+		expect(pending).toMatchObject({ kind: "pending", commandId: request.commandId });
+		expect(pending.startExpectedIntentRevision).toBe(expected);
+		await admitRequest(runtime, request);
+		await runtime.drain();
+		const bound = await runtime.store.runtimeTarget(params);
+		validateRuntimeValue("nativeTarget", bound);
+		expect(bound).toMatchObject({ kind: "bound", attemptId: request.attemptId });
+		expect(bound.startCommandId).toBe(expected === undefined ? undefined : request.commandId);
+		expect(bound.startExpectedIntentRevision).toBe(expected);
+		await runtime.dispose();
+	});
 
 	it("applies Pause while a native usage query is pending and aborts the provider on IPC close", async () => {
 		const entered = Promise.withResolvers<void>();
@@ -1901,8 +1990,14 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		try {
 		await withTimeout(entered.promise, 5_000, "Source provider did not enter");
 		await runtime.agentRegistry.get(source.engineAgentId)!.session!.sessionManager.flush();
-		const history = await nativeHistory(runtime, source.agentInstanceId);
-		if (!history.sessionLeafEntryId || !history.entries[0]) throw new Error("Expected active source history");
+		const history = await (async () => {
+			for (;;) {
+				const changed = runtime.store.changeSignal();
+				const page = await nativeHistory(runtime, source.agentInstanceId);
+				if (page.sessionLeafEntryId && page.entries[0]) return page;
+				await withTimeout(changed, 2_000, "Active source history checkpoint was not published");
+			}
+		})();
 
 		const branchRequest = startRequest(execution, {
 			commandId: "active-history-branch-command", agentInstanceId: "active-history-branch",
@@ -2497,6 +2592,31 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 
+	it("refuses an unadmitted restricted device before inner effect or approval", async () => {
+		const mock = toolTurnModel("denied-device-write", "write", {
+			path: "xd://bash", content: JSON.stringify({ command: "echo must-not-execute" }),
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, {
+			continuation: { toolNames: ["write", "grep"], restrictToolNames: true,
+				toolPolicies: { grep: "permit" }, tools_permit: ["grep"] },
+		});
+		const { runtime, cwd } = await createRuntime(execution,
+			(session, input, identity) => session.prompt(input, identity));
+		try {
+			const target = await admitRequest(runtime, startRequest(execution, {
+				commandId: "denied-device", agentInstanceId: "denied-device",
+				agentInstanceRef: `${execution.taskRef}/agents/denied-device`,
+				executionId: "denied-device-execution", attemptId: "denied-device-attempt",
+			}, { cwd, principalId: "owner", input: "Do not widen tools through devices" }));
+			await runtime.drain();
+			expect(toolResultOf(mock, "denied-device-write")?.isError).toBe(true);
+			const effects = await runtime.store.attemptToolEffects(target.attemptId);
+			expect(effects.filter(effect => effect.effect_kind === "tool").map(effect => effect.tool_name)).toEqual(["write"]);
+			const events = await runtime.store.pendingEvents();
+			expect(events.filter(event => event.kind.endsWith("_approval_requested"))).toEqual([]);
+		} finally { await runtime.dispose(); }
+	});
+
 	it.each(["approve", "cancel"] as const)(
 		"executes write→xd with a distinct durable device effect and honors %s",
 		async decision => {
@@ -2806,9 +2926,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 			expect((await runtime.store.getAttempt(next.attemptId))?.state).toBe("completed");
 			const events = await runtime.store.pendingEvents();
-			expect(events.filter(event => event.kind === "reconciled").map(event => event.attemptId)).toEqual([
-				next.attemptId,
-			]);
+			expect(events.filter(event => event.kind === "reconciled" && event.eventId > beforeAppend)
+				.every(event => event.attemptId === next.attemptId)).toBe(true);
 			const history = await nativeHistory(runtime, next.agentInstanceId);
 			expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
 				input,

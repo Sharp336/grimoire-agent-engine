@@ -502,9 +502,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			if (request.executionId && request.executionId !== attempt.execution_id)
 				throw new EngineTargetError("stale_target", "Execution no longer matches the exact Attempt");
 			const command = await this.row<RocksCommand>("command", attempt.command_id);
-			const payload = command?.identity.serializedCommand
-				? (JSON.parse(command.identity.serializedCommand) as { expectedIntentRevision?: number })
-				: undefined;
+			const expected = command ? this.startExpected(command.identity) : undefined;
 			result = {
 				kind: "bound",
 				...common,
@@ -515,9 +513,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 				targetEngineGeneration: attempt.engine_generation,
 				bindingId: attempt.binding_id,
 				bindingGeneration: attempt.binding_generation,
-				startCommandId: attempt.command_id,
-				...(payload?.expectedIntentRevision !== undefined
-					? { startExpectedIntentRevision: payload.expectedIntentRevision }
+				...(expected !== undefined
+					? { startCommandId: attempt.command_id, startExpectedIntentRevision: expected }
 					: {}),
 			};
 		} else {
@@ -533,9 +530,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			if (pending) {
 				if (request.executionId && request.executionId !== pending.identity.executionId)
 					throw new EngineTargetError("stale_target", "Pending execution changed");
-				const command = pending.identity.serializedCommand
-					? (JSON.parse(pending.identity.serializedCommand) as { expectedIntentRevision?: number })
-					: undefined;
+				const expected = this.startExpected(pending.identity);
 				result = {
 					kind: "pending",
 					...common,
@@ -545,9 +540,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 					executionId: pending.identity.executionId,
 					authorityGeneration: pending.identity.authorityGeneration,
 					targetEngineGeneration: pending.engine_generation,
-					...(command?.expectedIntentRevision !== undefined
-						? { startExpectedIntentRevision: command.expectedIntentRevision }
-						: {}),
+					...(expected !== undefined ? { startExpectedIntentRevision: expected } : {}),
 				};
 			} else if (request.attemptId || request.executionId)
 				throw new EngineTargetError("stale_target", "Exact Attempt is not present");

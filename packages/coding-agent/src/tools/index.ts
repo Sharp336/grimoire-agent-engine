@@ -688,7 +688,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
-	const xdevRequested = !restrictToolNames && session.settings.get("tools.xdev");
+	const xdevRequested = session.settings.get("tools.xdev");
 	// xd:// mounting rides the write tool as its execution transport, so a
 	// session whose explicit tool list grants `read` but omits `write` would
 	// allocate no xd:// state and expose every later-registered MCP/extension
@@ -700,6 +700,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// capability is expanded: without mounting, those tools were already
 	// presented — and callable — top-level.
 	if (
+		!restrictToolNames &&
 		xdevRequested &&
 		requestedTools !== undefined &&
 		!tools.some(tool => tool.name === "write") &&
@@ -717,10 +718,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 
-	// Ordinary sessions use xd:// for discoverable built-ins, custom tools, and
-	// MCP tools. Structured children must expose only their host-provided names,
-	// so never allocate a registry that later SDK assembly could populate.
-	// Explicitly requested built-ins retain their top-level presentation.
+	// Restricted sessions retain only their admitted canonical tool map. Explicit
+	// names stay top-level; xd:// is an alternate transport, not another grant.
 	const xdevEnabled = xdevRequested && tools.some(tool => tool.name === "write");
 	const mountBuiltinTools = requestedTools === undefined;
 	if (xdevEnabled) {

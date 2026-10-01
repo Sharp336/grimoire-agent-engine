@@ -1798,7 +1798,11 @@ export class EngineRuntime {
 		const live = this.#bindings.get(agentInstanceId);
 		if (live) return this.#inboxTarget(live);
 		const binding = await this.store.getBinding(agentInstanceId);
-		if (binding) return await this.#requireSessionTarget(binding);
+		if (binding) {
+			if (!binding.sessionFile && (await this.store.getAttempt(binding.attemptId))?.state === "failed")
+				return { ...binding, sessionId: `pending:${agentInstanceId}` };
+			return await this.#requireSessionTarget(binding);
+		}
 		return {
 			agentInstanceId,
 			sessionId: `pending:${agentInstanceId}`,

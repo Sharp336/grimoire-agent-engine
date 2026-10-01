@@ -145,6 +145,46 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		} finally { await session.dispose(); }
 	});
 
+	it("keeps restricted device transport within admitted tools and the xdev setting", async () => {
+		const { session } = await createAgentSession({
+			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: ["write", "grep"],
+			extensions: [toolActivationExtension], settings: Settings.isolated({ "tools.xdev": true }),
+			allowRestrictedCustomTools: true, customTools: [sdkCustomTool],
+		});
+		try {
+			expect(session.getMountedXdevToolNames()).toEqual([]);
+			expect(session.getEnabledToolNames()).toEqual(["write", "grep"]);
+			const write = session.getToolByName("write")!;
+			await expect(write.execute("forbidden-bash-device", {
+				path: "xd://bash", content: JSON.stringify({ command: "echo must-not-execute" }),
+			})).rejects.toThrow();
+			expect(session.getToolByName("bash")).toBeUndefined();
+			expect(session.getToolByName("default_active_tool")).toBeUndefined();
+			await expect(write.execute("inactive-registered-device", {
+				path: "xd://sdk_custom_tool", content: "{}",
+			})).rejects.toThrow();
+		} finally { await session.dispose(); }
+		for (const enabled of [true, false]) {
+			const { session: reader } = await createAgentSession({
+				...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: ["read", "grep"],
+				settings: Settings.isolated({ "tools.xdev": enabled }),
+			});
+			try {
+				expect(reader.getToolByName("write")).toBeUndefined();
+				expect(reader.getMountedXdevToolNames()).toEqual([]);
+			} finally { await reader.dispose(); }
+		}
+		const { session: disabled } = await createAgentSession({
+			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: ["write", "grep"],
+			settings: Settings.isolated({ "tools.xdev": false }),
+		});
+		try {
+			await expect(disabled.getToolByName("write")!.execute("disabled-grep-device", {
+				path: "xd://grep", content: JSON.stringify({ pattern: "needle", path: "." }),
+			})).rejects.toThrow();
+		} finally { await disabled.dispose(); }
+	});
+
 	it("excludes defaultInactive extension tools from the initial active set unless explicitly requested", async () => {
 		const tempDir = makeTempDir();
 
