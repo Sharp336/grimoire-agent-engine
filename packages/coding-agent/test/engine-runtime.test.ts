@@ -2610,6 +2610,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}, { cwd, principalId: "owner", input: "Do not widen tools through devices" }));
 			await runtime.drain();
 			expect(toolResultOf(mock, "denied-device-write")?.isError).toBe(true);
+			expect(JSON.stringify(toolResultOf(mock, "denied-device-write")?.content)).toContain("No such tool: xd://bash");
 			const effects = await runtime.store.attemptToolEffects(target.attemptId);
 			expect(effects.filter(effect => effect.effect_kind === "tool").map(effect => effect.tool_name)).toEqual(["write"]);
 			const events = await runtime.store.pendingEvents();

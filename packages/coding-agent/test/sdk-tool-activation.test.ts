@@ -146,8 +146,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	it("keeps restricted device transport within admitted tools and the xdev setting", async () => {
+		const cwd = makeTempDir();
+		fs.writeFileSync(path.join(cwd, "device-proof.txt"), "restricted-device-needle\n");
 		const { session } = await createAgentSession({
-			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: ["write", "grep"],
+			...baseOptions(cwd), restrictToolNames: true, toolNames: ["write", "grep"],
 			extensions: [toolActivationExtension], settings: Settings.isolated({ "tools.xdev": true }),
 			allowRestrictedCustomTools: true, customTools: [sdkCustomTool],
 		});
@@ -155,14 +157,23 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getMountedXdevToolNames()).toEqual([]);
 			expect(session.getEnabledToolNames()).toEqual(["write", "grep"]);
 			const write = session.getToolByName("write")!;
-			await expect(write.execute("forbidden-bash-device", {
+			const denied = await write.execute("forbidden-bash-device", {
 				path: "xd://bash", content: JSON.stringify({ command: "echo must-not-execute" }),
-			})).rejects.toThrow();
+			});
+			expect(denied.isError).toBe(true);
+			expect(JSON.stringify(denied.content)).toContain("No such tool: xd://bash");
 			expect(session.getToolByName("bash")).toBeUndefined();
 			expect(session.getToolByName("default_active_tool")).toBeUndefined();
-			await expect(write.execute("inactive-registered-device", {
+			const inactive = await write.execute("inactive-registered-device", {
 				path: "xd://sdk_custom_tool", content: "{}",
-			})).rejects.toThrow();
+			});
+			expect(inactive.isError).toBe(true);
+			expect(JSON.stringify(inactive.content)).toContain("No such tool: xd://sdk_custom_tool");
+			const admitted = await write.execute("admitted-grep-device", {
+				path: "xd://grep", content: JSON.stringify({ pattern: "restricted-device-needle", path: "device-proof.txt" }),
+			});
+			expect(admitted.isError).not.toBe(true);
+			expect(JSON.stringify(admitted.content)).toContain("restricted-device-needle");
 		} finally { await session.dispose(); }
 		for (const enabled of [true, false]) {
 			const { session: reader } = await createAgentSession({
