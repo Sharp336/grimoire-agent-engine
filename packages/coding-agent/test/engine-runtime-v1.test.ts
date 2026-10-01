@@ -1282,6 +1282,13 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 				});
 				expect(effect.kind).toBe("tool_started");
 				expect(await store.nextInboxWakeAt(parent.engineGeneration)).toBeUndefined();
+				await store.interruptGeneration(await store.nextEngineGeneration());
+				expect((await store.records.get("hold", `${parent.agentInstanceId}:recovery`)).value)
+					.toMatchObject({ local_only: true });
+				const childIntent = await store.intent(child.agentInstanceId);
+				expect(childIntent.manualHold).toBe(true);
+				expect(childIntent.holds.map(hold => hold.sourceAgentInstanceId)).toEqual([child.agentInstanceId]);
+				expect((await store.getAttempt(child.attemptId))?.state).toBe("interrupted");
 			}
 		},
 	);
