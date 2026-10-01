@@ -2573,6 +2573,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {
 			launchChild: async request => {
+				const effect = await runtime.store.getEffect(request.effectId);
+				expect(effect).toMatchObject({
+					effect_id: request.effectId, tool_call_id: request.toolCallId,
+					input_hash: request.inputHash, tool_name: "task", effect_kind: "tool", state: "started",
+					agent_instance_id: "parent-agent", attempt_id: "attempt-parent", command_id: "command-parent",
+				});
+				expect(request.toolName).toBe("task");
+				expect(request.parentAgentInstanceId).toBe("parent-agent");
+				expect(request.parentAttemptId).toBe("attempt-parent");
 				launches.push(request);
 				return {
 					agentInstanceId: `child-${request.toolCallId}`,
