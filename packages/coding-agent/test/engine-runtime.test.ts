@@ -1622,8 +1622,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect((await runEngineCommand(transport, enqueue("owned-pending-input", "owner", runtime.engineGeneration))).outcome)
 				.toBe("applied");
 			const [queued] = await runtime.store.listInboxItems(`pending:${agentInstanceId}`);
-			expect(queued).toMatchObject({ attemptId: binding.attemptId, bindingId: binding.bindingId,
-				bindingGeneration: binding.bindingGeneration, disposition: "pending" });
+			expect(queued).toMatchObject({ attemptId: binding.attemptId, binding_id: binding.bindingId,
+				binding_generation: binding.bindingGeneration, disposition: "pending" });
 			await admitRequest(runtime, startRequest(execution, {
 				commandId: "material-ready-start", agentInstanceId, agentInstanceRef,
 				executionId: "material-ready-execution", attemptId: "material-ready-attempt",
@@ -1688,7 +1688,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const original = await nativeSession(runtime, retained.sessionFile!);
 			const users = original.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
 			expect(users).toHaveLength(1);
-			expect(users[0]).toMatchObject({ sourceCommandId: request.commandId, message: { attribution: "user" } });
+			expect(users[0]).toMatchObject({
+				sourceCommandId: request.commandId, message: { attribution: "user" },
+				launchSnapshot: { schema: "engine.launch_snapshot.v2", agentInstanceId,
+					attemptId: request.attemptId, executionId: request.executionId,
+					executionDigest: retained.executionDigest, continuationDigest: retained.continuationDigest },
+			});
 			if (sourceType === "agent") expect(users[0]).not.toHaveProperty("clientMessageId");
 			else expect(users[0]).toHaveProperty("clientMessageId", first.item.sourceEventId);
 			expect(await admitRequest(runtime, request)).not.toHaveProperty("queueRevision");
@@ -1722,12 +1727,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const accepted = await admitRequest(runtime, await release("queued-accept-b", first.item));
 			await runtime.drain();
 			expect(mock.calls).toHaveLength(1);
-			const text = (message: (typeof mock.calls)[number]["context"]["messages"][number]) =>
-				typeof message.content === "string" ? message.content :
-					message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-			expect(mock.calls[0].context.messages.filter(message => message.role === "user" && text(message) === first.item.deliveryPayload))
-				.toHaveLength(1);
-			expect(JSON.stringify(mock.calls[0].context.messages).split("QUEUED_START_CONTEXT_ONCE")).toHaveLength(2);
+			const textParts = (message: (typeof mock.calls)[number]["context"]["messages"][number]) =>
+				typeof message.content === "string" ? [message.content] :
+					message.content.flatMap(part => part.type === "text" ? part.text : []);
+			expect(mock.calls[0].context.messages.filter(message => message.role === "user").flatMap(textParts)
+				.filter(text => text === first.item.deliveryPayload)).toEqual([first.item.deliveryPayload]);
+			expect(mock.calls[0].context.messages.filter(message => message.role === "developer").flatMap(textParts)
+				.filter(text => text === "QUEUED_START_CONTEXT_ONCE")).toEqual(["QUEUED_START_CONTEXT_ONCE"]);
 			expect(await runtime.store.getInboxItemByQueueId(first.item.queueId)).toMatchObject({
 				disposition: "acknowledged", revision: first.item.revision + 1, attemptId: accepted.attemptId,
 			});
@@ -1742,8 +1748,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const secondAccepted = await admitRequest(runtime, await release("queued-accept-c", second.item));
 			await runtime.drain();
 			expect(mock.calls).toHaveLength(2);
-			expect(mock.calls[1].context.messages.filter(message => message.role === "user" && text(message) === first.item.deliveryPayload))
-				.toHaveLength(2);
+			expect(mock.calls[1].context.messages.filter(message => message.role === "user").flatMap(textParts)
+				.filter(text => text === first.item.deliveryPayload)).toEqual([first.item.deliveryPayload, first.item.deliveryPayload]);
 			const final = await nativeSession(runtime, secondAccepted.sessionFile!);
 			const finalUsers = final.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
 			expect(finalUsers).toMatchObject([{ sourceCommandId: "queued-accept-a" }, { sourceCommandId: "queued-accept-c" }]);
@@ -2237,22 +2243,34 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 120_000);
 
 	it("starts one new Attempt from an immediate ordinary queue wake after the active Attempt settles", async () => {
-		const firstPrompt = Promise.withResolvers<boolean>();
-		const inputs: string[] = [];
-		const mock = createMockModel({ handler: { content: ["done"] } });
+		const firstPrompt = Promise.withResolvers<void>();
+		const firstEntered = Promise.withResolvers<void>();
+		let calls = 0;
+		const mock = createMockModel({ handler: async () => {
+			if (++calls === 1) {
+				firstEntered.resolve();
+				await firstPrompt.promise;
+			}
+			return { content: ["done"] };
+		} });
 		const execution = admittedExecution(mock.model, modelRegistry);
-		const { runtime, cwd } = await createRuntime(execution, async (_session, input) => {
-			inputs.push(input);
-			return inputs.length === 1 ? await firstPrompt.promise : true;
-		});
+		const { runtime, cwd } = await createRuntime(execution);
+		try {
 		const started = await admitRequest(runtime, startRequest(execution, {
 			commandId: "command-auto-queue-a", agentInstanceId: "agent-auto-queue",
 			agentInstanceRef: "grimoire://tasks/grimoire/auto-queue/agents/one",
 			executionId: "execution-auto-queue-a", attemptId: "attempt-auto-queue-a",
 		}, { cwd, principalId: "owner", input: "first" }));
+		await withTimeout(firstEntered.promise, 3_000, "First provider turn did not start");
 		const wakes: EngineEvent[] = [];
+		const firstWake = Promise.withResolvers<void>();
+		const secondWake = Promise.withResolvers<void>();
 		runtime.subscribe(event => {
-			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") {
+				wakes.push(event);
+				if (wakes.length === 1) firstWake.resolve();
+				if (wakes.length === 2) secondWake.resolve();
+			}
 		});
 		const queued = await runtime.enqueueInbox(started, {
 			sourceEventId: "ordinary-auto-queue",
@@ -2268,12 +2286,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			createdAt: Date.now(),
 			wakeIntent: true,
 		});
-		await Bun.sleep(100);
+		expect(await runtime.store.claimDueInboxWakes(runtime.engineGeneration)).toEqual([]);
 		expect(wakes).toHaveLength(0);
 
-		firstPrompt.resolve(true);
+		firstPrompt.resolve();
 		await runtime.drain();
-		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
+		await withTimeout(firstWake.promise, 3_000, "Settled Attempt did not publish its queue wake");
 		expect(wakes[0]?.payload).toEqual({
 			action: "wake_due",
 			queueId: queued.item.queueId,
@@ -2299,7 +2317,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		await expect(admitRequest(runtime, staleWake)).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.drain();
-		for (let remaining = 50; wakes.length < 2 && remaining > 0; remaining--) await Bun.sleep(25);
+		await withTimeout(secondWake.promise, 3_000, "Intervening Attempt did not publish the renewed queue wake");
 		expect(wakes[1]?.payload).toMatchObject({
 			queueId: queued.item.queueId,
 			revision: 3,
@@ -2344,12 +2362,26 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			disposition: "acknowledged",
 			revision: 4,
 		});
-		expect(inputs).toEqual([
-			"first",
-			"intervening direct Send",
-			"queued canonical body",
-		]);
-		await runtime.dispose();
+		expect(await runtime.store.getInboxItemByQueueId(queuedSecond.item.queueId)).toMatchObject({ disposition: "pending" });
+		expect(mock.calls).toHaveLength(3);
+		const providerParts = mock.calls[2].context.messages.flatMap(message => message.role !== "user" ? [] :
+			typeof message.content === "string" ? [message.content] :
+				message.content.flatMap(part => part.type === "text" ? part.text : []));
+		expect(providerParts.filter(text => text === queued.item.deliveryPayload)).toEqual([queued.item.deliveryPayload]);
+		expect(providerParts).not.toContain(queuedSecond.item.deliveryPayload);
+		const native = await nativeSession(runtime, next.sessionFile!);
+		expect(native.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user"))
+			.toMatchObject([
+				{ sourceCommandId: "command-auto-queue-a", message: { content: [{ type: "text", text: "first" }] } },
+				{ sourceCommandId: "command-auto-queue-intervening", message: { content: [{ type: "text", text: "intervening direct Send" }] } },
+				{ sourceCommandId: "command-auto-queue-b", clientMessageId: queued.item.sourceEventId,
+					message: { content: [{ type: "text", text: queued.item.deliveryPayload }] },
+					launchSnapshot: { attemptId: next.attemptId, executionId: next.executionId, executionDigest: next.executionDigest } },
+			]);
+		} finally {
+			firstPrompt.resolve();
+			await runtime.dispose();
+		}
 	}, 60_000);
 
 	it("binds hosted MCP tools to their own origin across legacy history, children and restart, without fallback", async () => {

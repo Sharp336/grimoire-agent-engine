@@ -12,6 +12,10 @@ import {
 	writeFileWithFallback,
 } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 
+// These cases require Unix mode-bit denial; Windows chmod does not establish it,
+// and privileged Unix users bypass it. Injected denials and portable filesystem cases still run.
+const unixKernelDenialUnavailable = process.platform === "win32" || process.getuid?.() === 0;
+
 /** Mimics a Node/Bun filesystem error with a structured `code`, without touching a real fs. */
 function fsError(code: string, message = `${code}: simulated`): NodeJS.ErrnoException {
 	const error = new Error(message) as NodeJS.ErrnoException;
@@ -77,7 +81,7 @@ describe("writeFileWithFallback", () => {
 
 		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
 
-		expect(seen).toEqual([{ dst: "/denied/path.txt", content: "payload" }]);
+		expect(seen).toEqual([{ dst: path.resolve("/denied/path.txt"), content: "payload" }]);
 	});
 
 	it("names the session that issued the write, and reports none outside a tool call", async () => {
@@ -238,10 +242,7 @@ describe("writeFileWithFallback", () => {
 		expect(calls).toBe(1);
 	});
 
-	// A privileged user is not constrained by mode bits, so `chmod 0o500` denies
-	// nothing and every expectation here would fail for a reason unrelated to this
-	// seam. Root is real for a Docker-based local run and for a self-hosted runner.
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	describe("real filesystem boundaries", () => {
 		let root = "";
 
 		beforeEach(async () => {
@@ -265,7 +266,7 @@ describe("writeFileWithFallback", () => {
 			return dir;
 		}
 
-		it("diverts a real EACCES from creating a file in an unwritable directory", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("diverts a real EACCES from creating a file in an unwritable directory", async () => {
 			const dst = path.join(await lockedDir(), "new.txt");
 			const seen: Array<{ dst: string; content: string; code: unknown }> = [];
 			disposers.push(
@@ -280,7 +281,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
 			// Bun's write creates missing parents itself and, when that mkdir is denied,
 			// surfaces the open()'s ENOENT instead of the denial. Without unmasking, a
 			// sandboxed write into a new out-of-tree directory never reaches a handler.
@@ -298,7 +299,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("attaches the recovered denial as `cause` when no handler takes the write", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("attaches the recovered denial as `cause` when no handler takes the write", async () => {
 			// The thrown error stays the ENOENT Bun reported, so behaviour matches a host
 			// with no fallback registered. But this code has already proven the real
 			// boundary is EACCES, and discarding that would hand the caller back exactly
@@ -312,7 +313,7 @@ describe("writeFileWithFallback", () => {
 			});
 		});
 
-		it("leaves an ENOENT alone when a path component is a file rather than a directory", async () => {
+		it("does not broker a write through a file used as a parent directory", async () => {
 			const blocker = path.join(root, "blocker");
 			await Bun.write(blocker, "not a directory");
 			let called = false;
@@ -323,13 +324,15 @@ describe("writeFileWithFallback", () => {
 				}),
 			);
 
-			await expect(writeFileWithFallback(path.join(blocker, "child.txt"), "payload")).rejects.toMatchObject({
-				code: expect.stringMatching(/^(ENOTDIR|ENOENT)$/),
-			});
+			const error = await writeFileWithFallback(path.join(blocker, "child.txt"), "payload")
+				.then(() => undefined, cause => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect(isPermissionDeniedError(error)).toBe(false);
 			expect(called).toBe(false);
+			expect(await fs.readFile(blocker, "utf8")).toBe("not a directory");
 		});
 
-		it("brokers the RESOLVED target for a write through a symlink", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("brokers the RESOLVED target for a write through a symlink", async () => {
 			// The escape this closes: the agent creates a link inside a directory the
 			// sandbox permits, pointing at a target it does not. The in-process write
 			// follows the link, so the kernel denied the TARGET — but a handler given
@@ -367,7 +370,7 @@ describe("writeFileWithFallback", () => {
 			}
 		});
 
-		it("resolves a symlinked ANCESTOR, not just a link at the last component", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("resolves a symlinked ANCESTOR, not just a link at the last component", async () => {
 			// `lstat(dst)` alone judges only the final component, so `ws/link/file` under
 			// a `ws/link -> /outside` link is a lexically innocent path whose bytes land
 			// outside. Every component above the last is followed by the kernel, so the
@@ -402,7 +405,7 @@ describe("writeFileWithFallback", () => {
 			}
 		});
 
-		it("refuses to broker a write through a dangling symlink", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("refuses to broker a write through a dangling symlink", async () => {
 			// `realpath` cannot name where a dangling link points, and the write follows
 			// it, so there is no destination to hand a privileged writer. Refusing is the
 			// only honest answer, and it is the one `confineToWorkspace` already gives.
@@ -426,7 +429,7 @@ describe("writeFileWithFallback", () => {
 			expect(called).toBe(false);
 		});
 
-		it("refuses to broker a write whose own metadata is behind the boundary", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("refuses to broker a write whose own metadata is behind the boundary", async () => {
 			// A sandbox that denies the write often hides the target's metadata too, so
 			// the final component cannot be shown to be a plain name rather than a link —
 			// and `open` follows a link there. The delete seam keeps working in this shape
@@ -456,7 +459,7 @@ describe("writeFileWithFallback", () => {
 
 	// `apply_patch` creates a missing parent before writing, so a denial there used
 	// to throw before the write — and therefore before the seam — was ever reached.
-	describe.skipIf(process.getuid?.() === 0)("apply_patch into a denied new directory", () => {
+	describe.skipIf(unixKernelDenialUnavailable)("apply_patch into a denied new directory", () => {
 		let root = "";
 		let locked = "";
 
@@ -573,7 +576,7 @@ describe("deleteFileWithFallback", () => {
 		expect(writeCalled).toBe(false);
 	});
 
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	describe("real filesystem boundaries", () => {
 		let root = "";
 		let locked = "";
 
@@ -596,7 +599,7 @@ describe("deleteFileWithFallback", () => {
 			return target;
 		}
 
-		it("diverts a real denied unlink to a registered handler, naming its session", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("diverts a real denied unlink to a registered handler, naming its session", async () => {
 			const target = await lockedFile();
 			const seen: Array<{ dst: string; code: unknown; sessionId: string | undefined }> = [];
 			disposers.push(
@@ -613,7 +616,7 @@ describe("deleteFileWithFallback", () => {
 			]);
 		});
 
-		it("rethrows the ORIGINAL error when the handler declines", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("rethrows the ORIGINAL error when the handler declines", async () => {
 			const target = await lockedFile();
 			disposers.push(addFileDeleteFallback(async () => false));
 
@@ -622,7 +625,7 @@ describe("deleteFileWithFallback", () => {
 			});
 		});
 
-		it("refuses to divert a directory it can confirm, reporting confirmedFile on files", async () => {
+		it("refuses to divert a directory it can confirm", async () => {
 			// On Darwin `unlink` on a directory fails EPERM, which by code alone looks
 			// exactly like a sandbox denial. Brokering it would ask a privileged deleter
 			// to remove a whole directory for a tool that only ever removes one file.
@@ -636,12 +639,17 @@ describe("deleteFileWithFallback", () => {
 				}),
 			);
 
-			await expect(deleteFileWithFallback(dir)).rejects.toMatchObject({
-				code: expect.stringMatching(/^(EPERM|EISDIR)$/),
-			});
+			await expect(deleteFileWithFallback(dir)).rejects.toBeInstanceOf(Error);
 			expect(seen).toEqual([]);
 			expect((await fs.lstat(dir)).isDirectory()).toBe(true);
+		});
 
+		it.skipIf(unixKernelDenialUnavailable)("reports confirmedFile for a denied file unlink", async () => {
+			const seen: boolean[] = [];
+			disposers.push(addFileDeleteFallback(async req => {
+				seen.push(req.confirmedFile);
+				return true;
+			}));
 			// A file under a directory that denies the unlink but still permits lstat
 			// resolves the check, so the handler is told the target is a real file.
 			const target = await lockedFile("confirmed.txt");
@@ -649,7 +657,7 @@ describe("deleteFileWithFallback", () => {
 			expect(seen).toEqual([true]);
 		});
 
-		it("still diverts, unresolved, when the target's own metadata is denied", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("still diverts, unresolved, when the target's own metadata is denied", async () => {
 			// A sandbox that denies the unlink usually denies the metadata too, so the
 			// directory check cannot run. The write must still reach a handler — that is
 			// the whole point of the seam — but the handler has to be TOLD the check was
@@ -676,9 +684,8 @@ describe("deleteFileWithFallback", () => {
 			}
 		});
 
-		it("rethrows a non-permission lstat failure rather than diverting", async () => {
-			// `ENOTDIR` from a path component that is a file is a genuinely bad path, not
-			// a boundary, so the seam must not paper over it by consulting a handler.
+		it("does not broker a delete through a file used as a parent directory", async () => {
+			// A bad path is not a permission boundary, regardless of the platform's errno.
 			const blocker = path.join(root, "not-a-dir");
 			await Bun.write(blocker, "payload");
 			let called = false;
@@ -689,13 +696,14 @@ describe("deleteFileWithFallback", () => {
 				}),
 			);
 
-			await expect(deleteFileWithFallback(path.join(blocker, "child.txt"))).rejects.toMatchObject({
-				code: "ENOTDIR",
-			});
+			const error = await deleteFileWithFallback(path.join(blocker, "child.txt")).then(() => undefined, cause => cause);
+			expect(error).toBeInstanceOf(Error);
+			expect(isPermissionDeniedError(error)).toBe(false);
 			expect(called).toBe(false);
+			expect(await fs.readFile(blocker, "utf8")).toBe("payload");
 		});
 
-		it("resolves a symlinked ANCESTOR before brokering a delete", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("resolves a symlinked ANCESTOR before brokering a delete", async () => {
 			// `unlink` follows every component above the last, so a link in the path
 			// removes a file outside the allowed root while the lexical path still looks
 			// contained. The handler must be told which file actually disappears.
@@ -727,7 +735,7 @@ describe("deleteFileWithFallback", () => {
 			}
 		});
 
-		it("leaves the LAST component unresolved, reporting confirmedFile false for a link", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("leaves the LAST component unresolved, reporting confirmedFile false for a link", async () => {
 			// `unlink` removes the link itself, so resolving the final component would
 			// name the wrong file. Diverting is still right — unlinking a link is a
 			// legitimate file removal — but a handler that realpaths `dst` for auditing,
@@ -756,7 +764,7 @@ describe("deleteFileWithFallback", () => {
 			expect(await Bun.file(path.join(targetDir, "keep.txt")).text()).toBe("keep me");
 		});
 
-		it("diverts a denied unlink issued through a BunFile handle", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("diverts a denied unlink issued through a BunFile handle", async () => {
 			// `LspFileSystem.delete` is the only caller that passes a `BunFile`, and it is
 			// covered only transitively, so the `file.unlink()` branch would otherwise
 			// never be exercised directly.
@@ -774,7 +782,7 @@ describe("deleteFileWithFallback", () => {
 			expect(seen).toEqual([target]);
 		});
 
-		it("routes an apply_patch delete op through the seam", async () => {
+		it.skipIf(unixKernelDenialUnavailable)("routes an apply_patch delete op through the seam", async () => {
 			const target = await lockedFile("doomed.txt");
 			const removed: string[] = [];
 			disposers.push(

@@ -163,7 +163,9 @@ describe("executeReplace — oldText/newText propagation", () => {
 		expect(result.details?.path).toBe(path.join(tempDir, "bar.txt"));
 		expect(result.details?.oldText).toBe(originalContent);
 		expect(result.details?.newText).toBe("line one\nline TWO\nline three\n");
-		expect(await fs.readFile(path.join(tempDir, "bar.txt"), "utf8")).toBe(result.details?.newText);
+		const written = result.details?.newText;
+		if (typeof written !== "string") throw new Error("Replacement omitted its written content");
+		expect(await fs.readFile(path.join(tempDir, "bar.txt"), "utf8")).toBe(written);
 		const text = result.content.find(entry => entry.type === "text")?.text ?? "";
 		expect(text).toContain("[bar.txt]\n1:line one\n2:line TWO\n3:line three");
 		expect(text).not.toMatch(/^\[[^\]\n]+#[0-9A-F]{4}\]/);
