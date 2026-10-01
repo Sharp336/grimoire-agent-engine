@@ -361,7 +361,7 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 			const terminated: Array<Record<string, unknown>> = [];
 			const subscription = client.subscribe(
 				`$JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.${ENGINE_COMMAND_STREAM}.engine_${adapter.engineRoute}`,
-				{ callback: (_error, message) => terminated.push(JSON.parse(new TextDecoder().decode(message.data))) },
+				{ callback: (_error, message) => { terminated.push(JSON.parse(new TextDecoder().decode(message.data))); } },
 			);
 			await client.flush();
 			queued.push(conflict, next);
