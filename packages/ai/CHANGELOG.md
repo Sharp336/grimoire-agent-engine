@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Partial Responses usage retains each reported bucket, including explicit zeros on failed responses; missing input/output remains unavailable rather than dropping all accounting.
 - Codex Responses marks missing usage as unavailable on initial responses and internal retries; a provider-reported zero remains measured zero.
 - OpenAI-compatible streams now enforce bounded ingress and provider-event budgets during SSE parsing.
 - A stream admission overflow no longer throws into the provider that pushed the event; the stream fails and the admission signal aborts out of band, so no producer leaks an unhandled rejection.

@@ -51,7 +51,6 @@ import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/to
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
-	FetchImpl,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -274,8 +273,9 @@ export interface SessionMaintenanceHost {
 	sideStreamFn: StreamFn;
 	/** Owner admission for one compaction/handoff pass; its credentials are resolved inside. */
 	sideRequest<T>(work: () => Promise<T>): Promise<T>;
-	/** Recorded fetch for provider-native compaction; undefined keeps the provider default. */
-	sideFetch(model: Model): FetchImpl | undefined;
+	sideAdmission(): Promise<void>;
+	/** Owner of each whole remote request, including parsing its usage. */
+	sideRemoteRequest?: SummaryOptions["remoteRequest"];
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
@@ -2077,6 +2077,7 @@ export class SessionMaintenance {
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
+		await this.#host.sideAdmission();
 		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
@@ -2140,18 +2141,12 @@ export class SessionMaintenance {
 		);
 	}
 
-	/** A managed session's recorded provider fetch; empty elsewhere so provider defaults stay. */
-	#sideFetchOption(model: Model): Pick<SummaryOptions, "fetch"> {
-		const fetch = this.#host.sideFetch(model);
-		return fetch ? { fetch } : {};
-	}
-
-	/** A managed session's compaction transport: summaries via the side stream, native calls via recorded fetch. */
-	#sideRequestTransport(model: Model): Pick<SummaryOptions, "fetch" | "completeImpl"> {
-		const fetch = this.#host.sideFetch(model);
-		if (!fetch) return {};
+	/** Managed remote and summary calls share the owner boundary, not a header-only fetch scope. */
+	#sideRequestTransport(): Pick<SummaryOptions, "remoteRequest" | "completeImpl"> {
+		const remoteRequest = this.#host.sideRemoteRequest;
+		if (!remoteRequest) return {};
 		return {
-			fetch,
+			remoteRequest,
 			completeImpl: async (requestModel, requestContext, requestOptions) => {
 				const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 				return stream.result();
@@ -2172,6 +2167,7 @@ export class SessionMaintenance {
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
+			await this.#host.sideAdmission();
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
 			if (
@@ -2217,7 +2213,7 @@ export class SessionMaintenance {
 							return stream.result();
 						},
 						// Provider-native compaction calls fetch directly; a managed session records it.
-						...this.#sideFetchOption(candidate),
+						...this.#sideRequestTransport(),
 					},
 				);
 			} catch (error) {
@@ -3405,6 +3401,7 @@ export class SessionMaintenance {
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
+					await this.#host.sideAdmission();
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (!apiKey) continue;
 					if (
@@ -3451,7 +3448,7 @@ export class SessionMaintenance {
 									// A managed session sends the summary through its side stream and
 									// provider-native compaction through its recorded fetch; otherwise
 									// both keep the provider defaults.
-									...this.#sideRequestTransport(candidate),
+									...this.#sideRequestTransport(),
 								},
 							);
 							break;

@@ -56,6 +56,25 @@ import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } fr
 import { Tokenizer } from "../tokenizer";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
+/** Accounting read by the actual response parser, before projecting away the provider body. */
+export interface RemoteCompactionAccounting {
+	usage: Record<string, unknown>;
+	api: "responses" | "completions";
+	responseId?: string;
+}
+
+export interface RemoteCompactionTransport {
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+	onUsage?: (accounting: RemoteCompactionAccounting) => void;
+}
+
+/** Encloses credential resolution, transport, body parsing and durable accounting as one call. */
+export type RemoteCompactionCall = <T>(
+	model: Model,
+	work: (transport: RemoteCompactionTransport) => Promise<T>,
+) => Promise<T>;
+
 export * from "./compaction-v2-streaming";
 
 // ============================================================================
@@ -768,6 +787,7 @@ export async function requestOpenAiRemoteCompaction(
 		sessionId?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
+		onUsage?: RemoteCompactionTransport["onUsage"];
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
@@ -860,6 +880,10 @@ export async function requestOpenAiRemoteCompaction(
 
 	if (!response.ok) {
 		const cause = await captureOpenAIHttpError(response);
+		const body = cause.captured.bodyJson;
+		if (isRecord(body) && isRecord(body.usage))
+			opts?.onUsage?.({ api: "responses", usage: body.usage,
+				...(typeof body.id === "string" ? { responseId: body.id } : {}) });
 		logger.warn("OpenAI remote compaction failed", {
 			endpoint,
 			status: response.status,
@@ -876,7 +900,8 @@ export async function requestOpenAiRemoteCompaction(
 		);
 	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
+	const data = (await response.json()) as { output?: unknown[]; usage?: unknown; id?: string } | undefined;
+	if (isRecord(data?.usage)) opts?.onUsage?.({ api: "responses", usage: data.usage, responseId: data.id });
 	const rawOutput = data?.output ?? [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
@@ -923,7 +948,7 @@ export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string; onUsage?: RemoteCompactionTransport["onUsage"] },
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -958,7 +983,12 @@ export async function requestRemoteCompaction(
 	});
 
 	if (!response.ok) {
-		const errorText = await response.text().catch(() => "");
+		const captured = await captureOpenAIHttpError(response);
+		const errorText = captured.captured.bodyText ?? "";
+		const body = captured.captured.bodyJson;
+		if (isChatCompletions && isRecord(body) && isRecord(body.usage))
+			opts?.onUsage?.({ api: "completions", usage: body.usage,
+				...(typeof body.id === "string" ? { responseId: body.id } : {}) });
 		logger.warn("Remote compaction failed", {
 			endpoint,
 			status: response.status,
@@ -981,8 +1011,11 @@ export async function requestRemoteCompaction(
 					content?: string | Array<{ type?: string; text?: string }> | null;
 				};
 			}>;
+			usage?: Record<string, unknown>;
+			id?: string;
 		};
 		const data = (await response.json()) as ChatCompletionsResponse | undefined;
+		if (isRecord(data?.usage)) opts?.onUsage?.({ api: "completions", usage: data.usage, responseId: data.id });
 		const choice = data?.choices?.[0]?.message?.content;
 		let summary: string | undefined;
 		if (typeof choice === "string") {

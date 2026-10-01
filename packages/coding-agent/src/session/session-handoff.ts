@@ -43,6 +43,7 @@ export interface SessionHandoffHost {
 	sideStreamFn: StreamFn;
 	/** Owner admission for the handoff request; its credentials are resolved inside. */
 	sideRequest<T>(work: () => Promise<T>): Promise<T>;
+	sideAdmission(): Promise<void>;
 	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -127,6 +128,7 @@ export class SessionHandoff {
 			if (!model) {
 				throw new Error("No model selected for handoff");
 			}
+			await this.#host.sideAdmission();
 			const apiKey = await this.#host.modelRegistry.getApiKey(model, this.#host.sessionId());
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);

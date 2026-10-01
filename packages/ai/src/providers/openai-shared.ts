@@ -3672,7 +3672,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 
 /** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
 export function populateResponsesUsageFromResponse(
-	output: AssistantMessage,
+	output: Pick<AssistantMessage, "usage">,
 	usage:
 		| {
 				input_tokens?: number | null;
@@ -3694,11 +3694,11 @@ export function populateResponsesUsageFromResponse(
 		| null
 		| undefined,
 ): void {
-	if (!usage || typeof usage.input_tokens !== "number" || typeof usage.output_tokens !== "number") return;
+	if (!usage) return;
 	const details = usage.input_tokens_details;
 	const outputDetails = usage.output_tokens_details;
-	const reportedInputTokens = usage.input_tokens ?? 0;
-	const reportedOutputTokens = usage.output_tokens ?? 0;
+	const reportedInputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+	const reportedOutputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
 	const reportedCachedTokens = details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
 	const orchestrationInputTokens = details?.orchestration_input_tokens ?? 0;
 	const orchestrationInputCachedTokens = details?.orchestration_input_cached_tokens ?? 0;
@@ -3739,7 +3739,9 @@ export function populateResponsesUsageFromResponse(
 	// this call with no later chance to re-apply.
 	const premiumRequests = output.usage.premiumRequests;
 	// Only buckets present on the wire are reported; an explicit 0 counts, an absent field never does.
-	const reportedFields: NonNullable<AssistantMessage["usage"]["reportedFields"]> = ["input", "output"];
+	const reportedFields: NonNullable<AssistantMessage["usage"]["reportedFields"]> = [];
+	if (typeof usage.input_tokens === "number") reportedFields.push("input");
+	if (typeof usage.output_tokens === "number") reportedFields.push("output");
 	if (typeof details?.cached_tokens === "number" || typeof usage.prompt_cache_hit_tokens === "number")
 		reportedFields.push("cacheRead");
 	if (typeof details?.cache_write_tokens === "number" || typeof usage.prompt_cache_miss_tokens === "number")
@@ -3748,6 +3750,7 @@ export function populateResponsesUsageFromResponse(
 	output.usage = {
 		...accounting,
 		reportedFields,
+		...(typeof usage.input_tokens !== "number" || typeof usage.output_tokens !== "number" ? { unavailable: true } : {}),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	if (premiumRequests !== undefined) {

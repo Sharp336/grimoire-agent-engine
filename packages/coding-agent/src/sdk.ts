@@ -12,13 +12,16 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
+import type { RemoteCompactionCall, RemoteCompactionAccounting } from "@oh-my-pi/pi-agent-core/compaction";
+import { parseChunkUsage } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { populateResponsesUsageFromResponse } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
 	AssistantMessage,
-	AssistantMessageEventStream,
+	AssistantMessageEvent,
 	Context,
 	CredentialDisabledEvent,
 	Effort,
-	FetchImpl,
 	Message,
 	Model,
 	ModelUsageHealth,
@@ -26,6 +29,7 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
@@ -661,10 +665,16 @@ export interface ProviderRequestHook {
 	wrapRequest?(model: Model, request: PhysicalRequest): Promise<number | null>;
 }
 
+/** Accounting projection, not an invented assistant response for provider-native compaction. */
+export type SideModelUsage = Pick<AssistantMessage,
+	"model" | "provider" | "usage" | "responseId" | "stopReason" | "errorMessage">;
+
 /** Owner boundary for model requests outside the agent loop: compaction, handoff, summaries, side turns. */
 export interface SideRequestBoundary {
-	/** One side operation, admitted before it resolves any credential; credentials are resolved inside. */
+	/** Current-binding ownership scope, including purely local maintenance. */
 	run<T>(work: () => Promise<T>): Promise<T>;
+	/** Check current provider authority before resolving a side-request credential. */
+	admit(): Promise<void>;
 	/**
 	 * One side model call as its own recorded model effect. `signal` cancels it with the
 	 * owner; `message` yields the settled message whose reported usage the effect keeps.
@@ -672,7 +682,7 @@ export interface SideRequestBoundary {
 	call<T>(
 		model: Model,
 		work: (signal: AbortSignal) => Promise<T>,
-		message?: (value: T) => AssistantMessage | undefined,
+		message?: (value: T) => SideModelUsage | undefined,
 	): Promise<T>;
 }
 
@@ -3433,44 +3443,73 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Side model calls (compaction, handoff, summaries, side turns) are each their own owner
 		// effect: the provider request starts inside it and its settled message carries the usage.
 		const sideRequests = providerRequestHook ? options.sideRequests : undefined;
-		// Fetches handed out below are already their own side effects. Compaction threads the same
-		// option into its summary stream, which must then use the raw transport under its own effect.
-		const sideFetches = new WeakSet<FetchImpl>();
 		const sideStreamFn: StreamFn = sideRequests
-			? (streamModel, context, streamOptions) =>
-					new Promise<AssistantMessageEventStream>((resolve, reject) => {
-						sideRequests
-							.call(
-								streamModel,
-								async signal => {
-									const stream = await providerAwareStreamFn(streamModel, context, {
-										...streamOptions,
-										...(streamOptions?.fetch && sideFetches.has(streamOptions.fetch) ? { fetch: undefined } : {}),
-										signal: streamOptions?.signal ? AbortSignal.any([streamOptions.signal, signal]) : signal,
-									});
-									resolve(stream);
-									return await stream.result();
-								},
-								message => message,
-							)
-							.catch(reject);
-					})
+			? (streamModel, context, streamOptions) => {
+					const exposed = new AssistantMessageEventStream();
+					let terminal: Extract<AssistantMessageEvent, { type: "done" | "error" }> | undefined;
+					void sideRequests.call(streamModel, async signal => {
+						const stream = await providerAwareStreamFn(streamModel, context, {
+							...streamOptions,
+							signal: streamOptions?.signal ? AbortSignal.any([streamOptions.signal, signal]) : signal,
+						});
+						exposed.forwardLocalWorkFrom(stream);
+						for await (const event of stream) {
+							if (event.type === "done" || event.type === "error") terminal = event;
+							else exposed.push(event);
+						}
+						return await stream.result();
+					}, message => message).then(message => {
+						// Deltas remain live. A terminal event and result become visible only after
+						// the owner has committed the model effect, including its usage.
+						exposed.forwardLocalWorkFrom(undefined);
+						if (terminal) exposed.push(terminal);
+						exposed.end(message);
+					}, error => {
+						exposed.forwardLocalWorkFrom(undefined);
+						exposed.fail(error);
+					});
+					return exposed;
+				}
 			: providerAwareStreamFn;
-		// Direct provider fetches outside a stream (remote/native compaction) take the same path.
-		const sideFetch =
-			sideRequests && providerRequestHook
-				? (requestModel: Model): FetchImpl => {
-						const fetch: FetchImpl = (input, init) =>
-							sideRequests.call(requestModel, signal =>
-								providerRequestHook.wrapFetch(requestModel, globalThis.fetch)(input, {
-									...init,
-									signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
-								}),
-							);
-						sideFetches.add(fetch);
-						return fetch;
-					}
-				: undefined;
+		const sideRemoteRequest: RemoteCompactionCall | undefined = sideRequests && providerRequestHook
+			? async (requestModel, work) => {
+					let usage: SideModelUsage | undefined;
+					const outcome = await sideRequests.call(requestModel, async signal => {
+						const observedFetch = providerRequestHook.wrapFetch(requestModel, globalThis.fetch);
+						const onUsage = (reported: RemoteCompactionAccounting) => {
+							const output = { usage: parseChunkUsage({}, requestModel as Model<"openai-completions">, undefined) };
+							if (reported.api === "completions")
+								output.usage = parseChunkUsage(reported.usage, requestModel as Model<"openai-completions">, undefined);
+							else populateResponsesUsageFromResponse(output, reported.usage);
+							calculateCost(requestModel, output.usage);
+							usage = { model: requestModel.id, provider: requestModel.provider,
+								usage: output.usage, responseId: reported.responseId, stopReason: "stop" };
+						};
+						try {
+							const value = await work({
+								signal, onUsage,
+								fetch: (input, init) => {
+									// A retry cannot inherit the previous physical response's accounting.
+									usage = undefined;
+									return observedFetch(input, {
+										...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+									});
+								},
+							});
+							return { ok: true as const, value };
+						} catch (error) {
+							usage = {
+								model: requestModel.id, provider: requestModel.provider,
+								usage: parseChunkUsage({}, requestModel as Model<"openai-completions">, undefined),
+								...usage, stopReason: "error",
+							};
+							return { ok: false as const, error };
+						}
+					}, () => usage);
+					if (!outcome.ok) throw outcome.error;
+					return outcome.value;
+				}
+			: undefined;
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3645,7 +3684,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			onPayload,
 			onResponse,
 			sideStreamFn,
-			...(sideRequests ? { sideRequest: sideRequests.run.bind(sideRequests), sideFetch } : {}),
+			...(sideRequests ? {
+				sideRequest: sideRequests.run.bind(sideRequests),
+				sideAdmission: sideRequests.admit.bind(sideRequests),
+				sideRemoteRequest,
+			} : {}),
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,

@@ -47,6 +47,7 @@ import {
 import {
 	type CompactionPreparation,
 	type CompactionResult,
+	type RemoteCompactionCall,
 	calculatePromptTokens,
 	collectEntriesForBranchSummary,
 	generateBranchSummary,
@@ -56,7 +57,6 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	CodexCompactionContext,
-	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
@@ -612,7 +612,8 @@ export class AgentSession {
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	#sideStreamFn: StreamFn;
 	#sideRequest: <T>(work: () => Promise<T>) => Promise<T>;
-	#sideFetch: ((model: Model) => FetchImpl) | undefined;
+	#sideAdmission: () => Promise<void>;
+	#sideRemoteRequest: RemoteCompactionCall | undefined;
 	#preferWebsockets: boolean | undefined;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
@@ -1111,7 +1112,8 @@ export class AgentSession {
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#sideRequest = config.sideRequest ?? (work => work());
-		this.#sideFetch = config.sideFetch;
+		this.#sideAdmission = config.sideAdmission ?? (async () => {});
+		this.#sideRemoteRequest = config.sideRemoteRequest;
 		this.#preferWebsockets = config.preferWebsockets;
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
@@ -1400,7 +1402,8 @@ export class AgentSession {
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			sideRequest: work => this.#sideRequest(work),
-			sideFetch: model => this.#sideFetch?.(model),
+			sideAdmission: () => this.#sideAdmission(),
+			sideRemoteRequest: this.#sideRemoteRequest,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: this.#preferWebsockets,
 			model: () => this.model,
@@ -1462,6 +1465,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			sideStreamFn: this.#sideStreamFn,
 			sideRequest: work => this.#sideRequest(work),
+			sideAdmission: () => this.#sideAdmission(),
 			obfuscator: this.#obfuscator,
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
@@ -8430,6 +8434,7 @@ export class AgentSession {
 			const model = this.model!;
 			const signal = this.#branchSummaryAbortController.signal;
 			const result = await this.#sideRequest(async () => {
+				await this.#sideAdmission();
 				const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 				if (!apiKey) {
 					throw new Error(`No API key for ${model.provider}`);

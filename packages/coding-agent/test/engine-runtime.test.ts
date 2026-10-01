@@ -49,6 +49,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { StorageClientError, storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
+import { ProviderAdmissionClient } from "../src/engine/provider-admission";
 import { Database } from "bun:sqlite";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
@@ -1942,6 +1943,217 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		await runtime.dispose();
 	}, 60_000);
+
+	it.each(["manual", "automatic"] as const)("records %s remote compaction through its actual body parser", async mode => {
+		const mock = createMockModel({
+			baseUrl: "https://compact.invalid/v1",
+			handler: { content: ["answer ".repeat(1_000)], usage: { input: 10_000, output: 20, totalTokens: 10_020 } },
+		});
+		mock.model.remoteCompaction = {
+			enabled: true, api: "openai-responses",
+			endpoint: "https://compact.invalid/v1/responses/compact", v2StreamingEnabled: false,
+		};
+		const execution = admittedExecution(mock.model, modelRegistry);
+		const settings = Settings.isolated({
+			"compaction.enabled": mode === "automatic",
+			"compaction.asyncEnabled": false,
+			"compaction.methodOrder": ["remote"],
+			"compaction.thresholdPercent": 1,
+			"compaction.keepRecentTokens": 1,
+			"compaction.autoContinue": false,
+		});
+		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
+		let requests = 0;
+		const fetch = spyOn(globalThis, "fetch").mockImplementation((async input => {
+			expect(String(input)).toBe("https://compact.invalid/v1/responses/compact");
+			requests++;
+			return Response.json({
+				id: "remote-usage",
+				output: [{ type: "compaction", encrypted_content: "fixture-compact" }],
+				usage: { input_tokens: 100, output_tokens: 0, total_tokens: 100,
+					input_tokens_details: { cached_tokens: 20 } },
+			});
+		}) as typeof globalThis.fetch);
+		const { runtime, cwd } = await createRuntime(execution, async (session, input) => {
+			await session.prompt(input);
+			if (mode === "manual") await session.compact(undefined, { mode: "remote" });
+			return true;
+		}, {
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+				resolved.options.settings = settings;
+				const route = config.routes.routes[0]!;
+				resolved.options.providerRequestHook = new ProviderAdmissionClient(
+					"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+				).createHook(undefined, auth, "", [{
+					...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+					providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+					credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+					modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+				}]);
+				return resolved;
+			},
+		});
+		try {
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: `compact-${mode}`, agentInstanceId: `compact-${mode}`,
+				agentInstanceRef: `grimoire://tasks/grimoire/compact/agents/${mode}`,
+				executionId: `compact-execution-${mode}`, attemptId: `compact-attempt-${mode}`,
+			}, { cwd, principalId: "owner", input: "history ".repeat(2_000) }));
+			await runtime.drain();
+			expect(requests).toBe(1);
+			const events = await runtime.store.pendingEvents();
+			const consumed = events.filter(event => event.kind === "model_settled" &&
+				Array.isArray(event.payload?.requests) && event.payload.requests.length > 0);
+			expect(consumed).toHaveLength(1);
+			expect(consumed[0]?.payload).toMatchObject({
+				requests: [{ ordinal: 1, state: "responded" }],
+				usage: { ordinal: 1, providerResponseId: "remote-usage",
+					tokens: { input: 80, output: 0, cacheRead: 20, cacheWrite: null, reasoning: null } },
+			});
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		} finally {
+			await runtime.dispose();
+			fetch.mockRestore();
+		}
+	}, 30_000);
+
+	it("compacts a terminal session locally without resolving credentials or reopening provider work", async () => {
+		const mock = createMockModel({ handler: { content: ["retained answer ".repeat(2_000)] } });
+		mock.model.input = ["text", "image"];
+		const execution = admittedExecution(mock.model, modelRegistry);
+		execution.setModelOverride({ settings: Settings.isolated({
+			"compaction.enabled": false,
+			"compaction.methodOrder": ["snapcompact"],
+			"compaction.keepRecentTokens": 1,
+		}) });
+		const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input));
+		try {
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "idle-local-compact", agentInstanceId: "idle-local-compact",
+				agentInstanceRef: "grimoire://tasks/grimoire/side/agents/local",
+				executionId: "idle-local-execution", attemptId: "idle-local-attempt",
+			}, { cwd, principalId: "owner", input: "retain this history ".repeat(2_000) }));
+			await runtime.drain();
+			const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+			const key = spyOn(session.modelRegistry, "getApiKey").mockImplementation(async () => {
+				throw new Error("Idle local compaction resolved a credential");
+			});
+			try {
+				await runtime.compact(started);
+				const compacted = session.sessionManager.getContextBranch().findLast(entry => entry.type === "compaction");
+				expect(compacted?.type).toBe("compaction");
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+				expect(mock.calls).toHaveLength(1);
+				await expect(session.runEphemeralTurn({ promptText: "not admitted" })).rejects.toThrow("active Attempt");
+				expect(key).not.toHaveBeenCalled();
+			} finally {
+				key.mockRestore();
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	}, 30_000);
+
+	it.each(["complete", "cancel", "write_failure"] as const)(
+		"keeps streamed side results and Attempt %s behind durable model settlement", async mode => {
+			const dispatchEntered = Promise.withResolvers<void>();
+			const finishPrompt = Promise.withResolvers<boolean>();
+			const settling = Promise.withResolvers<void>();
+			const commit = Promise.withResolvers<void>();
+			const mock = createMockModel({
+				baseUrl: "https://side.invalid/v1",
+				handler: async (_context, options) => {
+					if (!options?.fetch) throw new Error("Side transport was not installed");
+					await options.fetch("https://side.invalid/v1/completions");
+					return { content: ["side answer"], usage: {
+						input: 4, output: 2, reportedFields: ["input", "output"],
+					} };
+				},
+			});
+			const execution = admittedExecution(mock.model, modelRegistry);
+			const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
+			const provider = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("ok")) as typeof fetch);
+			const { runtime, cwd } = await createRuntime(execution, async () => {
+				dispatchEntered.resolve();
+				return await finishPrompt.promise;
+			}, {
+				resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+					const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+					const route = config.routes.routes[0]!;
+					resolved.options.providerRequestHook = new ProviderAdmissionClient(
+						"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+					).createHook(undefined, auth, "", [{
+						...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+						providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+						credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+						modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+					}]);
+					return resolved;
+				},
+			});
+			const settle = runtime.store.settleModelEffect.bind(runtime.store);
+			const delayed = spyOn(runtime.store, "settleModelEffect").mockImplementation(async (...args) => {
+				const effect = await runtime.store.getEffect(args[1].effectId);
+				if (effect?.requests?.length) {
+					settling.resolve();
+					await commit.promise;
+					if (mode === "write_failure") throw new Error("side settlement storage failed");
+				}
+				return await settle(...args);
+			});
+			try {
+				const started = await admitRequest(runtime, startRequest(execution, {
+					commandId: `side-${mode}`, agentInstanceId: `side-${mode}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/side/agents/${mode}`,
+					executionId: `side-execution-${mode}`, attemptId: `side-attempt-${mode}`,
+				}, { cwd, principalId: "owner", input: "primary" }));
+				await dispatchEntered.promise;
+				const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+				let visible = false;
+				const side = session.runEphemeralTurn({ promptText: "side" })
+					.then(value => { visible = true; return value; }, error => error);
+				await withTimeout(settling.promise, 5_000, "Side call did not reach native settlement");
+				expect(visible).toBe(false);
+				if (mode === "cancel") await runtime.cancel({ ...started, commandId: "cancel-side" });
+				finishPrompt.resolve(true);
+				await Bun.sleep(0);
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).not.toBe("completed");
+				expect((await runtime.store.pendingEvents()).some(event =>
+					event.kind === "model_settled" && Array.isArray(event.payload?.requests) &&
+					event.payload.requests.length > 0)).toBe(false);
+				commit.resolve();
+				const result = await side;
+				if (mode === "write_failure") expect(String(result)).toContain("side settlement storage failed");
+				else expect(result).toMatchObject({ replyText: "side answer" });
+				await runtime.drain().catch(error => {
+					if (mode !== "write_failure") throw error;
+					expect(error).toMatchObject({ name: "EngineEffectConflictError" });
+				});
+				if (mode === "write_failure") {
+					expect((await runtime.store.getAttempt(started.attemptId))?.state).not.toBe("completed");
+				} else {
+					expect((await runtime.store.getAttempt(started.attemptId))?.state)
+						.toBe(mode === "cancel" ? "cancelled" : "completed");
+					const events = await runtime.store.pendingEvents();
+					const fact = events.find(event => event.kind === "model_settled" &&
+						Array.isArray(event.payload?.requests) && event.payload.requests.length > 0);
+					expect(fact?.payload).toMatchObject({ usage: { tokens: { input: 4, output: 2, cacheRead: null } } });
+					const terminal = events.find(event => event.kind === (mode === "cancel" ? "cancelled" : "completed"));
+					expect(fact!.eventId).toBeLessThan(terminal!.eventId);
+				}
+			} finally {
+				commit.resolve();
+				finishPrompt.resolve(true);
+				delayed.mockRestore();
+				provider.mockRestore();
+				// The injected failure intentionally leaves an open effect for native recovery;
+				// shutdown may also reject its terminal transition, but must still close resources.
+				if (mode === "write_failure") await Promise.allSettled([runtime.dispose()]);
+				else await runtime.dispose();
+			}
+		}, 30_000,
+	);
 
 	it("records model dispatch certainty without exposing the prompt", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });

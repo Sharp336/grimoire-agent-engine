@@ -1,8 +1,8 @@
 import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { RemoteCompactionCall } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Context,
 	Effort,
-	FetchImpl,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -216,8 +216,10 @@ export interface AgentSessionConfig {
 	 * credentials are resolved inside. Unset outside a managed session.
 	 */
 	sideRequest?: <T>(work: () => Promise<T>) => Promise<T>;
-	/** Recorded provider fetch for side requests that bypass the stream (remote compaction). */
-	sideFetch?: (model: Model) => FetchImpl;
+	/** Provider authority check before side credential resolution; local work does not call it. */
+	sideAdmission?: () => Promise<void>;
+	/** Owns remote compaction through response parsing and durable accounting. */
+	sideRemoteRequest?: RemoteCompactionCall;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
 	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */

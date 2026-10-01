@@ -5,6 +5,7 @@
 ### Added
 
 - Embedded runtimes can supply an external agent loop while retaining native events and message state.
+- Compaction accepts an optional `remoteRequest` owner boundary spanning credential resolution, transport and body parsing. V2, nonstream Responses and chat-completions parsers report actual usage before discarding response bodies; V2 failed/incomplete responses preserve partial accounting without cloning responses.
 
 ### Fixed
 

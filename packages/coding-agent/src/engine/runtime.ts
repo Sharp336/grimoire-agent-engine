@@ -52,7 +52,7 @@ import engineContinuePrompt from "../prompts/system/engine-continue.md" with { t
 import historyEditContinuePrompt from "../prompts/system/history-edit-continue.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
-import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
+import { type CreateAgentSessionOptions, createAgentSession, type SideModelUsage } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BlobStore } from "../session/blob-store";
@@ -3109,11 +3109,16 @@ export class EngineRuntime {
 					const admitIntent = async (signal: AbortSignal | undefined) => {
 						if (!liveBinding) throw new Error("Provider boundary has no Engine binding");
 						markProviderLatency("intent_admission_start");
-						await this.#admitEffect(
-							liveBinding,
-							() => this.store.assertIntent(liveBinding!.agentInstanceId, undefined, true),
-							signal,
-						);
+						if (sideOperation.getStore() === liveBinding) {
+							signal?.throwIfAborted();
+							await this.#admitSideProvider(liveBinding);
+						} else {
+							await this.#admitEffect(
+								liveBinding,
+								() => this.store.assertIntent(liveBinding!.agentInstanceId, undefined, true),
+								signal,
+							);
+						}
 						markProviderLatency("intent_admission_done");
 					};
 					return {
@@ -3137,6 +3142,7 @@ export class EngineRuntime {
 				})(),
 				sideRequests: {
 					run: work => this.#sideOperation(liveBinding, work),
+					admit: () => this.#admitSideProvider(liveBinding),
 					call: (model, work, message) => this.#sideModelCall(liveBinding, model, work, message),
 				},
 				disableExtensionDiscovery: true,
@@ -4785,7 +4791,7 @@ export class EngineRuntime {
 	#modelUsage(
 		binding: LiveBinding,
 		effectId: string,
-		message: AssistantMessage | undefined,
+		message: SideModelUsage | undefined,
 		model: Model | undefined,
 	): Omit<ModelUsageFact, "ordinal"> | null {
 		const responded = binding.respondedRequests.get(effectId);
@@ -4951,7 +4957,10 @@ export class EngineRuntime {
 					withLspSessionScope(
 						{ shared: settings.get("lsp.shared"), ownerId: binding.engineAgentId, realm: "engine" },
 						() => withHelperCompletionBoundary({
-							run: work => this.#sideOperation(binding, work),
+							run: work => this.#sideOperation(binding, async () => {
+								await this.#admitSideProvider(binding);
+								return await work();
+							}),
 							complete: (model, context, options) => this.#helperCompletion(binding, model, context, options),
 						}, callback),
 					),
@@ -4959,68 +4968,90 @@ export class EngineRuntime {
 		);
 	}
 
-	/**
-	 * One side operation (compaction, handoff, summary, side turn, helper) of the active Attempt.
-	 * It is admitted before it resolves any credential, runs in its own observation context (so a
-	 * billing re-ask during credential resolution belongs to it and a request outside a side model
-	 * call is refused), and is tracked so the Attempt drains or cancels it before it ends.
-	 */
+	/** Ownership scope also covers purely local maintenance on an idle retained session. */
 	async #sideOperation<T>(binding: LiveBinding | undefined, work: () => Promise<T>): Promise<T> {
-		if (!binding) throw new Error("Side request has no Engine binding");
+		if (!binding || this.#bindings.get(binding.agentInstanceId) !== binding)
+			throw new EngineTargetError("stale_target", "Side operation binding is no longer current");
 		if (sideOperation.getStore() === binding) return await work();
+		return await this.#trackSideWork(binding, () => sideOperation.run(binding, () =>
+			withProviderObservationContext({ effectId: "side-operation", modelCallId: "side-operation" }, work)));
+	}
+
+	/** Admission is at the provider/credential leaf, not local snapshot maintenance. */
+	async #admitSideProvider(binding: LiveBinding | undefined): Promise<void> {
+		if (!binding || this.#bindings.get(binding.agentInstanceId) !== binding ||
+			TERMINAL_ATTEMPT_STATES.has(binding.attemptState))
+			throw new EngineTargetError("too_late", "Provider work needs an active Attempt");
 		if (binding.sideAttemptId !== binding.attemptId) {
 			binding.sideAttemptId = binding.attemptId;
 			binding.sideAbort = new AbortController();
 		}
-		const signal = binding.sideAbort.signal;
-		if (this.#bindings.get(binding.agentInstanceId) !== binding || signal.aborted ||
-			TERMINAL_ATTEMPT_STATES.has(binding.attemptState))
-			throw new EngineTargetError("too_late", "Side model requests need the active Attempt");
-		await this.#admitEffect(binding, () => this.store.assertIntent(binding.agentInstanceId, undefined, true), signal);
-		const running = sideOperation.run(binding, () =>
-			withProviderObservationContext({ effectId: "side-operation", modelCallId: "side-operation" }, work));
-		const settled = running.then(() => {}, () => {});
-		binding.sideRequests.add(settled);
-		binding.activeModelCalls.add(settled);
-		void settled.then(() => {
-			binding.sideRequests.delete(settled);
-			binding.activeModelCalls.delete(settled);
-		});
-		return await running;
+		binding.sideAbort.signal.throwIfAborted();
+		// A held side leaf refuses without taking the agent lane: teardown may own that lane
+		// while draining this operation. The primary turn owns pause/resume scheduling.
+		await this.store.assertIntent(binding.agentInstanceId, undefined, true);
+		const admitted = await this.store.runtimeCommand(binding.commandId, { principalId: binding.principalId });
+		const lease = admitted.lease as { held?: boolean; engineGeneration?: number } | undefined;
+		if (admitted.attemptId !== binding.attemptId || lease?.held !== true ||
+			lease.engineGeneration !== binding.engineGeneration || binding.engineGeneration !== this.engineGeneration)
+			throw new EngineTargetError("stale_target", "Side credential resolution requires the current admitted lease");
 	}
 
-	/** One side model call: its own recorded model effect inside the admitted side operation. */
+	/** Every model call stays registered through its final durable settlement, even inside a reused scope. */
+	async #trackSideWork<T>(binding: LiveBinding, work: () => Promise<T>): Promise<T> {
+		const done = Promise.withResolvers<void>();
+		binding.sideRequests.add(done.promise);
+		binding.activeModelCalls.add(done.promise);
+		try {
+			return await work();
+		} finally {
+			done.resolve();
+			binding.sideRequests.delete(done.promise);
+			binding.activeModelCalls.delete(done.promise);
+		}
+	}
+
 	#sideModelCall<T>(
 		binding: LiveBinding | undefined,
 		model: Model,
 		work: (signal: AbortSignal) => Promise<T>,
-		message?: (value: T) => AssistantMessage | undefined,
+		message?: (value: T) => SideModelUsage | undefined,
 	): Promise<T> {
-		return this.#sideOperation(binding, () => {
+		return this.#sideOperation(binding, () => this.#trackSideWork(binding!, async () => {
+			await this.#admitSideProvider(binding);
 			const live = binding!;
-			return this.#auxiliaryModelEffect(live, sha256(`side\0${model.provider}\0${model.id}`), model,
+			return await this.#auxiliaryModelEffect(live, sha256(`side\0${model.provider}\0${model.id}`), model,
 				() => work(live.sideAbort.signal), message);
-		});
+		}));
 	}
 
 	/** Cancel the Attempt's side operations and wait for them, so none writes after its fence. */
 	async #drainSideRequests(binding: LiveBinding): Promise<void> {
 		binding.sideAbort.abort(new EngineTargetError("cancelled", "The Attempt ended its side requests"));
-		await Promise.all(binding.sideRequests);
+		while (binding.sideRequests.size) await Promise.all(binding.sideRequests);
 	}
 
-	/**
-	 * A side model call is its own model effect of the same Attempt: admitted, with durable
-	 * physical request facts and settled usage priced with its own model. The effect opens at
-	 * its first physical request, so work that needs no provider request (local snapshot
-	 * compaction) is never blocked; a provider request without an admitted Attempt is refused.
-	 */
+	/** Match ordinary native write failure handling; provider refusals never enter this wrapper. */
+	async #sidePersistence<T>(binding: LiveBinding, write: () => Promise<T>): Promise<T> {
+		try {
+			return await write();
+		} catch (error) {
+			// Current-target refusal is not a broken storage write.
+			if (!(error instanceof EngineTargetError) && !(error instanceof StreamAdmissionError)) {
+				binding.messageWriteError ??= error;
+				binding.session.agent.abort(error);
+			}
+			throw error;
+		}
+	}
+
+	/** One side effect, kept open through transport parsing and durable settlement. */
 	async #auxiliaryModelEffect<T>(
 		binding: LiveBinding,
 		inputHash: string,
 		model: Model,
 		work: () => Promise<T>,
-		message: (value: T) => AssistantMessage | undefined = () => undefined,
+		message: (value: T) => SideModelUsage | undefined = () => undefined,
 	): Promise<T> {
 		const effect = this.#nextModelEffect(binding, inputHash);
 		const records = this.#requestRecord(binding);
@@ -5029,25 +5060,29 @@ export class EngineRuntime {
 		const record: ProviderRequestRecord = {
 			register: async (effectId, ordinal, frozen) => {
 				opening ??= (async () => {
-					const checkpoint = await this.#effectCheckpoint(binding);
-					this.#notifyEvents([await this.#admitEffect(binding,
-						() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), binding.sideAbort.signal)]);
+					const checkpoint = await this.#sidePersistence(binding, () => this.#effectCheckpoint(binding));
+					binding.sideAbort.signal.throwIfAborted();
+					this.#notifyEvents([await this.#sidePersistence(binding, () =>
+						this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint))]);
 					opened = true;
 				})();
 				await opening;
-				await records.register(effectId, ordinal, frozen);
+				await this.#sidePersistence(binding, () => records.register(effectId, ordinal, frozen));
 			},
-			settle: records.settle,
+			settle: (effectId, ordinal, state, statusCode) =>
+				this.#sidePersistence(binding, () => records.settle(effectId, ordinal, state, statusCode)),
 		};
 		let value: T;
 		try {
 			value = await withProviderObservationContext(effect, work, undefined, record);
 		} catch (error) {
 			if (opened) {
-				const checkpoint = binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
-				this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "failed",
-					(error instanceof Error ? error.message : String(error)).slice(0, 2_048), checkpoint,
-					this.#modelUsage(binding, effect.effectId, undefined, model))]);
+				await this.#sidePersistence(binding, async () => {
+					const checkpoint = binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
+					this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "failed",
+						(error instanceof Error ? error.message : String(error)).slice(0, 2_048), checkpoint,
+						this.#modelUsage(binding, effect.effectId, undefined, model))]);
+				});
 			}
 			throw error;
 		}
@@ -5055,10 +5090,12 @@ export class EngineRuntime {
 			const settled = message(value);
 			// A failed provider answer still carries the usage the provider reported for it.
 			const failed = settled?.stopReason === "error" || settled?.stopReason === "aborted";
-			const checkpoint = failed && binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
-			this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect,
-				failed ? "failed" : "completed", failed ? (settled?.errorMessage ?? "Model request failed").slice(0, 2_048) : undefined,
-				checkpoint, this.#modelUsage(binding, effect.effectId, settled, model))]);
+			await this.#sidePersistence(binding, async () => {
+				const checkpoint = failed && binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
+				this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect,
+					failed ? "failed" : "completed", failed ? (settled?.errorMessage ?? "Model request failed").slice(0, 2_048) : undefined,
+					checkpoint, this.#modelUsage(binding, effect.effectId, settled, model))]);
+			});
 		}
 		return value;
 	}
@@ -6019,6 +6056,7 @@ export class EngineRuntime {
 		beforeSessionDispose?: () => Promise<void>,
 		retainApproval = false,
 	): Promise<void> {
+		binding.sideAbort.abort(new EngineTargetError("cancelled", reason));
 		clearInterval(binding.leaseHeartbeat);
 		binding.leaseHeartbeat = undefined;
 		binding.session.beginDispose();
@@ -6042,6 +6080,7 @@ export class EngineRuntime {
 		await collectFailure(errors, () => binding.pauseGate.resume());
 		await collectFailure(errors, () => this.#notifyPauseProgress(binding));
 		if (abort) await collectFailure(errors, () => abort!);
+		await collectFailure(errors, () => this.#drainSideRequests(binding));
 		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
 		await collectFailure(errors, () => binding.mcpManager?.disconnectAll());

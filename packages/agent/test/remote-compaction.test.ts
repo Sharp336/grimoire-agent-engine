@@ -890,7 +890,12 @@ describe("requestCompactionV2Streaming", () => {
 		};
 
 		expect(shouldUseCompactionV2Streaming(model)).toBe(true);
-		const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+		let reportedUsage: Record<string, unknown> | undefined;
+		const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock, onUsage: reported => { reportedUsage = reported.usage; },
+		});
+		expect(reportedUsage).toMatchObject({ input_tokens: 123, output_tokens: 4,
+			input_tokens_details: { cached_tokens: 7 }, output_tokens_details: { reasoning_tokens: 1 } });
 
 		expect(sessionHeader).toBe("session-1");
 		expect(clientRequestHeader).toBe("session-1");
@@ -990,6 +995,26 @@ describe("requestCompactionV2Streaming", () => {
 		});
 
 		expect(attempts).toBe(2);
+	});
+
+	test("retains explicit partial usage from a failed V2 response before throwing", async () => {
+		const model = makeOpenAiModel({ remoteCompaction: {
+			enabled: true, v2StreamingEnabled: true, v2Endpoint: "https://compact.example/v1/responses",
+		} });
+		const request = buildCompactionV2Request(model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }], "instructions");
+		const usage: Array<Record<string, unknown>> = [];
+		await expect(requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: async () => sseResponse([{
+				type: "response.failed",
+				response: { id: "partial-response", usage: { input_tokens: 0 },
+					error: { code: "invalid_request", message: "rejected after input processing" } },
+			}]),
+			retryWait: async () => {},
+			onUsage: reported => { usage.push(reported.usage); },
+		})).rejects.toThrow();
+		expect(usage).toEqual([{ input_tokens: 0 }]);
+		expect(usage[0]?.output_tokens).toBeUndefined();
 	});
 
 	test("does not retry and preserves auth_unavailable from V2 HTTP failures", async () => {
@@ -1801,19 +1826,22 @@ describe("requestRemoteCompaction wire formats", () => {
 			const headers = new Headers(init.headers);
 			expect(headers.get("authorization")).toBe("Bearer local-key");
 			expect(headers.get("x-local-llama")).toBe("1");
-			return new Response(JSON.stringify({ choices: [{ message: { content: "remote summary" } }] }), {
+			return new Response(JSON.stringify({ choices: [{ message: { content: "remote summary" } }],
+				usage: { prompt_tokens: 31, completion_tokens: 0 } }), {
 				headers: { "content-type": "application/json" },
 			});
 		};
 
+		let reportedUsage: Record<string, unknown> | undefined;
 		const result = await requestRemoteCompaction(
 			"http://127.0.0.1:8001/v1/chat/completions",
 			{ systemPrompt: "summarize", prompt: "<conversation>hello</conversation>", maxTokens: 16_384 },
 			undefined,
-			{ fetch: fetchMock, model, apiKey: "local-key" },
+			{ fetch: fetchMock, model, apiKey: "local-key", onUsage: reported => { reportedUsage = reported.usage; } },
 		);
 
 		expect(result).toEqual({ summary: "remote summary" });
+		expect(reportedUsage).toEqual({ prompt_tokens: 31, completion_tokens: 0 });
 		expect(sentBody).toEqual({
 			model: "provider-compact-wire-id",
 			messages: [

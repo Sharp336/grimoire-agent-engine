@@ -51,6 +51,8 @@ import { type ConvertToLlm, createBranchSummaryMessage, createCustomMessage, def
 import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
+	type RemoteCompactionCall,
+	type RemoteCompactionTransport,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
@@ -652,10 +654,21 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
 	return /\btool_choice\b/i.test(message) && /\bauto\b/i.test(message) && /\bsupported\b/i.test(message);
 }
 
-/**
- * Generate a summary of the conversation using the LLM.
- * If previousSummary is provided, uses the update prompt to merge.
- */
+/** Run a whole remote request in its owner scope; preserve default transport outside Engine. */
+function runRemoteCompaction<T>(
+	options: SummaryOptions | undefined,
+	model: Model,
+	signal: AbortSignal | undefined,
+	work: (transport: RemoteCompactionTransport) => Promise<T>,
+): Promise<T> {
+	return options?.remoteRequest
+		? options.remoteRequest(model, transport => work({
+			...transport,
+			signal: signal && transport.signal ? AbortSignal.any([signal, transport.signal]) : signal ?? transport.signal,
+		}))
+		: work({ fetch: options?.fetch, signal });
+}
+
 export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
@@ -694,6 +707,8 @@ export interface SummaryOptions {
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/** Owns the entire remote call, through body parsing and accounting. */
+	remoteRequest?: RemoteCompactionCall;
 	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
@@ -965,17 +980,13 @@ async function summarizeConversationWindow(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
+		const remote = await runRemoteCompaction(options, model, signal, transport => withAuth(
 			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
+			key => requestRemoteCompaction(endpoint,
+				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+				transport.signal, { ...transport, model, apiKey: key }),
+			{ signal: transport.signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+		));
 		return remote.summary;
 	}
 
@@ -1176,17 +1187,13 @@ async function generateShortSummary(
 
 	if (options?.remoteEndpoint) {
 		const endpoint = options.remoteEndpoint;
-		const remote = await withAuth(
+		const remote = await runRemoteCompaction(options, model, signal, transport => withAuth(
 			apiKey,
-			key =>
-				requestRemoteCompaction(
-					endpoint,
-					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
-					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
-				),
-			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
-		);
+			key => requestRemoteCompaction(endpoint,
+				{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
+				transport.signal, { ...transport, model, apiKey: key }),
+			{ signal: transport.signal, missingKeyMessage: "Remote compaction credentials unavailable" },
+		));
 		return remote.summary;
 	}
 
@@ -1564,6 +1571,7 @@ export async function compact(
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
+		remoteRequest: options?.remoteRequest,
 		completeImpl: options?.completeImpl,
 	};
 
@@ -1633,17 +1641,16 @@ export async function compact(
 					promptCacheKey: summaryOptions.promptCacheKey,
 					retainedMessageBudget: settings.v2RetainedMessageBudget,
 				});
-				const remote = await withAuth(
+				const remote = await runRemoteCompaction(summaryOptions, model, signal, transport => withAuth(
 					apiKey,
-					key =>
-						requestCompactionV2Streaming(model, key, request, signal, {
-							fetch: summaryOptions.fetch,
-							providerSessionState: summaryOptions.providerSessionState,
-							preferWebsockets: summaryOptions.preferWebsockets,
-							codexCompaction: summaryOptions.codexCompaction,
-						}),
-					{ signal },
-				);
+					key => requestCompactionV2Streaming(model, key, request, transport.signal, {
+						...transport,
+						providerSessionState: summaryOptions.providerSessionState,
+						preferWebsockets: summaryOptions.preferWebsockets,
+						codexCompaction: summaryOptions.codexCompaction,
+					}),
+					{ signal: transport.signal },
+				));
 				preserveData = { ...(preserveData ?? {}), ...storeCompactionV2PreserveData(remote, model) };
 				usedRemoteCompaction = true;
 			} catch (err) {
@@ -1678,24 +1685,18 @@ export async function compact(
 		);
 		if (remoteHistory.length > 0) {
 			try {
-				const remote = await withAuth(
+				const remote = await runRemoteCompaction(summaryOptions, model, signal, transport => withAuth(
 					apiKey,
-					key =>
-						requestOpenAiRemoteCompaction(
-							model,
-							key,
-							remoteHistory,
-							summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
-							signal,
-							{
-								fetch: summaryOptions.fetch,
-								sessionId: summaryOptions.sessionId,
-								providerSessionState: summaryOptions.providerSessionState,
-								codexCompaction: summaryOptions.codexCompaction,
-							},
-						),
-					{ signal },
-				);
+					key => requestOpenAiRemoteCompaction(model, key, remoteHistory,
+						summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
+						transport.signal, {
+							...transport,
+							sessionId: summaryOptions.sessionId,
+							providerSessionState: summaryOptions.providerSessionState,
+							codexCompaction: summaryOptions.codexCompaction,
+						}),
+					{ signal: transport.signal },
+				));
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 				usedRemoteCompaction = true;
 			} catch (err) {

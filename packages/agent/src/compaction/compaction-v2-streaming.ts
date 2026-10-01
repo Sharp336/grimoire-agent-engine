@@ -32,6 +32,7 @@ import {
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, logger, stringifyJson } from "@oh-my-pi/pi-utils";
+import type { RemoteCompactionTransport } from "./openai";
 
 // ============================================================================
 // Types & Configuration
@@ -240,6 +241,7 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		onUsage?: RemoteCompactionTransport["onUsage"];
 	},
 ): Promise<CompactionV2Response> {
 	const endpoint = getCompactionV2Endpoint(model);
@@ -272,6 +274,7 @@ export async function requestCompactionV2Streaming(
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				onUsage: options?.onUsage,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
@@ -308,6 +311,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		onUsage?: RemoteCompactionTransport["onUsage"];
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -357,7 +361,7 @@ async function attemptCompactionV2Streaming(
 				implementation: "responses_compaction_v2",
 			}),
 		});
-		return collectCompactionV2Events(eventStream, request);
+		return collectCompactionV2Events(eventStream, request, options.onUsage);
 	}
 
 	const response = await fetchImpl(endpoint, {
@@ -369,6 +373,10 @@ async function attemptCompactionV2Streaming(
 
 	if (!response.ok) {
 		const cause = await captureOpenAIHttpError(response);
+		const errorBody = cause.captured.bodyJson;
+		if (isRecord(errorBody) && isRecord(errorBody.usage))
+			options.onUsage?.({ api: "responses", usage: errorBody.usage,
+				...(typeof errorBody.id === "string" ? { responseId: errorBody.id } : {}) });
 		logger.warn("V2 remote compaction failed", {
 			endpoint,
 			status: response.status,
@@ -385,7 +393,7 @@ async function attemptCompactionV2Streaming(
 		);
 	}
 
-	return collectCompactionV2Output(response, request);
+	return collectCompactionV2Output(response, request, options.onUsage);
 }
 
 function buildCompactionV2Headers(
@@ -440,22 +448,25 @@ interface CompactionV2CollectionState {
 	compactionItems: Array<Record<string, unknown>>;
 	sawCompleted: boolean;
 	usage: CompactionV2Usage | undefined;
+	onUsage?: RemoteCompactionTransport["onUsage"];
 }
 
-function createCompactionV2CollectionState(): CompactionV2CollectionState {
+function createCompactionV2CollectionState(onUsage?: RemoteCompactionTransport["onUsage"]): CompactionV2CollectionState {
 	return {
 		outputItemCount: 0,
 		compactionItems: [],
 		sawCompleted: false,
 		usage: undefined,
+		onUsage,
 	};
 }
 
 async function collectCompactionV2Events(
 	events: AsyncIterable<Record<string, unknown>>,
 	request: CompactionV2Request,
+	onUsage?: RemoteCompactionTransport["onUsage"],
 ): Promise<CompactionV2Response> {
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(onUsage);
 	for await (const event of events) {
 		handleCompactionV2Event(event, undefined, state);
 	}
@@ -465,13 +476,14 @@ async function collectCompactionV2Events(
 async function collectCompactionV2Output(
 	response: Response,
 	request: CompactionV2Request,
+	onUsage?: RemoteCompactionTransport["onUsage"],
 ): Promise<CompactionV2Response> {
 	const reader = response.body?.getReader();
 	if (!reader) {
 		throw new Error("No response body for V2 compaction streaming");
 	}
 
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(onUsage);
 	try {
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -570,6 +582,12 @@ function handleCompactionV2Event(
 	state: CompactionV2CollectionState,
 ): void {
 	const type = typeof event.type === "string" ? event.type : eventName;
+	if (["response.completed", "response.done", "response.failed", "response.incomplete"].includes(type ?? "")) {
+		const response = isRecord(event.response) ? event.response : undefined;
+		if (response && isRecord(response.usage))
+			state.onUsage?.({ api: "responses", usage: response.usage,
+				...(typeof response.id === "string" ? { responseId: response.id } : {}) });
+	}
 	if (type === "response.output_item.done") {
 		state.outputItemCount++;
 		const item = event.item;
