@@ -124,6 +124,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 	});
 
 	afterAll(() => {
+		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 
@@ -134,7 +135,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		{ requested: ["read", "hub"], enableIrc: undefined, depth: 0, allowed: false },
 	])("keeps restricted SDK hub admission within its explicit IRC ceiling: %j", async fixture => {
 		const { session } = await createAgentSession({
-			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: fixture.requested,
+			...baseOptions(makeTempDir()), restrictToolNames: true, toolNames: [...fixture.requested],
 			enableIrc: fixture.enableIrc,
 			settings: Settings.isolated({ "task.maxRecursionDepth": fixture.depth }),
 		});

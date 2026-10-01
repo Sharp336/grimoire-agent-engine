@@ -1258,7 +1258,7 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			await store.commitAttemptTransition(parent, "running", [], {
 				inboxSessionId: newSession, pendingInboxSourceSessionId: oldSession,
 			});
-			await store.commitAttemptTransition({ ...parent, state: "paused" }, "paused", [{ kind: "paused" }]);
+			await store.commitAttemptTransition({ ...parent, state: "idle" }, "paused", [{ kind: "paused" }]);
 			expect(await store.nextInboxWakeAt(parent.engineGeneration)).toBeUndefined();
 			expect(await store.claimDueInboxWakes(parent.engineGeneration, Date.now() + 60_000)).toEqual([]);
 			expect(await store.getInboxItem(newSession, queued.item.queueId)).toMatchObject({
