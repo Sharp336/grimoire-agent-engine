@@ -15333,7 +15333,6 @@
           "type": "object"
         },
         "content": {
-          "maxLength": 16000,
           "minLength": 1,
           "type": "string"
         },
@@ -17227,7 +17226,6 @@
           "type": "object"
         },
         "content": {
-          "maxLength": 16000,
           "minLength": 1,
           "type": "string"
         },
