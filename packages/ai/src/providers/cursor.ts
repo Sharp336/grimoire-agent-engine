@@ -4541,6 +4541,8 @@ export function processInteractionUpdate(
 		usageState.sawTokenDelta = true;
 		output.usage.output += tokenDelta.tokens || 0;
 		output.usage.totalTokens = output.usage.input + output.usage.output;
+		// Cursor streams output token counts only; input and cache buckets stay unreported.
+		output.usage.reportedFields = ["output"];
 	}
 }
 

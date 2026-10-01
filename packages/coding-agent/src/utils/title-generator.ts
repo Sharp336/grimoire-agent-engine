@@ -12,7 +12,7 @@ import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { helperCompletion } from "../session/helper-completion";
+import { helperCompletion, helperEnabled, runHelper } from "../session/helper-completion";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
@@ -226,6 +226,8 @@ export async function generateTitleOnline(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 ): Promise<string | null> {
+	// A managed session's schema-default online helper never resolves a model or credential.
+	if (!helperEnabled(settings, "providers.tinyModel")) return null;
 	const model = getTitleModel(registry, settings, currentModel);
 	if (!model) {
 		logger.warn("title-generator: no title model found", { sessionId, reason: "no-title-model" });
@@ -250,46 +252,46 @@ export async function generateTitleOnline(
 	logger.debug("title-generator: start", modelContext);
 
 	try {
-		const apiKey = await registry.getApiKey(model, sessionId);
-		if (!apiKey) {
-			logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
-			return null;
-		}
-		// Resolve metadata after getApiKey so the session-sticky credential for this
-		// request is already recorded; metadataResolver can then return the correct
-		// account_uuid rather than the snapshot-at-call-site value.
-		const metadata = metadataResolver?.(model.provider);
-
 		// Title generation is a 3-7 word task, but the ceiling has to survive
 		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
 		const maxTokens = TITLE_MAX_TOKENS;
-		logger.debug("title-generator: request", { ...modelContext, maxTokens });
-
-		const response = await retryTransientCompletion(
-			() =>
-				helperCompletion(
-					settings,
-					"providers.tinyModel",
-					model,
-					{
-						systemPrompt,
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-					},
-					{
-						apiKey: registry.resolver(model, sessionId),
-						maxTokens,
-						disableReasoning: true,
-						// Greedy decode: titling is extraction, not generation. Backends that
-						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
-						// from the message ("hashline" → "HasHroshi"). Providers whose models
-						// reject sampling params drop this via `supportsSamplingParams`.
-						temperature: 0,
-						metadata,
-						signal,
-					},
-				),
-			{ signal },
-		);
+		const response = await runHelper(settings, "providers.tinyModel", async () => {
+			const apiKey = await registry.getApiKey(model, sessionId);
+			if (!apiKey) {
+				logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
+				return null;
+			}
+			// Resolve metadata after getApiKey so the session-sticky credential for this
+			// request is already recorded; metadataResolver can then return the correct
+			// account_uuid rather than the snapshot-at-call-site value.
+			const metadata = metadataResolver?.(model.provider);
+			logger.debug("title-generator: request", { ...modelContext, maxTokens });
+			return await retryTransientCompletion(
+				() =>
+					helperCompletion(
+						"providers.tinyModel",
+						model,
+						{
+							systemPrompt,
+							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						},
+						{
+							apiKey: registry.resolver(model, sessionId),
+							maxTokens,
+							disableReasoning: true,
+							// Greedy decode: titling is extraction, not generation. Backends that
+							// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+							// from the message ("hashline" → "HasHroshi"). Providers whose models
+							// reject sampling params drop this via `supportsSamplingParams`.
+							temperature: 0,
+							metadata,
+							signal,
+						},
+					),
+				{ signal },
+			);
+		});
+		if (!response) return null;
 
 		if (response.stopReason === "error") {
 			logger.warn("title-generator: response error", {

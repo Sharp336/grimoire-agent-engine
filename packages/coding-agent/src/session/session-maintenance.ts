@@ -48,7 +48,14 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	CodexCompactionContext,
+	FetchImpl,
+	Message,
+	Model,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -242,6 +249,21 @@ function handoffSummaryFromDocument(
 	};
 }
 
+/** Options of one automatic compaction pass. */
+export interface AutoCompactionOptions {
+	autoContinue?: boolean;
+	triggerContextTokens?: number;
+	suppressContinuation?: boolean;
+	phase?: CodexCompactionContext["phase"];
+	terminalTextAnswer?: boolean;
+	/** Mid-turn: splice history then return; do not await UI/extension fan-out. */
+	detachPostCommit?: boolean;
+	/** Index to resume from after an earlier preferred method failed. */
+	methodIndex?: number;
+	/** A preceding shake already rewrote history before this fallback attempt. */
+	fallbackFromShake?: boolean;
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionMaintenanceHost {
 	agent: Agent;
@@ -250,6 +272,10 @@ export interface SessionMaintenanceHost {
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
+	/** Owner admission for one compaction/handoff pass; its credentials are resolved inside. */
+	sideRequest<T>(work: () => Promise<T>): Promise<T>;
+	/** Recorded fetch for provider-native compaction; undefined keeps the provider default. */
+	sideFetch(model: Model): FetchImpl | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	preferWebsockets: boolean | undefined;
 	model(): Model | undefined;
@@ -697,7 +723,11 @@ export class SessionMaintenance {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 * @param options Optional callbacks for completion/error handling
 	 */
-	async compact(
+	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
+		return this.#host.sideRequest(() => this.#compact(customInstructions, options));
+	}
+
+	async #compact(
 		customInstructions?: string,
 		options?: CompactOptions,
 		methodOffset = 0,
@@ -796,7 +826,7 @@ export class SessionMaintenance {
 					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
 					"compaction",
 				);
-				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
+				return await this.#compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
 			}
 			const pathEntries = this.#host.sessionManager.getContextBranch();
 			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
@@ -1060,7 +1090,7 @@ export class SessionMaintenance {
 					`${methods[selectedMethodIndex]} compaction failed; trying the next preferred method`,
 					"compaction",
 				);
-				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
+				return await this.#compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
 			}
 			options?.onError?.(err);
 			throw error;
@@ -1203,7 +1233,7 @@ export class SessionMaintenance {
 		const controller = new AbortController();
 		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
 		this.#speculation = run;
-		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
+		run.promise = this.#host.sideRequest(() => this.#runSpeculation(run, method, contextTokens)).catch(error => {
 			logger.debug("Speculative compaction failed", {
 				method,
 				error: error instanceof Error ? error.message : String(error),
@@ -2110,6 +2140,25 @@ export class SessionMaintenance {
 		);
 	}
 
+	/** A managed session's recorded provider fetch; empty elsewhere so provider defaults stay. */
+	#sideFetchOption(model: Model): Pick<SummaryOptions, "fetch"> {
+		const fetch = this.#host.sideFetch(model);
+		return fetch ? { fetch } : {};
+	}
+
+	/** A managed session's compaction transport: summaries via the side stream, native calls via recorded fetch. */
+	#sideRequestTransport(model: Model): Pick<SummaryOptions, "fetch" | "completeImpl"> {
+		const fetch = this.#host.sideFetch(model);
+		if (!fetch) return {};
+		return {
+			fetch,
+			completeImpl: async (requestModel, requestContext, requestOptions) => {
+				const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+				return stream.result();
+			},
+		};
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -2167,6 +2216,8 @@ export class SessionMaintenance {
 							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 							return stream.result();
 						},
+						// Provider-native compaction calls fetch directly; a managed session records it.
+						...this.#sideFetchOption(candidate),
 					},
 				);
 			} catch (error) {
@@ -2774,24 +2825,23 @@ export class SessionMaintenance {
 	 *   complete the handoff before the next agent turn begins.
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
-	async runAutoCompaction(
+	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
-		options: {
-			autoContinue?: boolean;
-			triggerContextTokens?: number;
-			suppressContinuation?: boolean;
-			phase?: CodexCompactionContext["phase"];
-			terminalTextAnswer?: boolean;
-			/** Mid-turn: splice history then return; do not await UI/extension fan-out. */
-			detachPostCommit?: boolean;
-			/** Index to resume from after an earlier preferred method failed. */
-			methodIndex?: number;
-			/** A preceding shake already rewrote history before this fallback attempt. */
-			fallbackFromShake?: boolean;
-		} = {},
+		options: AutoCompactionOptions = {},
+	): Promise<CompactionCheckResult> {
+		return this.#host.sideRequest(() =>
+			this.#runAutoCompaction(reason, willRetry, deferred, allowDefer, options));
+	}
+
+	async #runAutoCompaction(
+		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		willRetry: boolean,
+		deferred: boolean,
+		allowDefer: boolean,
+		options: AutoCompactionOptions,
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
@@ -3398,6 +3448,10 @@ export class SessionMaintenance {
 									// retry too — the budgets would multiply and each outer
 									// wait would stack on top of an inner backoff.
 									oneshotRetry: false,
+									// A managed session sends the summary through its side stream and
+									// provider-native compaction through its recorded fetch; otherwise
+									// both keep the provider defaults.
+									...this.#sideRequestTransport(candidate),
 								},
 							);
 							break;

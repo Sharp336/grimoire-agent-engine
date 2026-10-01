@@ -41,6 +41,8 @@ export interface SessionHandoffHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sideStreamFn: StreamFn;
+	/** Owner admission for the handoff request; its credentials are resolved inside. */
+	sideRequest<T>(work: () => Promise<T>): Promise<T>;
 	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
@@ -89,7 +91,14 @@ export class SessionHandoff {
 	 * @returns The handoff document text, or undefined when an auto-triggered
 	 *   generation produced no content (manual generation throws instead)
 	 */
-	async generateDocument(
+	generateDocument(
+		customInstructions?: string,
+		options?: SessionHandoffOptions,
+	): Promise<HandoffResult | undefined> {
+		return this.#host.sideRequest(() => this.#generateDocument(customInstructions, options));
+	}
+
+	async #generateDocument(
 		customInstructions?: string,
 		options?: SessionHandoffOptions,
 	): Promise<HandoffResult | undefined> {

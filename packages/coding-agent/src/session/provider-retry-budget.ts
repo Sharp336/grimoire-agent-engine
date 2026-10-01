@@ -74,7 +74,7 @@ export function withProviderRetryBudget<T>(maxAttempts: number, callback: () => 
  * Compose the Engine retry budget below a host admission hook. Admission runs
  * first; only a fetch that reaches the provider consumes the shared budget.
  */
-export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): ProviderRequestHook {
+export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Required<ProviderRequestHook> {
 	return {
 		wrapFetch(model: Model, fetch: Fetch): Fetch {
 			const state = providerRetryBudget.getStore();
@@ -171,7 +171,8 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 					`exhausted after ${state.maxAttempts} physical requests`,
 				);
 			}
-			return inner ? await inner.wrapRequest(model, budgeted) : await budgeted.send();
+			// A fetch-only inner hook does not observe this transport; the request keeps its own path.
+			return inner?.wrapRequest ? await inner.wrapRequest(model, budgeted) : await budgeted.send();
 		},
 	};
 }

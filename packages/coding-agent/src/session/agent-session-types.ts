@@ -2,6 +2,7 @@ import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@o
 import type {
 	Context,
 	Effort,
+	FetchImpl,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -210,6 +211,13 @@ export interface AgentSessionConfig {
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
+	/**
+	 * Owner admission for one side operation (compaction, handoff, summary, side turn); its
+	 * credentials are resolved inside. Unset outside a managed session.
+	 */
+	sideRequest?: <T>(work: () => Promise<T>) => Promise<T>;
+	/** Recorded provider fetch for side requests that bypass the stream (remote compaction). */
+	sideFetch?: (model: Model) => FetchImpl;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
 	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */

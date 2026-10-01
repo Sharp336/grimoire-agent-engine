@@ -748,34 +748,95 @@ describe("ProviderAdmissionClient", () => {
 			baseUrl: "https://api2.cursor.sh",
 		};
 		let admissions = 0;
+		let denyNext = false;
 		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
-			if (JSON.parse(String(init?.body)).phase === "before") admissions += 1;
-			return Response.json({ allowed: true });
+			if (JSON.parse(String(init?.body)).phase !== "before") return Response.json({ allowed: true });
+			admissions += 1;
+			if (!denyNext) return Response.json({ allowed: true });
+			denyNext = false;
+			return Response.json({ allowed: false, status: "provider_quota_exhausted" });
 		}).createHook(undefined, {} as AuthStorage, "", [route]);
 		const routeModel = { id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model;
 		let sends = 0;
+		const h2 = (send: () => Promise<number | null>) =>
+			hook.wrapRequest(routeModel, { url: "https://api2.cursor.sh/agent.v1.AgentService/Run", send });
 		const { requests, record } = recorder();
 		await withProviderObservationContext({ effectId: "model_effect_h2", modelCallId: "model-h2" }, async () => {
-			const status = await hook.wrapRequest(routeModel, {
-				url: "https://api2.cursor.sh/agent.v1.AgentService/Run",
-				send: async () => {
-					sends += 1;
-					return 200;
-				},
-			});
-			expect(status).toBe(200);
-			await expect(hook.wrapRequest(routeModel, {
-				url: "https://api2.cursor.sh/agent.v1.AgentService/Run",
-				send: async () => {
-					sends += 1;
-					throw new Error("stream killed mid-flight");
-				},
+			expect(await h2(async () => {
+				sends += 1;
+				return 200;
+			})).toBe(200);
+			// A quota denial refuses before any record or HTTP/2 stream is opened.
+			denyNext = true;
+			await expect(h2(async () => {
+				sends += 1;
+				return 200;
+			})).rejects.toMatchObject({ code: "provider_quota_exhausted" });
+			// Material refused inside the transport never reached the provider.
+			await expect(h2(async () => {
+				throw new ProviderExecutionError("provider_execution_denied", "material refused before the stream");
+			})).rejects.toBeInstanceOf(ProviderExecutionError);
+			await expect(h2(async () => {
+				sends += 1;
+				throw new Error("stream killed mid-flight");
 			})).rejects.toThrow("stream killed");
+			// Off-boundary h2 egress is refused like any fetch.
+			await expect(hook.wrapRequest(routeModel, { url: "https://cursor.com/api/other", send: async () => 200 }))
+				.rejects.toMatchObject({ code: "provider_egress_unadmitted" });
 		}, undefined, record);
-		expect({ admissions, sends }).toEqual({ admissions: 2, sends: 2 });
+		expect({ admissions, sends }).toEqual({ admissions: 4, sends: 2 });
 		expect(requests.map(({ ordinal, state, statusCode }) => ({ ordinal, state, statusCode }))).toEqual([
 			{ ordinal: 1, state: "responded", statusCode: 200 },
-			{ ordinal: 2, state: "send_unknown", statusCode: null },
+			{ ordinal: 2, state: "not_sent", statusCode: null },
+			{ ordinal: 3, state: "send_unknown", statusCode: null },
+		]);
+	});
+
+	it("serializes durable registration so concurrent requests never share an ordinal", async () => {
+		const route = {
+			...identity(),
+			providerAccountRef: "gctx:4444444444444444",
+			routeRef: "gctx:5555555555555555",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		// Both requests pass admission before the first durable write finishes.
+		const bothAdmitted = Promise.withResolvers<void>();
+		let admitted = 0;
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
+			if (JSON.parse(String(init?.body)).phase === "before" && ++admitted === 2) bothAdmitted.resolve();
+			return Response.json({ allowed: true });
+		}).createHook(undefined, {} as AuthStorage, "", [route]);
+		const wrapped = hook.wrapFetch(
+			{ id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model,
+			async () => new Response("ok"),
+		);
+		// A slow durable write: the second request (speculative compaction beside the turn) arrives meanwhile.
+		const { requests, record } = recorder();
+		const firstWrite = Promise.withResolvers<void>();
+		let writes = 0;
+		const slow: ProviderRequestRecord = {
+			register: async (effectId, ordinal, frozen) => {
+				if (++writes === 1) await firstWrite.promise;
+				await record.register(effectId, ordinal, frozen);
+			},
+			settle: record.settle,
+		};
+		await withProviderObservationContext({ effectId: "model_effect_parallel", modelCallId: "model-p" }, async () => {
+			const both = Promise.all([
+				wrapped("https://cheapai.invalid/v1/chat/completions"),
+				wrapped("https://cheapai.invalid/v1/chat/completions"),
+			]);
+			await bothAdmitted.promise;
+			await Bun.sleep(0);
+			firstWrite.resolve();
+			await both;
+		}, undefined, slow);
+		expect(requests.map(({ ordinal, state }) => ({ ordinal, state }))).toEqual([
+			{ ordinal: 1, state: "responded" },
+			{ ordinal: 2, state: "responded" },
 		]);
 	});
 });

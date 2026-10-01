@@ -3,16 +3,16 @@ import { type AssistantMessage, type Context, completeSimple, type Model, type S
 import type { Settings } from "../config/settings";
 import type { SettingPath } from "../config/settings-schema";
 
-/**
- * Managed-Engine executor for auxiliary helper completions. It runs an admitted
- * helper as an ordinary model effect of the current Attempt, or returns
- * undefined (no egress) when the model is not one of the Attempt's admitted routes.
- */
-export type HelperCompletionExecutor = (
-	model: Model,
-	context: Context,
-	options: SimpleStreamOptions,
-) => Promise<AssistantMessage | undefined>;
+/** Managed-Engine boundary for auxiliary helper completions of the current Attempt. */
+export interface HelperCompletionBoundary {
+	/** Admits one helper run before it resolves a model or credential; both happen inside. */
+	run<T>(work: () => Promise<T>): Promise<T>;
+	/**
+	 * Completes as an ordinary recorded model effect when `model` is one of the Attempt's
+	 * admitted routes; otherwise returns undefined without any request.
+	 */
+	complete(model: Model, context: Context, options: SimpleStreamOptions): Promise<AssistantMessage | undefined>;
+}
 
 /** A managed helper produced no result and made no provider request; callers take their no-result path. */
 export class HelperCompletionUnavailableError extends Error {
@@ -24,30 +24,51 @@ export class HelperCompletionUnavailableError extends Error {
 	}
 }
 
-const helperCompletionExecutor = new AsyncLocalStorage<HelperCompletionExecutor>();
+const helperCompletionBoundary = new AsyncLocalStorage<HelperCompletionBoundary>();
 
 /** Engine sessions scope every session operation so auxiliary helpers can never egress on their own. */
-export function withHelperCompletionExecutor<T>(executor: HelperCompletionExecutor, callback: () => T): T {
-	return helperCompletionExecutor.run(executor, callback);
+export function withHelperCompletionBoundary<T>(boundary: HelperCompletionBoundary, callback: () => T): T {
+	return helperCompletionBoundary.run(boundary, callback);
 }
 
 /**
- * Auxiliary helper completion. Outside a managed Engine session this is plain
- * `completeSimple`. Inside one, an unconfigured (schema-default) helper setting
- * makes no request, and an explicitly configured one runs only through the
- * Engine executor. No result throws {@link HelperCompletionUnavailableError},
- * which every helper already handles as its existing no-result path.
+ * Whether a helper may run. Outside a managed Engine session it always may; inside one only
+ * an explicitly configured setting may, because the schema-default online helpers are ambient.
+ * Callers check this before resolving any model or credential.
+ */
+export function helperEnabled(settings: Pick<Settings, "isConfigured">, setting: SettingPath): boolean {
+	return !helperCompletionBoundary.getStore() || settings.isConfigured(setting);
+}
+
+/**
+ * Runs a helper's model resolution, credential lookup and request. A disabled helper throws
+ * {@link HelperCompletionUnavailableError} before any of them; a managed one runs inside the
+ * owner's admission so a credential refresh or billing transition never precedes it.
+ */
+export async function runHelper<T>(
+	settings: Pick<Settings, "isConfigured">,
+	setting: SettingPath,
+	work: () => Promise<T>,
+): Promise<T> {
+	if (!helperEnabled(settings, setting)) throw new HelperCompletionUnavailableError(setting);
+	const boundary = helperCompletionBoundary.getStore();
+	return boundary ? await boundary.run(work) : await work();
+}
+
+/**
+ * The helper's model completion. Outside a managed session this is plain `completeSimple`;
+ * inside one it is the boundary's recorded effect, and no result throws
+ * {@link HelperCompletionUnavailableError}, which every helper handles as its no-result path.
  */
 export async function helperCompletion(
-	settings: Pick<Settings, "isConfigured">,
 	setting: SettingPath,
 	model: Model,
 	context: Context,
 	options: SimpleStreamOptions,
 ): Promise<AssistantMessage> {
-	const executor = helperCompletionExecutor.getStore();
-	if (!executor) return await completeSimple(model, context, options);
-	const message = settings.isConfigured(setting) ? await executor(model, context, options) : undefined;
+	const boundary = helperCompletionBoundary.getStore();
+	if (!boundary) return await completeSimple(model, context, options);
+	const message = await boundary.complete(model, context, options);
 	if (!message) throw new HelperCompletionUnavailableError(setting);
 	return message;
 }

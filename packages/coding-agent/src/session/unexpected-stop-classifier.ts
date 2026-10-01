@@ -7,7 +7,7 @@ import type { Settings } from "../config/settings";
 import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
 import { isTinyCompletionLocalModelKey, ONLINE_COMPLETION_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
-import { helperCompletion } from "./helper-completion";
+import { helperCompletion, runHelper } from "./helper-completion";
 
 const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
 
@@ -70,7 +70,7 @@ export async function classifyUnexpectedStop(
 	const backend = deps.settings.get("providers.unexpectedStopModel");
 	try {
 		if (backend === ONLINE_COMPLETION_MODEL_KEY) {
-			return await classifyOnline(text, deps);
+			return await runHelper(deps.settings, "providers.unexpectedStopModel", () => classifyOnline(text, deps));
 		}
 		if (isTinyCompletionLocalModelKey(backend)) {
 			return await classifyLocal(text, backend, deps);
@@ -101,7 +101,6 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 	const response = await retryTransientCompletion(
 		() =>
 			helperCompletion(
-				deps.settings,
 				"providers.unexpectedStopModel",
 				model,
 				{

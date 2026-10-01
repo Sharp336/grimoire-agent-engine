@@ -4,7 +4,7 @@ import { extractCursorAccessTokenUserId } from "@oh-my-pi/pi-ai/oauth/cursor";
 import { ptree } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
-import { exactCredentialStore } from "./execution-resolver";
+import { exactCredentialStore, isClaimedOAuthCredential } from "./execution-resolver";
 import type { RocksEngineMutations } from "./rocks-store";
 
 type Account = { provider_id: string; external_id: string | null; pools: Array<{ pool_id: string }>;
@@ -62,7 +62,7 @@ async function localOAuth(provider: string, credential: Extract<Credential, { me
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath(credential.agentDir));
 	try {
 		const selected = store.listAuthCredentials(provider).find(item => item.id === credential.credentialId &&
-			item.credential.type === "oauth" && item.credential.accountId === credential.accountId);
+			item.credential.type === "oauth" && isClaimedOAuthCredential(provider, item.credential, credential.accountId));
 		if (!selected) { store.close(); return null; }
 		return { store, credential: selected.credential as OAuthCredential };
 	} catch (error) {
@@ -77,11 +77,16 @@ function sameAccount(provider: string, report: UsageReport, credential: OAuthCre
 	return report.metadata?.accountId === accountId;
 }
 
-function matchingLimit(provider: string, report: UsageReport, window: Account["quota_windows"][number]) {
+/** A quota window is the limit with its exact id and the same window duration; no fraction is guessed. */
+function matchingWindow(provider: string, report: UsageReport, window: Account["quota_windows"][number]) {
 	return report.limits.find(item => item.id === window.window_id &&
 		(provider === "openai-codex" ? codexLimitId.test(item.id) : item.id.startsWith(`${provider}:`)) &&
-		(provider === "openai-codex" || item.window?.durationMs !== undefined
-			? item.window?.durationMs === window.window_seconds * 1000 : true));
+		item.window?.durationMs === window.window_seconds * 1000);
+}
+
+/** A pool is the limit with its exact id (Claude extra usage, Cursor spend and request rails). */
+function matchingPool(provider: string, report: UsageReport, pool: Account["pools"][number]) {
+	return report.limits.find(item => item.id === pool.pool_id && item.id.startsWith(`${provider}:`));
 }
 
 async function builtin(builtinId: string, account: Account, credential: Credential, signal?: AbortSignal) {
@@ -107,7 +112,7 @@ async function builtin(builtinId: string, account: Account, credential: Credenti
 		const observedAt = new Date(report.fetchedAt).toISOString();
 		const observations: Observation[] = [];
 		for (const window of account.quota_windows) {
-			const limit = matchingLimit(provider, report, window);
+			const limit = matchingWindow(provider, report, window);
 			if (!limit) continue;
 			let exhausted = limit.status === "exhausted";
 			if (provider === "openai-codex") {
@@ -121,6 +126,21 @@ async function builtin(builtinId: string, account: Account, credential: Credenti
 			if (typeof limit.amount.remainingFraction === "number" && Number.isFinite(limit.amount.remainingFraction))
 				observations.push({ ...base, metric: "quota_remaining", value: limit.amount.remainingFraction, unit: "fraction" });
 			if (exhausted) observations.push({ ...base, metric: "exhausted", value: 1, unit: null });
+		}
+		// Pools carry what the provider actually reports: USD spent or requests used, never a
+		// fraction standing in for them. Percent-only rails have no pool metric and are omitted.
+		for (const pool of account.pools) {
+			const limit = matchingPool(provider, report, pool);
+			if (!limit || !Number.isFinite(limit.amount.used)) continue;
+			const resets_at = limit.window?.resetsAt === undefined ? null : new Date(limit.window.resetsAt).toISOString();
+			const base = { dimension: "pool" as const, dimension_id: pool.pool_id,
+				observed_at: observedAt, resets_at, window_start: null, window_end: null };
+			if (limit.amount.unit === "usd")
+				observations.push({ ...base, metric: "aggregate_spend_usd", value: limit.amount.used!, unit: "usd" });
+			else if (limit.amount.unit === "requests")
+				observations.push({ ...base, metric: "request_count", value: limit.amount.used!, unit: "requests" });
+			else continue;
+			if (limit.status === "exhausted") observations.push({ ...base, metric: "exhausted", value: 1, unit: null });
 		}
 		return { status: "ready", observations };
 	} catch {

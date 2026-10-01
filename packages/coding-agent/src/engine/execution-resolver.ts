@@ -1,7 +1,18 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, PhysicalRequest, SimpleStreamOptions, StoredAuthCredential } from "@oh-my-pi/pi-ai";
+import type {
+	Api,
+	AuthCredential,
+	AuthCredentialStore,
+	Model,
+	ModelSpec,
+	OAuthCredential,
+	PhysicalRequest,
+	SimpleStreamOptions,
+	StoredAuthCredential,
+} from "@oh-my-pi/pi-ai";
+import { extractCursorAccessTokenUserId } from "@oh-my-pi/pi-ai/oauth/cursor";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -161,7 +172,7 @@ export class EngineExecutionResolver {
 			const store = await SqliteAuthCredentialStore.open(getAgentDbPath(localOAuth.agentDir));
 			const credential = store.listAuthCredentials(primary.provider).find(item =>
 				item.credential.type === "oauth" && item.id === localOAuth.credentialId &&
-				item.credential.accountId === localOAuth.accountId);
+				isClaimedOAuthCredential(primary.provider, item.credential, localOAuth.accountId));
 			if (!credential) {
 				store.close();
 				throw new Error("The exact owned local OMP credential is unavailable");
@@ -472,6 +483,16 @@ function toProviderModel(
 		maxTokens: Number(model.maxTokens),
 		headers: model.headers,
 	};
+}
+
+/**
+ * Whether a stored local OMP OAuth row is the claimed account. A row records its account id;
+ * a Cursor row minted before logins recorded one is proven by its own access token's user id,
+ * the same identity the login now records, so an existing owner login keeps working.
+ */
+export function isClaimedOAuthCredential(provider: string, credential: OAuthCredential, accountId: string): boolean {
+	if (credential.accountId !== undefined) return credential.accountId === accountId;
+	return provider === "cursor" && extractCursorAccessTokenUserId(credential.access) === accountId;
 }
 
 export function exactCredentialStore(store: AuthCredentialStore, provider: string, credentialId: number): AuthCredentialStore {

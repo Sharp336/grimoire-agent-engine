@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -56,7 +57,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BlobStore } from "../session/blob-store";
 import { NativeSessionWriteRejectedError } from "../session/native-session-storage";
-import { withHelperCompletionExecutor } from "../session/helper-completion";
+import { withHelperCompletionBoundary } from "../session/helper-completion";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import { decodeNativeEntry, parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import type {
@@ -126,6 +127,7 @@ import {
 import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
 import {
 	markProviderLatency,
+	ProviderAdmissionError,
 	type ProviderRequestRecord,
 	setProviderObservationModel,
 	withProviderObservationContext,
@@ -183,6 +185,21 @@ const ASSISTANT_DELTA_WINDOW_MS = 100;
 const ASSISTANT_DELTA_WINDOW_BYTES = 8 * 1024;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
+/** The binding whose admitted side operation encloses this async context; nested ones reuse it. */
+const sideOperation = new AsyncLocalStorage<LiveBinding>();
+
+/**
+ * The route identity a request was admitted under: the transition that produced its frozen
+ * execution digest, else the initial selection. Undefined when the digest is not in this
+ * Attempt's history, so nothing is priced from the current route instead.
+ */
+function identityAtSend(choice: ExecutorChoice, executionDigest: string) {
+	const transition = choice.transitions.findLast(item => item.to_execution_digest === executionDigest);
+	if (transition) return candidateIdentity(transition.to);
+	const initial = choice.transitions[0]?.from_execution_digest ?? choice.execution_digest;
+	return initial === executionDigest ? candidateIdentity(choice.selected) : undefined;
+}
+
 // Provider bursts are chunked into bounded durable writes below. Keep the
 // transport admission window large enough for one bounded 3 MiB response
 // while leaving the shared AI admission defaults unchanged.
@@ -352,6 +369,12 @@ interface LiveBinding extends EngineBindingSnapshot {
 	lastAssistantMessageId?: string;
 	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
+	/** Side operations (compaction, handoff, summaries, helpers) of `sideAttemptId`, drained before it ends. */
+	sideRequests: Set<Promise<void>>;
+	sideAbort: AbortController;
+	sideAttemptId: string;
+	/** Per open model effect, the highest responded request: its frozen digest prices the usage. */
+	respondedRequests: Map<string, { ordinal: number; executionDigest: string }>;
 	/** Uploads of direct Start/steer/resume messages by clientMessageId, consumed once the user entry is durable. */
 	directUploads: Map<string, EngineMessageAttachments>;
 	pendingInput?: PendingInput;
@@ -2071,9 +2094,8 @@ export class EngineRuntime {
 			await this.store.assertIntent(target.agentInstanceId, expectedIntentRevision, true);
 			const binding = this.#requireTarget(target);
 			const before = binding.session.getContextBreakdown();
-			const result = await this.#auxiliaryModelEffect(binding,
-				sha256(stableStringifyJson({ compaction: binding.session.messages })), undefined,
-				() => this.#withSessionScope(binding, () => binding.session.compact()));
+			// Compaction admits itself as a side operation; each of its model requests is its own effect.
+			const result = await this.#withSessionScope(binding, () => binding.session.compact());
 			const after = binding.session.getContextBreakdown();
 			return {
 				schema: "grimoire.engine.session_compaction.v1",
@@ -3104,11 +3126,19 @@ export class EngineRuntime {
 							};
 						},
 						wrapRequest: async (model, request) => {
+							// A managed request without an observed transport is refused, never sent raw.
+							if (!inner?.wrapRequest)
+								throw new ProviderAdmissionError("provider_transport_unobserved",
+									"The provider transport has no admitted request boundary");
 							await admitIntent(request.signal);
 							return await createProviderRetryBudgetHook(inner).wrapRequest(model, request);
 						},
 					} satisfies NonNullable<CreateAgentSessionOptions["providerRequestHook"]>;
 				})(),
+				sideRequests: {
+					run: work => this.#sideOperation(liveBinding, work),
+					call: (model, work, message) => this.#sideModelCall(liveBinding, model, work, message),
+				},
 				disableExtensionDiscovery: true,
 				extensions: [],
 				additionalExtensionPaths: [],
@@ -3378,6 +3408,10 @@ export class EngineRuntime {
 				assistantMessageSequence: 0,
 				measuredUsage: new Map(),
 				activeModelCalls: new Set(),
+				sideRequests: new Set(),
+				sideAbort: new AbortController(),
+				sideAttemptId: request.attemptId,
+				respondedRequests: new Map(),
 				directUploads: new Map(),
 			};
 			liveBinding = binding;
@@ -4718,13 +4752,25 @@ export class EngineRuntime {
 		};
 	}
 
-	/** Physical request facts are written under the same fence as the model effect they belong to. */
+	/**
+	 * Physical request facts are written under the same fence as the model effect they belong to.
+	 * The highest responded request is remembered per effect: its frozen digest prices the usage.
+	 */
 	#requestRecord(binding: LiveBinding): ProviderRequestRecord {
+		const digests = new Map<string, string>();
 		return {
-			register: (effectId, ordinal, frozen) =>
-				this.store.registerModelRequest(this.#snapshot(binding), effectId, { ordinal, ...frozen }),
-			settle: (effectId, ordinal, state, statusCode) =>
-				this.store.settleModelRequest(this.#snapshot(binding), effectId, ordinal, state, statusCode),
+			register: async (effectId, ordinal, frozen) => {
+				await this.store.registerModelRequest(this.#snapshot(binding), effectId, { ordinal, ...frozen });
+				digests.set(`${effectId}\0${ordinal}`, frozen.executionDigest);
+			},
+			settle: async (effectId, ordinal, state, statusCode) => {
+				await this.store.settleModelRequest(this.#snapshot(binding), effectId, ordinal, state, statusCode);
+				const executionDigest = digests.get(`${effectId}\0${ordinal}`);
+				digests.delete(`${effectId}\0${ordinal}`);
+				const previous = binding.respondedRequests.get(effectId);
+				if (state === "responded" && executionDigest && (!previous || previous.ordinal < ordinal))
+					binding.respondedRequests.set(effectId, { ordinal, executionDigest });
+			},
 		};
 	}
 
@@ -4733,8 +4779,17 @@ export class EngineRuntime {
 	 * `reportedFields` are measurements (explicit zeros included); zero-initialized placeholders
 	 * stay null, so a failed message keeps its real usage and a synthetic one has none. The store
 	 * attributes it to the effect's last responded request, or drops it when none responded.
+	 * The estimate is priced with the request's own model and the route identity frozen when that
+	 * request was sent, never the session's current model or route.
 	 */
-	#modelUsage(binding: LiveBinding, message: AssistantMessage | undefined): Omit<ModelUsageFact, "ordinal"> | null {
+	#modelUsage(
+		binding: LiveBinding,
+		effectId: string,
+		message: AssistantMessage | undefined,
+		model: Model | undefined,
+	): Omit<ModelUsageFact, "ordinal"> | null {
+		const responded = binding.respondedRequests.get(effectId);
+		binding.respondedRequests.delete(effectId);
 		if (!message) return null;
 		const usage = message.usage;
 		const known = (field: ModelTokenField) => usage.reportedFields?.includes(field) === true;
@@ -4747,8 +4802,8 @@ export class EngineRuntime {
 			reasoning: known("reasoning") ? usage.reasoningTokens ?? 0 : null,
 		};
 		if (Object.values(tokens).every(value => value === null)) return null;
-		const model = binding.session.model;
-		const priced = model && model.id === message.model && model.provider === message.provider &&
+		const identity = responded ? identityAtSend(binding.execution.choice, responded.executionDigest) : undefined;
+		const priced = identity && model && model.id === message.model && model.provider === message.provider &&
 			Object.values(model.cost).some(rate => rate > 0) ? model : undefined;
 		// The estimate needs every bucket the catalog charges for; an unbilled bucket may stay unreported.
 		const complete = (["input", "output", "cacheRead", "cacheWrite"] as const)
@@ -4756,7 +4811,7 @@ export class EngineRuntime {
 		return {
 			providerResponseId: message.responseId ?? null,
 			tokens,
-			cost: !priced
+			cost: !priced || !identity
 				? { status: "unknown", reason: "price_unknown" }
 				: !complete
 					? { status: "unknown", reason: "tokens_incomplete" }
@@ -4768,7 +4823,7 @@ export class EngineRuntime {
 								source: "engine_catalog",
 								modelId: priced.id,
 								ratesPerMTok: priced.cost,
-								serviceTier: currentIdentity(binding.execution.choice).service_tier ?? null,
+								serviceTier: identity.service_tier ?? null,
 							},
 							computedAt: new Date().toISOString(),
 						},
@@ -4785,9 +4840,11 @@ export class EngineRuntime {
 		if (!effect) return;
 		const checkpoint = outcome === "failed" && binding.messageWriteError
 			? undefined : await this.#effectCheckpoint(binding);
+		// The primary turn's request model is the one its message names, even after a route switch.
+		const model = message ? binding.session.modelRegistry.find(message.provider, message.model) : undefined;
 		const event = await this.store.settleModelEffect(
 			this.#snapshot(binding), effect, outcome, error?.slice(0, 2_048), checkpoint,
-			this.#modelUsage(binding, message),
+			this.#modelUsage(binding, effect.effectId, message, model),
 		);
 		binding.modelEffect = undefined;
 		this.#notifyEvents([event]);
@@ -4893,24 +4950,75 @@ export class EngineRuntime {
 				() =>
 					withLspSessionScope(
 						{ shared: settings.get("lsp.shared"), ownerId: binding.engineAgentId, realm: "engine" },
-						() => withHelperCompletionExecutor((model, context, options) =>
-							this.#helperCompletion(binding, model, context, options), callback),
+						() => withHelperCompletionBoundary({
+							run: work => this.#sideOperation(binding, work),
+							complete: (model, context, options) => this.#helperCompletion(binding, model, context, options),
+						}, callback),
 					),
 			),
 		);
 	}
 
 	/**
-	 * A model call outside the agent loop (manual compaction, an explicitly configured
-	 * helper) is its own model effect of the same Attempt: admitted, with durable
-	 * physical request facts and settled usage. The effect opens at its first physical
-	 * request, so work that needs no provider request (local snapshot compaction) is
-	 * never blocked; a provider request without an admitted Attempt is refused.
+	 * One side operation (compaction, handoff, summary, side turn, helper) of the active Attempt.
+	 * It is admitted before it resolves any credential, runs in its own observation context (so a
+	 * billing re-ask during credential resolution belongs to it and a request outside a side model
+	 * call is refused), and is tracked so the Attempt drains or cancels it before it ends.
+	 */
+	async #sideOperation<T>(binding: LiveBinding | undefined, work: () => Promise<T>): Promise<T> {
+		if (!binding) throw new Error("Side request has no Engine binding");
+		if (sideOperation.getStore() === binding) return await work();
+		if (binding.sideAttemptId !== binding.attemptId) {
+			binding.sideAttemptId = binding.attemptId;
+			binding.sideAbort = new AbortController();
+		}
+		const signal = binding.sideAbort.signal;
+		if (this.#bindings.get(binding.agentInstanceId) !== binding || signal.aborted ||
+			TERMINAL_ATTEMPT_STATES.has(binding.attemptState))
+			throw new EngineTargetError("too_late", "Side model requests need the active Attempt");
+		await this.#admitEffect(binding, () => this.store.assertIntent(binding.agentInstanceId, undefined, true), signal);
+		const running = sideOperation.run(binding, () =>
+			withProviderObservationContext({ effectId: "side-operation", modelCallId: "side-operation" }, work));
+		const settled = running.then(() => {}, () => {});
+		binding.sideRequests.add(settled);
+		binding.activeModelCalls.add(settled);
+		void settled.then(() => {
+			binding.sideRequests.delete(settled);
+			binding.activeModelCalls.delete(settled);
+		});
+		return await running;
+	}
+
+	/** One side model call: its own recorded model effect inside the admitted side operation. */
+	#sideModelCall<T>(
+		binding: LiveBinding | undefined,
+		model: Model,
+		work: (signal: AbortSignal) => Promise<T>,
+		message?: (value: T) => AssistantMessage | undefined,
+	): Promise<T> {
+		return this.#sideOperation(binding, () => {
+			const live = binding!;
+			return this.#auxiliaryModelEffect(live, sha256(`side\0${model.provider}\0${model.id}`), model,
+				() => work(live.sideAbort.signal), message);
+		});
+	}
+
+	/** Cancel the Attempt's side operations and wait for them, so none writes after its fence. */
+	async #drainSideRequests(binding: LiveBinding): Promise<void> {
+		binding.sideAbort.abort(new EngineTargetError("cancelled", "The Attempt ended its side requests"));
+		await Promise.all(binding.sideRequests);
+	}
+
+	/**
+	 * A side model call is its own model effect of the same Attempt: admitted, with durable
+	 * physical request facts and settled usage priced with its own model. The effect opens at
+	 * its first physical request, so work that needs no provider request (local snapshot
+	 * compaction) is never blocked; a provider request without an admitted Attempt is refused.
 	 */
 	async #auxiliaryModelEffect<T>(
 		binding: LiveBinding,
 		inputHash: string,
-		signal: AbortSignal | undefined,
+		model: Model,
 		work: () => Promise<T>,
 		message: (value: T) => AssistantMessage | undefined = () => undefined,
 	): Promise<T> {
@@ -4923,7 +5031,7 @@ export class EngineRuntime {
 				opening ??= (async () => {
 					const checkpoint = await this.#effectCheckpoint(binding);
 					this.#notifyEvents([await this.#admitEffect(binding,
-						() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), signal)]);
+						() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), binding.sideAbort.signal)]);
 					opened = true;
 				})();
 				await opening;
@@ -4938,13 +5046,20 @@ export class EngineRuntime {
 			if (opened) {
 				const checkpoint = binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
 				this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "failed",
-					(error instanceof Error ? error.message : String(error)).slice(0, 2_048), checkpoint, null)]);
+					(error instanceof Error ? error.message : String(error)).slice(0, 2_048), checkpoint,
+					this.#modelUsage(binding, effect.effectId, undefined, model))]);
 			}
 			throw error;
 		}
-		if (opened)
-			this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed",
-				undefined, await this.#effectCheckpoint(binding), this.#modelUsage(binding, message(value)))]);
+		if (opened) {
+			const settled = message(value);
+			// A failed provider answer still carries the usage the provider reported for it.
+			const failed = settled?.stopReason === "error" || settled?.stopReason === "aborted";
+			const checkpoint = failed && binding.messageWriteError ? undefined : await this.#effectCheckpoint(binding);
+			this.#notifyEvents([await this.store.settleModelEffect(this.#snapshot(binding), effect,
+				failed ? "failed" : "completed", failed ? (settled?.errorMessage ?? "Model request failed").slice(0, 2_048) : undefined,
+				checkpoint, this.#modelUsage(binding, effect.effectId, settled, model))]);
+		}
 		return value;
 	}
 
@@ -4962,12 +5077,17 @@ export class EngineRuntime {
 			return undefined;
 		}
 		const hook = binding.providerRequestHook;
-		return await this.#auxiliaryModelEffect(binding, sha256(stableStringifyJson(context)), options.signal,
-			() => completeSimple(model, context, {
-				...options,
-				fetch: hook.wrapFetch(model, options.fetch ?? globalThis.fetch),
-				physicalRequest: request => hook.wrapRequest(model, request),
-			}), message => message);
+		return await this.#sideModelCall(binding, model, signal => completeSimple(model, context, {
+			...options,
+			signal: options.signal ? AbortSignal.any([options.signal, signal]) : signal,
+			fetch: hook.wrapFetch(model, options.fetch ?? globalThis.fetch),
+			physicalRequest: request => {
+				if (!hook.wrapRequest)
+					throw new ProviderAdmissionError("provider_transport_unobserved",
+						"The provider transport has no admitted request boundary");
+				return hook.wrapRequest(model, request);
+			},
+		}), message => message);
 	}
 
 	async #sendCommandContext(
@@ -5110,6 +5230,9 @@ export class EngineRuntime {
 		state: "completed" | "failed" | "interrupted",
 		cause?: string,
 	): Promise<void> {
+		// Background side operations (speculative compaction, deferred handoff) never outlive the Attempt:
+		// they are cancelled and their effects settled before its terminal transition.
+		if (binding.attemptId === attemptId) await this.#drainSideRequests(binding);
 		// A response that never reached message_end still owns its coalesced text.
 		if (binding.assistantStream) this.#flushAssistantStream(binding, binding.assistantStream);
 		await binding.traceWriteTail;
@@ -5750,6 +5873,7 @@ export class EngineRuntime {
 
 	async #finishCancel(binding: LiveBinding, request: EngineCancelRequest, abort: Promise<void>): Promise<void> {
 		await abort.catch(() => {});
+		await this.#drainSideRequests(binding);
 		await Promise.all(binding.activeModelCalls);
 		await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId: request.attemptId });
 		await this.asyncJobManager.drainDeliveries({
@@ -5789,6 +5913,8 @@ export class EngineRuntime {
 	async #terminateBinding(binding: LiveBinding, cause: "requested" | "engine_lost"): Promise<void> {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		const wasRunning = binding.state === "running";
+		// Released bindings admit no side request; running ones are awaited with the model calls below.
+		binding.sideAbort.abort(new EngineTargetError("cancelled", "Attempt binding was released"));
 		const retainApproval = cause === "engine_lost" && binding.attemptState === "paused" &&
 			(await this.store.durableApprovalPause(binding.attemptId)) !== undefined;
 		if (retainApproval) {

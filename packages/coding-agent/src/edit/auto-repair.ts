@@ -17,7 +17,7 @@ import { retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
-import { helperCompletion } from "../session/helper-completion";
+import { helperCompletion, helperEnabled, runHelper } from "../session/helper-completion";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
@@ -285,8 +285,19 @@ export async function attemptEditAutoRepair(options: {
 	writethrough: WritethroughCallback;
 	signal?: AbortSignal;
 }): Promise<EditAutoRepairOutcome | undefined> {
+	const { session } = options;
+	if (!session.settings.get("edit.autoRepair.enabled") || !helperEnabled(session.settings, "edit.autoRepair.enabled"))
+		return undefined;
+	return await runHelper(session.settings, "edit.autoRepair.enabled", () => repairWithHelper(options));
+}
+
+async function repairWithHelper(options: {
+	session: ToolSession;
+	snapshot: AppliedEditSnapshot;
+	writethrough: WritethroughCallback;
+	signal?: AbortSignal;
+}): Promise<EditAutoRepairOutcome | undefined> {
 	const { session, snapshot, writethrough } = options;
-	if (!session.settings.get("edit.autoRepair.enabled")) return undefined;
 	const registry = session.modelRegistry;
 	if (!registry) return undefined;
 	const model = resolveRoleSelection(["smol"], session.settings, registry.getAvailable())?.model;
@@ -314,7 +325,6 @@ export async function attemptEditAutoRepair(options: {
 		const response = await retryTransientCompletion(
 			() =>
 				helperCompletion(
-					session.settings,
 					"edit.autoRepair.enabled",
 					model,
 					{ messages: [{ role: "user", content: builtPrompt, timestamp: Date.now() }] },

@@ -13,9 +13,12 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
+	AssistantMessageEventStream,
 	Context,
 	CredentialDisabledEvent,
 	Effort,
+	FetchImpl,
 	Message,
 	Model,
 	ModelUsageHealth,
@@ -369,6 +372,8 @@ export interface CreateAgentSessionOptions {
 	pauseGate?: AgentPauseGate;
 	/** Wraps every physical provider HTTP request for admission and accounting. */
 	providerRequestHook?: ProviderRequestHook;
+	/** Owner boundary for side model requests; requires `providerRequestHook`. */
+	sideRequests?: SideRequestBoundary;
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
@@ -649,8 +654,26 @@ export interface CreateAgentSessionOptions {
 
 export interface ProviderRequestHook {
 	wrapFetch(model: Model, fetch: NonNullable<SimpleStreamOptions["fetch"]>): NonNullable<SimpleStreamOptions["fetch"]>;
-	/** Same admission/accounting boundary for a physical request that does not use `fetch`. */
-	wrapRequest(model: Model, request: PhysicalRequest): Promise<number | null>;
+	/**
+	 * Same admission/accounting boundary for a physical request that does not use `fetch`
+	 * (Cursor HTTP/2). Without it such requests are sent unwrapped.
+	 */
+	wrapRequest?(model: Model, request: PhysicalRequest): Promise<number | null>;
+}
+
+/** Owner boundary for model requests outside the agent loop: compaction, handoff, summaries, side turns. */
+export interface SideRequestBoundary {
+	/** One side operation, admitted before it resolves any credential; credentials are resolved inside. */
+	run<T>(work: () => Promise<T>): Promise<T>;
+	/**
+	 * One side model call as its own recorded model effect. `signal` cancels it with the
+	 * owner; `message` yields the settled message whose reported usage the effect keeps.
+	 */
+	call<T>(
+		model: Model,
+		work: (signal: AbortSignal) => Promise<T>,
+		message?: (value: T) => AssistantMessage | undefined,
+	): Promise<T>;
 }
 
 /** Result from createAgentSession */
@@ -3390,6 +3413,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			blobBroker,
 		);
 		const providerRequestHook = options.providerRequestHook;
+		const wrapRequest = providerRequestHook?.wrapRequest?.bind(providerRequestHook);
 		const providerRetryMaxAttempts = (options.turnRetryPolicy?.delaysMs.length ?? 0) + 1;
 		const providerAwareStreamFn: StreamFn = providerRequestHook
 			? (streamModel, context, streamOptions) =>
@@ -3400,10 +3424,53 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								? { codexSseMaxAttempts: 1, providerRetryWait: deferNestedProviderRetry }
 								: {}),
 							fetch: providerRequestHook.wrapFetch(streamModel, streamOptions?.fetch ?? globalThis.fetch),
-							physicalRequest: request => providerRequestHook.wrapRequest(streamModel, request),
+							...(wrapRequest
+								? { physicalRequest: (request: PhysicalRequest) => wrapRequest(streamModel, request) }
+								: {}),
 						}),
 					)
 			: settingsAwareStreamFn;
+		// Side model calls (compaction, handoff, summaries, side turns) are each their own owner
+		// effect: the provider request starts inside it and its settled message carries the usage.
+		const sideRequests = providerRequestHook ? options.sideRequests : undefined;
+		// Fetches handed out below are already their own side effects. Compaction threads the same
+		// option into its summary stream, which must then use the raw transport under its own effect.
+		const sideFetches = new WeakSet<FetchImpl>();
+		const sideStreamFn: StreamFn = sideRequests
+			? (streamModel, context, streamOptions) =>
+					new Promise<AssistantMessageEventStream>((resolve, reject) => {
+						sideRequests
+							.call(
+								streamModel,
+								async signal => {
+									const stream = await providerAwareStreamFn(streamModel, context, {
+										...streamOptions,
+										...(streamOptions?.fetch && sideFetches.has(streamOptions.fetch) ? { fetch: undefined } : {}),
+										signal: streamOptions?.signal ? AbortSignal.any([streamOptions.signal, signal]) : signal,
+									});
+									resolve(stream);
+									return await stream.result();
+								},
+								message => message,
+							)
+							.catch(reject);
+					})
+			: providerAwareStreamFn;
+		// Direct provider fetches outside a stream (remote/native compaction) take the same path.
+		const sideFetch =
+			sideRequests && providerRequestHook
+				? (requestModel: Model): FetchImpl => {
+						const fetch: FetchImpl = (input, init) =>
+							sideRequests.call(requestModel, signal =>
+								providerRequestHook.wrapFetch(requestModel, globalThis.fetch)(input, {
+									...init,
+									signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal,
+								}),
+							);
+						sideFetches.add(fetch);
+						return fetch;
+					}
+				: undefined;
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3577,7 +3644,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformProviderContext,
 			onPayload,
 			onResponse,
-			sideStreamFn: providerAwareStreamFn,
+			sideStreamFn,
+			...(sideRequests ? { sideRequest: sideRequests.run.bind(sideRequests), sideFetch } : {}),
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,

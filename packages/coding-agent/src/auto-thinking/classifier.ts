@@ -21,7 +21,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { helperCompletion } from "../session/helper-completion";
+import { helperCompletion, runHelper } from "../session/helper-completion";
 import difficultySystemPrompt from "../prompts/system/auto-thinking-difficulty.md" with { type: "text" };
 import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-local.md" with { type: "text" };
 import { clampAutoThinkingEffort } from "../thinking";
@@ -106,7 +106,9 @@ export async function classifyDifficulty(
 	// XHigh whatever the setting says — otherwise a sparse ladder would snap its
 	// `hard` bucket up to a tier it never chose.
 	const ceiling = online ? autoEffortCeiling(deps) : Effort.XHigh;
-	const effort = online ? await classifyOnline(input, deps, ceiling) : await classifyLocal(input, backend, deps);
+	const effort = online
+		? await runHelper(deps.settings, "providers.autoThinkingModel", () => classifyOnline(input, deps, ceiling))
+		: await classifyLocal(input, backend, deps);
 	// The ceiling goes into the clamp itself: capping the request alone is not
 	// enough, because a sparse ladder snaps an excluded request back up.
 	return clampAutoThinkingEffort(deps.model, effort, ceiling);
@@ -129,7 +131,6 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 	const response = await retryTransientCompletion(
 		() =>
 			helperCompletion(
-				deps.settings,
 				"providers.autoThinkingModel",
 				model,
 				{

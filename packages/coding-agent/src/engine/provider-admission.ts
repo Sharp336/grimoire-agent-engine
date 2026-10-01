@@ -106,7 +106,12 @@ export interface ProviderRequestRecord {
 interface ProviderObservationContext {
 	effectId: string;
 	modelCallId: string;
+	/** Last registered ordinal of the current effect; latency marks name the next one. */
 	physicalRequestOrdinal: number;
+	/** Last registered ordinal per effect; ordinals are dense and never reused. */
+	readonly ordinals: Map<string, number>;
+	/** Registrations are serialized so concurrent requests never claim the same ordinal. */
+	registration: Promise<unknown>;
 	readonly pending: Set<Promise<unknown>>;
 	readonly audit?: LatencyAudit;
 	readonly record?: ProviderRequestRecord;
@@ -149,7 +154,15 @@ export async function withProviderObservationContext<T>(
 	record?: ProviderRequestRecord,
 ): Promise<T> {
 	return await providerObservationContext.run(
-		{ ...identity, physicalRequestOrdinal: 0, pending: new Set(), audit, record },
+		{
+			...identity,
+			physicalRequestOrdinal: 0,
+			ordinals: new Map(),
+			registration: Promise.resolve(),
+			pending: new Set(),
+			audit,
+			record,
+		},
 		async () => {
 			let completed = false;
 			try {
@@ -173,7 +186,7 @@ export function setProviderObservationModel(identity: { effectId: string; modelC
 	if (!context || context.effectId === identity.effectId) return;
 	context.effectId = identity.effectId;
 	context.modelCallId = identity.modelCallId;
-	context.physicalRequestOrdinal = 0;
+	context.physicalRequestOrdinal = context.ordinals.get(identity.effectId) ?? 0;
 }
 
 export function markProviderLatency(stage: string): void {
@@ -224,7 +237,7 @@ export class ProviderAdmissionClient {
 		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[] = [],
 		localCredential?: { accountId: string; credentialId: number },
 		onBillingPoolChanged?: (proposal: BillingPoolProposal, signal?: AbortSignal) => Promise<void>,
-	): ProviderRequestHook {
+	): Required<ProviderRequestHook> {
 		const admitted = <T>(model: Model, url: string, signal: AbortSignal | undefined,
 			send: (selected: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) => Promise<T>) =>
 			this.#admitted(identity, authStorage, baseUrl, apiKeyRoutes, localCredential, onBillingPoolChanged,
@@ -359,17 +372,27 @@ export class ProviderAdmissionClient {
 		) => Promise<{ status: number | null; value: T }>,
 	): Promise<T> {
 		const context = providerObservationContext.getStore();
-		if (!context?.record)
+		const record = context?.record;
+		if (!context || !record)
 			throw new ProviderAdmissionError("provider_effect_unadmitted",
 				"A provider request requires an admitted model effect");
 		const effectId = context.effectId;
-		const ordinal = context.physicalRequestOrdinal + 1;
-		await context.record.register(effectId, ordinal, {
-			executionDigest: identity.executionDigest,
-			routeRef: identity.routeRef,
-			accountRef: identity.providerAccountRef,
+		// One durable registration at a time per context: a concurrent request (speculative
+		// compaction beside the turn) waits for the previous ordinal instead of claiming it.
+		// A failed write sends nothing and leaves the next ordinal unclaimed.
+		const registered = context.registration.then(async () => {
+			const next = (context.ordinals.get(effectId) ?? 0) + 1;
+			await record.register(effectId, next, {
+				executionDigest: identity.executionDigest,
+				routeRef: identity.routeRef,
+				accountRef: identity.providerAccountRef,
+			});
+			context.ordinals.set(effectId, next);
+			if (context.effectId === effectId) context.physicalRequestOrdinal = next;
+			return next;
 		});
-		context.physicalRequestOrdinal = ordinal;
+		context.registration = registered.catch(() => {});
+		const ordinal = await registered;
 		const auditRequest: LatencyRequest | undefined = context.audit
 			? {
 					audit: context.audit,
@@ -391,11 +414,11 @@ export class ProviderAdmissionClient {
 			result = await send(ordinal, startedAt, context, auditRequest);
 		} catch (error) {
 			if (error instanceof ProviderExecutionError || error instanceof ProviderAdmissionError) {
-				await context.record.settle(effectId, ordinal, "not_sent", null);
+				await record.settle(effectId, ordinal, "not_sent", null);
 				throw error;
 			}
 			const status = httpStatusFromError(error);
-			await context.record.settle(effectId, ordinal, status ? "responded" : "send_unknown", status ?? null);
+			await record.settle(effectId, ordinal, status ? "responded" : "send_unknown", status ?? null);
 			if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			this.#queueObservation(identity, model, context, ordinal, startedAt, {
 				outcome:
@@ -410,7 +433,7 @@ export class ProviderAdmissionClient {
 			});
 			throw error;
 		}
-		await context.record.settle(effectId, ordinal, result.status === null ? "send_unknown" : "responded", result.status);
+		await record.settle(effectId, ordinal, result.status === null ? "send_unknown" : "responded", result.status);
 		return result.value;
 	}
 

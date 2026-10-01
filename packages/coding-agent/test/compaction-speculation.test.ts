@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, FetchImpl, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -60,7 +60,12 @@ describe("async speculative compaction", () => {
 	let maintenanceSettings: Settings;
 
 	function createMaintenance(
-		options: { asyncEnabled?: boolean; methodOrder?: CompactionMethod[] } = {},
+		options: {
+			asyncEnabled?: boolean;
+			methodOrder?: CompactionMethod[];
+			/** A managed session's side boundary; unset keeps the provider-default transport. */
+			managed?: Pick<SessionMaintenanceHost, "sideRequest" | "sideFetch">;
+		} = {},
 	): SessionMaintenance {
 		agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -83,6 +88,8 @@ describe("async speculative compaction", () => {
 			sideStreamFn: async () => {
 				throw new Error("The compact seam should be used instead of the side stream");
 			},
+			sideRequest: options.managed?.sideRequest ?? (<T>(work: () => Promise<T>) => work()),
+			sideFetch: options.managed?.sideFetch ?? (() => undefined),
 			providerSessionState: new Map(),
 			preferWebsockets: undefined,
 			model: () => model,
@@ -205,6 +212,46 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
+	});
+
+	it("runs speculative and blocking compaction inside a managed side boundary with its recorded transport", async () => {
+		let open = 0;
+		const sideFetch = (async () => new Response("unused")) as unknown as FetchImpl;
+		const transports: Array<{ inside: boolean; fetch: unknown; completeImpl: unknown }> = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, _model, _key, _instructions, _signal, summary) => {
+			transports.push({ inside: open > 0, fetch: summary?.fetch, completeImpl: summary?.completeImpl });
+			return { summary: "managed summary", firstKeptEntryId: preparation.firstKeptEntryId, tokensBefore: preparation.tokensBefore, details: {} };
+		});
+		const managed = {
+			sideRequest: async <T>(work: () => Promise<T>) => {
+				open++;
+				try {
+					return await work();
+				} finally {
+					open--;
+				}
+			},
+			sideFetch: () => sideFetch,
+		};
+		maintenance = createMaintenance({ managed });
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		maintenance = createMaintenance({ asyncEnabled: false, managed });
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		// Credentials and every summary/native request resolve inside the owner's admission, and
+		// provider-native compaction uses the recorded fetch instead of the global one.
+		expect(transports).toEqual([
+			{ inside: true, fetch: sideFetch, completeImpl: expect.any(Function) },
+			{ inside: true, fetch: sideFetch, completeImpl: expect.any(Function) },
+		]);
+
+		// Outside a managed session the provider defaults stay untouched.
+		transports.length = 0;
+		sessionManager = SessionManager.inMemory();
+		appendSummarizableConversation();
+		maintenance = createMaintenance({ asyncEnabled: false });
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+		expect(transports).toEqual([{ inside: false, fetch: undefined, completeImpl: undefined }]);
 	});
 
 	it("replays a user turn appended while remote compaction is in flight", async () => {
