@@ -605,11 +605,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		});
 		const execution = admittedExecution(mock.model, modelRegistry, { scopeAgents: 1 });
 		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
-		const provider = spyOn(globalThis, "fetch").mockImplementation((async () => {
+		const provider = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
 			sideEntered.resolve();
 			await releaseSide.promise;
 			return new Response("ok");
-		}) as typeof fetch);
+		}, { preconnect: globalThis.fetch.preconnect }));
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
 			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
 				const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
@@ -2050,10 +2050,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			baseUrl: "https://compact.invalid/v1",
 			handler: { content: ["answer ".repeat(1_000)], usage: { input: 10_000, output: 20, totalTokens: 10_020 } },
 		});
-		mock.model.remoteCompaction = {
+		// The remote adapter family differs from the mock transport, which Model<"mock"> cannot type.
+		Object.assign(mock.model, { remoteCompaction: {
 			enabled: true, api: "openai-responses",
 			endpoint: "https://compact.invalid/v1/responses/compact", v2StreamingEnabled: false,
-		};
+		} });
 		const execution = admittedExecution(mock.model, modelRegistry);
 		const settings = Settings.isolated({
 			"compaction.enabled": mode === "automatic",
@@ -2120,8 +2121,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 30_000);
 
 	it("compacts a terminal session locally without resolving credentials or reopening provider work", async () => {
-		const mock = createMockModel({ handler: { content: ["retained answer ".repeat(2_000)] } });
-		mock.model.input = ["text", "image"];
+		const mock = createMockModel({ handler: { content: ["retained answer ".repeat(2_000)] }, input: ["text", "image"] });
 		const execution = admittedExecution(mock.model, modelRegistry);
 		execution.setModelOverride({ settings: Settings.isolated({
 			"compaction.enabled": false,
@@ -2179,7 +2179,8 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			});
 			const execution = admittedExecution(mock.model, modelRegistry);
 			const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
-			const provider = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("ok")) as typeof fetch);
+			const provider = spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(async () => new Response("ok"), { preconnect: globalThis.fetch.preconnect }));
 			const { runtime, cwd } = await createRuntime(execution, async () => {
 				dispatchEntered.resolve();
 				return await finishPrompt.promise;

@@ -70,7 +70,7 @@ describe("Engine builtin usage readers", () => {
 			account, credential: { method: "oauth", store: "local_omp", ...credential },
 		});
 
-	it.each(readers)("$builtinId reads only the exact claimed credential row", async ({ builtinId, provider, env }) => {
+	it.each([...readers])("$builtinId reads only the exact claimed credential row", async ({ builtinId, provider, env }) => {
 		const access = provider === "cursor" ? cursorJwt("user_claimed") : `claimed-access-${provider}`;
 		const claimed = provider === "cursor" ? "user_claimed" : "acct-claimed";
 		const row = await storedRow(provider, access, claimed);

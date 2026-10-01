@@ -151,6 +151,8 @@ export interface MockModelOptions {
 	maxTokens?: number;
 	/** Whether the model claims to support reasoning. Defaults to false. */
 	reasoning?: boolean;
+	/** Input modalities the model claims. Defaults to `["text"]`. */
+	input?: ("text" | "image")[];
 }
 
 const ZERO_COST: Model["cost"] = {
@@ -172,7 +174,7 @@ export class MockModel implements Model<MockApi> {
 	readonly provider: string;
 	readonly baseUrl: string;
 	readonly reasoning: boolean;
-	readonly input: ("text" | "image")[] = ["text"];
+	readonly input: ("text" | "image")[];
 	readonly cost: Model["cost"];
 	readonly contextWindow: number;
 	readonly maxTokens: number;
@@ -193,6 +195,7 @@ export class MockModel implements Model<MockApi> {
 		this.provider = options.provider ?? "mock";
 		this.baseUrl = options.baseUrl ?? "mock://";
 		this.reasoning = options.reasoning ?? false;
+		this.input = options.input ?? ["text"];
 		this.cost = options.cost ?? ZERO_COST;
 		this.contextWindow = options.contextWindow ?? 200_000;
 		this.maxTokens = options.maxTokens ?? 32_768;

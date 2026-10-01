@@ -632,6 +632,11 @@ function streamCursorWithWireMode(
 
 		let h2Client: http2.ClientHttp2Session | null = null;
 		let h2Request: http2.ClientHttp2Stream | null = null;
+		// Assigned inside the physical `send` closure, so outer flow analysis cannot see it.
+		const closeH2 = () => {
+			h2Request?.close();
+			h2Client?.close();
+		};
 		let heartbeatTimer: NodeJS.Timeout | null = null;
 		let debugResponseLogPromise: Promise<RequestDebugResponseLog | undefined> | undefined;
 		const h2Completion = Promise.withResolvers<void>();
@@ -989,8 +994,7 @@ function streamCursorWithWireMode(
 					clearInterval(heartbeatTimer);
 					heartbeatTimer = null;
 				}
-				h2Request?.close();
-				h2Client?.close();
+				closeH2();
 
 				const fallbackStream = streamCursorWithWireMode(model, context, options, "discovered", {
 					startTime,
@@ -1083,8 +1087,7 @@ function streamCursorWithWireMode(
 				clearInterval(heartbeatTimer);
 				heartbeatTimer = null;
 			}
-			h2Request?.close();
-			h2Client?.close();
+			closeH2();
 		}
 	})();
 
