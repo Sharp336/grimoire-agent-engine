@@ -1549,6 +1549,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const entered = Promise.withResolvers<void>();
 		const aborted = Promise.withResolvers<void>();
 		const provider = Promise.withResolvers<void>();
+		let providerEntered = false;
 		const prompt = Promise.withResolvers<boolean>();
 		const ready = Promise.withResolvers<void>();
 		const mock = createMockModel({ responses: [async () => {
@@ -1559,6 +1560,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		const { runtime, cwd } = await createRuntime(execution, async session => {
 			session.fetchUsageReports = async signal => {
 				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				providerEntered = true;
 				entered.resolve();
 				await provider.promise;
 				return [];
@@ -1591,7 +1593,19 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					() => undefined,
 					error => error,
 				);
-			await withTimeout(entered.promise, 2_000, "Native usage query did not reach the provider");
+			await withTimeout(Promise.race([entered.promise, usage.then(async result => {
+				if (providerEntered) return;
+				const attempt = await runtime.store.getAttempt(started.attemptId);
+				const binding = await runtime.store.getBinding(started.agentInstanceId);
+				// The IPC response already contains the server's public error, never its request credentials.
+				console.error("Usage IPC ended before provider entry", {
+					method: "runtime.usage", agentInstanceRef, principalId: "owner", attemptId: started.attemptId,
+					state: attempt?.state, bindingId: binding?.bindingId, boundAttemptId: binding?.attemptId,
+					error: result instanceof Error ? result.message : "Unexpected early success",
+					code: result && typeof result === "object" && "code" in result ? result.code : undefined,
+				});
+				throw result instanceof Error ? result : new Error("Usage query completed without entering its provider");
+			})]), 2_000, "Native usage query did not reach the provider");
 			const paused = await withTimeout(
 				runtime.pause({ ...started, commandId: "pause-during-usage", initiator: { kind: "human" } }),
 				2_000,
@@ -1603,11 +1617,11 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect(await usage).toBeInstanceOf(Error);
 			await withTimeout(aborted.promise, 2_000, "Disconnected usage query retained its provider request");
 		} finally {
-			await server.close();
+			await withTimeout(server.close(), 3_000, "Usage IPC cleanup did not finish");
 			provider.resolve();
 			prompt.resolve(true);
-			await usage;
-			await runtime.dispose();
+			await withTimeout(usage, 3_000, "Usage request cleanup did not finish");
+			await withTimeout(runtime.dispose(), 5_000, "Usage runtime cleanup did not finish");
 		}
 	}, 20_000);
 
