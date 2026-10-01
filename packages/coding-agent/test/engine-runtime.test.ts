@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -571,6 +572,106 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		).rejects.toThrow("Engine settings cwd does not match session cwd");
 		await runtime.dispose();
 	});
+
+	it("keeps the native lease until an admitted side model quiesces at Pause, then resumes the same Attempt", async () => {
+		const primaryEntered = Promise.withResolvers<void>();
+		const releasePrimary = Promise.withResolvers<void>();
+		const sideEntered = Promise.withResolvers<void>();
+		const releaseSide = Promise.withResolvers<void>();
+		const primaryParked = Promise.withResolvers<AgentPauseGate>();
+		const wait = AgentPauseGate.prototype.waitUntilResumed;
+		const gateObserver = spyOn(AgentPauseGate.prototype, "waitUntilResumed").mockImplementation(function (
+			this: AgentPauseGate, signal?: AbortSignal,
+		) {
+			const pending = wait.call(this, signal);
+			if (this.parked) primaryParked.resolve(this);
+			return pending;
+		});
+		const mock = createMockModel({
+			baseUrl: "https://side-pause.invalid/v1",
+			responses: [
+				async () => {
+					primaryEntered.resolve();
+					await releasePrimary.promise;
+					return { content: ["primary before pause"] };
+				},
+				async (_context, options) => {
+					await options!.fetch!("https://side-pause.invalid/v1/completions");
+					return { content: ["side completed"] };
+				},
+				{ content: ["sibling used released slot"] },
+				{ content: ["same Attempt resumed"] },
+			],
+		});
+		const execution = admittedExecution(mock.model, modelRegistry, { scopeAgents: 1 });
+		const resolver = execution.optionsFor({ deviceId: "engine-runtime-test-device" }).resolveExecution!;
+		const provider = spyOn(globalThis, "fetch").mockImplementation((async () => {
+			sideEntered.resolve();
+			await releaseSide.promise;
+			return new Response("ok");
+		}) as typeof fetch);
+		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
+			resolveExecution: async (config, frozen, attempt, resolverCwd, signal) => {
+				const resolved = await resolver(config, frozen, attempt, resolverCwd, signal);
+				const route = config.routes.routes[0]!;
+				resolved.options.providerRequestHook = new ProviderAdmissionClient(
+					"http://admission.invalid", "fixture", async () => Response.json({ allowed: true }),
+				).createHook(undefined, auth, "", [{
+					...attempt, routeRef: route.route_ref, routeContentHash: `sha256:${"a".repeat(64)}`,
+					providerAccountRef: route.account_ref, providerAccountContentHash: `sha256:${"b".repeat(64)}`,
+					credentialGeneration: 1, providerId: mock.model.provider, runtimeProviderId: mock.model.provider,
+					modelId: mock.model.id, baseUrl: mock.model.baseUrl,
+				}]);
+				return resolved;
+			},
+		});
+		try {
+			const request = (id: string) => startRequest(execution, {
+				commandId: `${id}-start`, agentInstanceId: id, agentInstanceRef: `${execution.taskRef}/agents/${id}`,
+				executionId: `${id}-execution`, attemptId: `${id}-attempt`,
+			}, { cwd, principalId: "owner", input: id });
+			const started = await admitRequest(runtime, request("side-pause"));
+			await primaryEntered.promise;
+			const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+			const side = session.runEphemeralTurn({ promptText: "independent side request" })
+				.then(value => value, error => error);
+			await withTimeout(sideEntered.promise, 5_000, "Side request did not reach its admitted provider");
+			const paused = nextEngineEvent(runtime, "paused", started.attemptId);
+			const hold = await runtime.pause({ ...started, commandId: "pause-side",
+				initiator: { kind: "human" }, expectedIntentRevision: started.intentRevision });
+			releasePrimary.resolve();
+			const gate = await withTimeout(primaryParked.promise, 5_000, "Primary did not park");
+			expect(gate.parked).toBe(true);
+			// The provider stays held throughout this observation; primary parking alone cannot release its lease.
+			await scheduler.wait(50);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("pause_requested");
+			expect(await runtime.store.runtimeCommand("side-pause-start")).toMatchObject({ lease: { held: true } });
+			releaseSide.resolve();
+			expect(await side).toMatchObject({ replyText: "side completed" });
+			await withTimeout(paused, 5_000, "Pause did not finish after side settlement");
+			expect(await runtime.store.runtimeCommand("side-pause-start")).toMatchObject({ lease: { held: false } });
+			const siblingCompleted = nextEngineEvent(runtime, "completed", "side-sibling-attempt");
+			await admitRequest(runtime, request("side-sibling"));
+			await withTimeout(siblingCompleted, 5_000, "Sibling could not use the released native slot");
+			await runtime.resume({ ...started, commandId: "resume-side", initiator: { kind: "human" },
+				expectedIntentRevision: hold.intentRevision, principalId: "owner",
+				message: "continue this Attempt", clientMessageId: "side-resume-message" });
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+			const events = await runtime.store.pendingEvents();
+			const sideSettlement = events.find(event => event.attemptId === started.attemptId &&
+				event.kind === "model_settled" && Array.isArray(event.payload?.requests) && event.payload.requests.length > 0);
+			const pauseEvent = events.find(event => event.attemptId === started.attemptId && event.kind === "paused");
+			expect(sideSettlement!.eventId).toBeLessThan(pauseEvent!.eventId);
+			expect(mock.calls).toHaveLength(4);
+		} finally {
+			releasePrimary.resolve();
+			releaseSide.resolve();
+			await runtime.dispose();
+			gateObserver.mockRestore();
+			provider.mockRestore();
+		}
+	}, 30_000);
 
 	it("waits for a pause_requested safe point before admitting the message and continuing", async () => {
 		const entered = Promise.withResolvers<void>();
@@ -2055,8 +2156,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	}, 30_000);
 
-	it.each(["complete", "cancel", "write_failure"] as const)(
-		"keeps streamed side results and Attempt %s behind durable model settlement", async mode => {
+	it.each([
+		{ mode: "complete", origin: "headless" },
+		{ mode: "complete", origin: "browser" },
+		{ mode: "cancel", origin: "headless" },
+		{ mode: "write_failure", origin: "headless" },
+	] as const)(
+		"keeps $origin side results and Attempt $mode behind durable model settlement", async ({ mode, origin }) => {
 			const dispatchEntered = Promise.withResolvers<void>();
 			const finishPrompt = Promise.withResolvers<boolean>();
 			const settling = Promise.withResolvers<void>();
@@ -2103,11 +2209,28 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				return await settle(...args);
 			});
 			try {
-				const started = await admitRequest(runtime, startRequest(execution, {
+				const request = startRequest(execution, {
 					commandId: `side-${mode}`, agentInstanceId: `side-${mode}`,
 					agentInstanceRef: `grimoire://tasks/grimoire/side/agents/${mode}`,
 					executionId: `side-execution-${mode}`, attemptId: `side-attempt-${mode}`,
-				}, { cwd, principalId: "owner", input: "primary" }));
+				}, { cwd, principalId: "owner", input: "primary" });
+				const command = startEnvelope(runtime, execution, request, {
+					deviceId: "engine-runtime-test-device", engineId: "engine-runtime-test-engine",
+					...(origin === "browser" ? {
+						browserTarget: { agentInstanceRef: request.agentInstanceRef! },
+						browserPayloadHash: `sha256:${"c".repeat(64)}`,
+					} : {}),
+				});
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+				const started = await runtime.start(request);
+				const proof = await runtime.store.runtimeCommand(request.commandId,
+					{ principalId: "owner" }, undefined, undefined, true);
+				expect(proof).not.toHaveProperty("attemptId");
+				expect(proof).toMatchObject({
+					lookup: "known", stage: "applied", lease: { held: true },
+					command: { attemptId: request.attemptId, executionId: request.executionId },
+				});
+				if (origin === "browser") expect(proof.target).toEqual(command.browserTarget);
 				await dispatchEntered.promise;
 				const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
 				let visible = false;

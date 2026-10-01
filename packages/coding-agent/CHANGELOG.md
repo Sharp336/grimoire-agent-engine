@@ -20,6 +20,7 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Side-provider admission verifies the original serialized Start and current native lease for both browser and headless commands without rewriting immutable browser receipt targets. Pause waits for admitted side model calls to finish durable settlement before releasing its routing lease, but does not wait on outer maintenance scopes that may depend on the paused primary turn.
 - Headless and MCP commands publish their persisted native admission/settlement receipt through the durable broker outbox, including rejected controls before an Attempt exists. Native delivery and command lookup share the retained target and canonical command hash; browser receipts keep their separate payload-hash contract.
 - Hosted delivery acknowledges only an exact authenticated `absent` disposition for truly local commands, not busy jobs or transient failures. Later exact Core-backed claims reuse the persisted native outcome after authorized localization; active Starts remain active, and terminal Starts use the existing canonical result recovery without another execution or regenerated event.
 - A conflicting retained command follows the broker's existing report-and-TERM path without rejecting the original job or blocking later claims on the same delivery lane.

@@ -371,6 +371,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	activeModelCalls: Set<Promise<void>>;
 	/** Side operations (compaction, handoff, summaries, helpers) of `sideAttemptId`, drained before it ends. */
 	sideRequests: Set<Promise<void>>;
+	/** Model calls only: pause must not wait on outer maintenance scopes parked behind the primary turn. */
+	sideModelCalls: Set<Promise<void>>;
 	sideAbort: AbortController;
 	sideAttemptId: string;
 	/** Per open model effect, the highest responded request: its frozen digest prices the usage. */
@@ -3415,6 +3417,7 @@ export class EngineRuntime {
 				measuredUsage: new Map(),
 				activeModelCalls: new Set(),
 				sideRequests: new Set(),
+				sideModelCalls: new Set(),
 				sideAbort: new AbortController(),
 				sideAttemptId: request.attemptId,
 				respondedRequests: new Map(),
@@ -4595,7 +4598,7 @@ export class EngineRuntime {
 				for (const [id, tool] of binding.traceTools) if (tool.name === "ask") suspended.add(id);
 			const active = [...binding.activeToolCallIds].some(id => !suspended.has(id));
 			if (
-				!active &&
+				!active && binding.sideModelCalls.size === 0 &&
 				(binding.pauseGate.parked || suspended.size > 0 || binding.pendingInput || !binding.session.isStreaming)
 			)
 				break;
@@ -4606,6 +4609,8 @@ export class EngineRuntime {
 			]);
 		}
 		if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
+		// A side call with an uncommitted settlement is not a safe lease-release point.
+		if (binding.messageWriteError) throw binding.messageWriteError;
 		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
@@ -4990,24 +4995,38 @@ export class EngineRuntime {
 		// A held side leaf refuses without taking the agent lane: teardown may own that lane
 		// while draining this operation. The primary turn owns pause/resume scheduling.
 		await this.store.assertIntent(binding.agentInstanceId, undefined, true);
-		const admitted = await this.store.runtimeCommand(binding.commandId, { principalId: binding.principalId });
+		const admitted = await this.store.runtimeCommand(binding.commandId,
+			{ principalId: binding.principalId }, undefined, undefined, true);
+		// A browser receipt's target is its immutable intent target, which may omit the
+		// eventual Attempt. Compare the retained serialized Start, shared by both origins.
+		const start = admitted.command as EngineCommandEnvelope | undefined;
 		const lease = admitted.lease as { held?: boolean; engineGeneration?: number } | undefined;
-		if (admitted.attemptId !== binding.attemptId || lease?.held !== true ||
-			lease.engineGeneration !== binding.engineGeneration || binding.engineGeneration !== this.engineGeneration)
+		if (admitted.lookup !== "known" || admitted.stage !== "applied" ||
+			start?.op !== "start" || start.commandId !== binding.commandId ||
+			start.agentInstanceId !== binding.agentInstanceId || start.attemptId !== binding.attemptId ||
+			start.executionId !== binding.executionId || start.principalId !== binding.principalId ||
+			(binding.bindingSnapshot && start.agentInstanceRef !== binding.bindingSnapshot.agentInstanceRef) ||
+			lease?.held !== true || lease.engineGeneration !== binding.engineGeneration ||
+			binding.engineGeneration !== this.engineGeneration)
 			throw new EngineTargetError("stale_target", "Side credential resolution requires the current admitted lease");
 	}
 
 	/** Every model call stays registered through its final durable settlement, even inside a reused scope. */
-	async #trackSideWork<T>(binding: LiveBinding, work: () => Promise<T>): Promise<T> {
+	async #trackSideWork<T>(binding: LiveBinding, work: () => Promise<T>, modelCall = false): Promise<T> {
 		const done = Promise.withResolvers<void>();
 		binding.sideRequests.add(done.promise);
 		binding.activeModelCalls.add(done.promise);
+		if (modelCall) binding.sideModelCalls.add(done.promise);
 		try {
 			return await work();
 		} finally {
 			done.resolve();
 			binding.sideRequests.delete(done.promise);
 			binding.activeModelCalls.delete(done.promise);
+			if (modelCall) {
+				binding.sideModelCalls.delete(done.promise);
+				this.#notifyPauseProgress(binding);
+			}
 		}
 	}
 
@@ -5022,7 +5041,7 @@ export class EngineRuntime {
 			const live = binding!;
 			return await this.#auxiliaryModelEffect(live, sha256(`side\0${model.provider}\0${model.id}`), model,
 				() => work(live.sideAbort.signal), message);
-		}));
+		}, true));
 	}
 
 	/** Cancel the Attempt's side operations and wait for them, so none writes after its fence. */
