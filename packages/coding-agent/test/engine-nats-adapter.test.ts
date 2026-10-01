@@ -41,6 +41,25 @@ import {
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
 
+it("waits for complete NATS ports-file publication without masking other reader errors", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `omp-nats-ports-${Snowflake.next()}-`));
+	const manifestPath = path.join(root, "fixture_1.ports");
+	try {
+		expect(await readNatsServerUrl(root)).toBeUndefined();
+		for (const incomplete of ["", '{"nats":["']) {
+			fs.writeFileSync(manifestPath, incomplete);
+			expect(await readNatsServerUrl(root)).toBeUndefined();
+		}
+		const url = "nats://127.0.0.1:4222";
+		fs.writeFileSync(manifestPath, JSON.stringify({ nats: [url] }));
+		expect(await readNatsServerUrl(root)).toBe(url);
+		fs.writeFileSync(manifestPath, "null");
+		await expect(readNatsServerUrl(root)).rejects.toBeInstanceOf(TypeError);
+	} finally {
+		removeSyncWithRetries(root);
+	}
+});
+
 describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEngineAdapter", () => {
 	bindTestsToStorageWorker();
 	let tempDir: string | undefined;
@@ -2369,6 +2388,19 @@ function startCommand(
 	return command;
 }
 
+async function readNatsServerUrl(portsDir: string): Promise<string | undefined> {
+	const files = await Array.fromAsync(new Bun.Glob("*.ports").scan({ cwd: portsDir, onlyFiles: true }));
+	if (!files[0]) return undefined;
+	try {
+		const manifest = (await Bun.file(path.join(portsDir, files[0])).json()) as { nats?: string[] };
+		return manifest.nats?.[0];
+	} catch (error) {
+		// NATS publishes this file with a direct write; visible partial JSON is not readiness.
+		if (error instanceof SyntaxError) return undefined;
+		throw error;
+	}
+}
+
 async function startNatsServer(root: string) {
 	const portsDir = path.join(root, "ports");
 	const dataDir = path.join(root, "jetstream");
@@ -2378,14 +2410,12 @@ async function startNatsServer(root: string) {
 		{ stdout: "pipe", stderr: "pipe", windowsHide: true },
 	);
 	try {
-		let manifest: { nats?: string[] } | undefined;
+		let url: string | undefined;
 		await waitFor(async () => {
-			const files = await Array.fromAsync(new Bun.Glob("*.ports").scan({ cwd: portsDir, onlyFiles: true }));
-			if (!files[0]) return false;
-			manifest = (await Bun.file(path.join(portsDir, files[0])).json()) as { nats?: string[] };
-			return Boolean(manifest.nats?.[0]);
+			url = await readNatsServerUrl(portsDir);
+			return Boolean(url);
 		});
-		return { process, url: manifest?.nats?.[0] ?? "" };
+		return { process, url: url ?? "" };
 	} catch (error) {
 		process.kill();
 		await process.exited;
