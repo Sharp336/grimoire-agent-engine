@@ -366,6 +366,34 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			checkpoint = await restarted.bindingCensus(emptyParams, generation);
 		expect(checkpoint).toMatchObject({ status: "complete", runtime_contract_hash: RUNTIME_PROTOCOL_HASH,
 			mutable_pending_writes: 0, next_cursor: null });
+		// Historical metadata reads are not current writes: expose the pre-hash shape only at its retained revision.
+		const retained = await restarted.records.get("metadata", censusKey);
+		if (!retained.value || retained.revision === null) throw new Error("Retained census fixture is missing");
+		const legacy = structuredClone(retained);
+		delete (legacy.value!.checkpoint as Partial<EngineBindingCheckpoint>).runtime_contract_hash;
+		const legacyBytes = storageCanonicalJson(legacy);
+		const retainedGate = await restarted.semanticGate(emptyId);
+		const readCurrent = restarted.records.getMany.bind(restarted.records);
+		const historicalRead = spyOn(restarted.records, "getMany").mockImplementation(async (keys, control) =>
+			(await readCurrent(keys, control)).map(row =>
+				row.kind === "metadata" && row.id === censusKey && row.revision === retained.revision ? legacy : row));
+		try {
+			await expect(restarted.bindingTransition("adopt", { ...committed, action: "status" }, staged))
+				.rejects.toMatchObject({ code: "binding_pending" });
+			expect(await restarted.semanticGate(emptyId)).toEqual(retainedGate);
+			checkpoint = await restarted.bindingCensus(emptyParams, generation);
+			expect(checkpoint).toMatchObject({ status: "unknown", runtime_contract_hash: RUNTIME_PROTOCOL_HASH });
+			expect(typeof checkpoint.next_cursor).toBe("string");
+			// The real native write advances the revision; the read fixture no longer intercepts the new scan.
+			expect((await restarted.records.get("metadata", censusKey)).revision).toBeGreaterThan(retained.revision);
+			for (let page = 0; checkpoint.next_cursor && page < 30; page++)
+				checkpoint = await restarted.bindingCensus(emptyParams, generation);
+			expect(checkpoint).toMatchObject({ status: "complete", runtime_contract_hash: RUNTIME_PROTOCOL_HASH,
+				mutable_pending_writes: 0, next_cursor: null });
+			expect(storageCanonicalJson(legacy)).toBe(legacyBytes);
+		} finally {
+			historicalRead.mockRestore();
+		}
 		const firstAdopt = await restarted.bindingTransition("adopt", { ...committed, action: "status" }, staged);
 		for (const action of ["commit", "status", "prepare"] as const)
 			expect(await restarted.bindingTransition("adopt", { ...committed, action }, staged)).toEqual(firstAdopt);
