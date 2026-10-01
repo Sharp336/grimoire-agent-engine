@@ -20,7 +20,7 @@ import {
 	StreamAdmissionError,
 	type StreamAdmissionLimits,
 } from "@oh-my-pi/pi-ai/utils/stream-admission";
-import { getBlobsDir, logger, SUPPORTED_IMAGE_MIME_TYPES, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, isRecord, logger, SUPPORTED_IMAGE_MIME_TYPES, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	attachLatencyPersistence,
 	createLatencyAudit,
@@ -392,6 +392,26 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pendingInput?: PendingInput;
 }
 
+interface SubmittedRun {
+	binding: LiveBinding;
+	root: SubmittedOperation;
+	rootEffectId: string;
+	wrapperCallId: string;
+	handling: "blocking" | "nonblocking";
+	dispatch: EngineRequestDispatch;
+	controller: AbortController;
+	pending: Set<string>;
+	members: Set<string>;
+	activeSideRequests: number;
+	changed: PromiseWithResolvers<void>;
+	execution?: Promise<void>;
+	termination?: { status: "failed" | "cancelled" | "unknown"; reason: string };
+	cancellation?: Promise<void>;
+	cancellationBoundaries: Set<() => void>;
+	forceCancellationRequested?: boolean;
+	outcome?: { result: AgentToolResult<unknown> } | { error: unknown };
+}
+
 interface AssistantStreamState {
 	attemptId: string;
 	sourceTimestamp: number;
@@ -433,12 +453,15 @@ interface ToolInvocationRecord {
 	submittedOperation?: SubmittedOperation;
 	requestHandling?: "blocking" | "nonblocking";
 	wrapperCallId?: string;
+	submittedRun?: SubmittedRun;
+	submittedParentEffectId?: string;
+	executionFinished?: boolean;
 	target: EngineBindingSnapshot;
 	done: Promise<void>;
 	resolveDone: () => void;
 	settled: boolean;
 	checkpoint?: SessionDurabilityCheckpoint;
-	outcome?: { status: "completed" | "failed" | "cancelled"; error?: string; jobIds?: string[] };
+	outcome?: { status: "completed" | "failed" | "cancelled" | "unknown"; error?: string; jobIds?: string[] };
 }
 
 interface PendingToolApproval {
@@ -630,6 +653,9 @@ export class EngineRuntime {
 	readonly #recoveryTimers = new Map<string, NodeJS.Timeout>();
 	readonly #approvalRoutingWakes = new Set<string>();
 	readonly #pendingStarts = new Set<PendingStartResolution>();
+	readonly #submittedRun = new AsyncLocalStorage<SubmittedRun>();
+	readonly #submittedParent = new AsyncLocalStorage<string>();
+	readonly #requestContinuations = new Map<string, { run: SubmittedRun; gate: PromiseWithResolvers<void> }>();
 	readonly #sessionRoot: string;
 	#inboxWakeSignal = Promise.withResolvers<void>();
 	#inboxWakeRun?: Promise<void>;
@@ -1630,6 +1656,9 @@ export class EngineRuntime {
 			clearTimeout(this.#approvalTimers.get(decision.request_id));
 			this.#approvalTimers.delete(decision.request_id);
 			if (approval.request.handling === "nonblocking") {
+				const continuation = this.#requestContinuations.get(decision.request_id);
+				if (continuation && decision.decision === "deny")
+					this.#trackRun(this.#cancelSubmittedRun(continuation.run, decision.reason ?? "Submitted operation refused", "failed"));
 				if (live) await this.#wakeWaitingRequest(live);
 				return;
 			}
@@ -1685,7 +1714,7 @@ export class EngineRuntime {
 			}
 			const result = validateInputResult(request.result, pending.questions);
 			if (pending.handling === "nonblocking") {
-				const indexed = result.kind === "chat" ? result : { kind: "submit", results: result.results.map((answer, index) => ({
+				const indexed = result.kind === "chat" ? { kind: "chat" } : { kind: "submit", results: result.results.map((answer, index) => ({
 					id: answer.id,
 					selectedOptionIndexes: answer.selectedOptions.map(label => pending.questions[index].options.findIndex(option => option.label === label)),
 					...(answer.customInput !== undefined ? { customInput: answer.customInput } : {}),
@@ -3052,6 +3081,8 @@ export class EngineRuntime {
 					return this.#beforeToolExecution(liveBinding, call, signal);
 				},
 				after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
+				run: (_call, token, work) => this.#toolInvocations.get(token.invocationId)?.submittedRun
+					? this.#submittedParent.run(token.invocationId, work) : work(),
 			};
 			const spawn = config.dispatch.spawn;
 			const maxChildren = spawn.allowed === "no" ? 0 : spawn.max_children;
@@ -3209,7 +3240,16 @@ export class EngineRuntime {
 				preloadedCustomToolPaths: [],
 				interactivePrompts: true,
 				toolExecutionHook,
-				engineRequest: { invoke: (callId, input, dispatch, signal) => {
+				engineRequest: { ownsCurrentOperation: () => Boolean(liveBinding && this.#submittedRun.getStore()?.binding === liveBinding),
+					mayTerminateSharedKernel: () => Boolean(this.#disposed || liveBinding?.attemptState === "cancel_requested" || liveBinding?.state === "released"),
+					registerCancellationBoundary: force => {
+						const run = this.#submittedRun.getStore();
+						if (!run || run.binding !== liveBinding) throw new EngineTargetError("stale_target", "Cancellation owner is not bound");
+						run.cancellationBoundaries.add(force);
+						if (run.forceCancellationRequested) force();
+						return () => { run.cancellationBoundaries.delete(force); };
+					},
+					invoke: (callId, input, dispatch, signal) => {
 					if (!liveBinding) throw new Error("Request has no admitted Engine binding");
 					return this.#invokeRequest(liveBinding, callId, input, dispatch, signal);
 				} },
@@ -3940,6 +3980,103 @@ export class EngineRuntime {
 		}
 	}
 
+	#parkedSubmittedWork(binding: LiveBinding): { effects: Set<string>; calls: Set<string> } {
+		const effects = new Set<string>();
+		const calls = new Set<string>();
+		const waiting = new Map<string, SubmittedRun>();
+		for (const [id, continuation] of this.#requestContinuations)
+			if (continuation.run.binding === binding && continuation.run.pending.has(id)) waiting.set(id, continuation.run);
+		for (const [id, pending] of this.#pendingToolApprovals)
+			if (pending.record.submittedRun?.binding === binding) waiting.set(id, pending.record.submittedRun);
+		for (const id of this.#pendingEscalations.keys()) {
+			const run = this.#toolInvocations.get(id)?.submittedRun;
+			if (run?.binding === binding) waiting.set(id, run);
+		}
+		for (const [id, run] of waiting) {
+			let current: string | undefined = id;
+			while (current && !effects.has(current)) {
+				const record = this.#toolInvocations.get(current);
+				if (!record || record.submittedRun !== run) break;
+				effects.add(current);
+				calls.add(record.toolCallId);
+				current = record.submittedParentEffectId;
+				if (run.activeSideRequests) break;
+			}
+		}
+		for (const run of waiting.values())
+			if (!run.activeSideRequests && [...run.members].every(id => {
+				const record = this.#toolInvocations.get(id);
+				return !record || record.executionFinished || effects.has(id);
+			})) calls.add(run.wrapperCallId);
+		return { effects, calls };
+	}
+
+	#submittedRunChanged(run: SubmittedRun): void {
+		run.changed.resolve();
+		run.changed = Promise.withResolvers<void>();
+		this.#notifyPauseProgress(run.binding);
+	}
+
+	async #awaitSubmittedRun(run: SubmittedRun): Promise<AgentToolResult<unknown>> {
+		for (;;) {
+			const changed = run.changed.promise;
+			const parked = this.#parkedSubmittedWork(run.binding).effects;
+			const active = run.activeSideRequests > 0 || [...run.members].some(id => {
+				const record = this.#toolInvocations.get(id);
+				return record && !record.executionFinished && !parked.has(id);
+			});
+			if (run.pending.size && !active) {
+				run.dispatch.setUpdateHandler(undefined);
+				const requestId = run.pending.values().next().value!;
+				const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
+				validateRuntimeValue("requestToolPending", pending);
+				return { content: [{ type: "text", text: JSON.stringify(pending) }], details: { requestResult: pending } };
+			}
+			if (run.outcome) {
+				const root = this.#toolInvocations.get(run.rootEffectId);
+				if (active || (root && !root.executionFinished)) { await changed; continue; }
+				if (run.termination) return { isError: true,
+					content: [{ type: "text", text: run.termination.reason }], details: { operationOutcome: run.termination.status } };
+				if ("result" in run.outcome) return run.outcome.result;
+				if (run.outcome.error instanceof EngineRequestPending) {
+					const requestId = run.outcome.error.requestId;
+					const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
+					return { content: [{ type: "text", text: JSON.stringify(pending) }], details: { requestResult: pending } };
+				}
+				throw run.outcome.error;
+			}
+			await changed;
+		}
+	}
+
+	async #parkSubmittedLeaf(record: ToolInvocationRecord, signal?: AbortSignal): Promise<void> {
+		const run = record.submittedRun;
+		if (!run || run.rootEffectId === record.invocationId)
+			throw new EngineRequestPending(record.invocationId);
+		const gate = Promise.withResolvers<void>();
+		this.#requestContinuations.set(record.invocationId, { run, gate });
+		run.pending.add(record.invocationId);
+		run.binding.parkedEffectTools.add(record.toolCallId);
+		run.binding.parkedEffectTools.add(run.root.tool_call_id);
+		this.#submittedRunChanged(run);
+		const abort = () => {
+			this.#trackRun(this.#cancelSubmittedRun(run,
+				run.controller.signal.aborted ? "Submitted operation was cancelled" : "recovery_required: submitted execution boundary was lost",
+				run.controller.signal.aborted ? "cancelled" : "unknown"));
+		};
+		if (signal?.aborted) abort();
+		else signal?.addEventListener("abort", abort, { once: true });
+		try { await gate.promise; }
+		finally {
+			signal?.removeEventListener("abort", abort);
+			this.#requestContinuations.delete(record.invocationId);
+			run.pending.delete(record.invocationId);
+			run.binding.parkedEffectTools.delete(record.toolCallId);
+			if (!run.pending.size) run.binding.parkedEffectTools.delete(run.root.tool_call_id);
+			this.#submittedRunChanged(run);
+		}
+	}
+
 	async #invokeRequest(binding: LiveBinding, callId: string, input: EngineRequestInput,
 		dispatch: EngineRequestDispatch, signal?: AbortSignal): Promise<AgentToolResult<unknown>> {
 		signal?.throwIfAborted();
@@ -4000,21 +4137,41 @@ export class EngineRuntime {
 			const entry = branch.find(entry => entry.id === retained.transcript.entry_id);
 			if (manager.getSessionId() !== retained.transcript.session_id ||
 				!branch.some(entry => entry.id === retained.transcript.leaf_id) ||
-				!entry || entry.type !== "message" || entry.message.role !== "assistant")
+				!entry)
 				throw new EngineTargetError("source_unavailable", "Original request transcript is unavailable on this Attempt");
-			let originalArgs: Record<string, unknown> | undefined;
-			for (const block of entry.message.content) {
-				if (block.type !== "toolCall" || block.name !== "request") continue;
-				const submitted = block.arguments as EngineRequestInput;
-				if (submitted.action !== "submit" || submitted.operation.toolName !== retained.tool_name) continue;
-				const candidate = dispatch.validate(retained.tool_name, submitted.operation.arguments);
-				const hash = `sha256:${sha256(stableStringifyJson(candidate))}`;
-				if (hash === retained.arguments_hash &&
-					`request_${sha256(`${binding.attemptId}\0${block.id}\0${hash}`)}` === retained.tool_call_id) {
-					originalArgs = candidate;
-					break;
+			const originalArguments = (source: SessionEntry | undefined, original: SubmittedOperation): Record<string, unknown> | undefined => {
+				if (!source || source.type !== "message" || source.message.role !== "assistant") return undefined;
+				for (const block of source.message.content) {
+					if (block.type !== "toolCall" || block.name !== "request") continue;
+					validateRuntimeValue("requestToolInput", block.arguments);
+					const submitted = block.arguments as EngineRequestInput;
+					if (submitted.action !== "submit" || submitted.operation.toolName !== original.tool_name) continue;
+					const candidate = dispatch.validate(original.tool_name, submitted.operation.arguments);
+					const hash = `sha256:${sha256(stableStringifyJson(candidate))}`;
+					if (hash === original.arguments_hash &&
+						`request_${sha256(`${binding.attemptId}\0${block.id}\0${hash}`)}` === original.tool_call_id)
+						return candidate;
 				}
-			}
+				return undefined;
+			};
+			let originalArgs: Record<string, unknown> | undefined;
+			if (entry.type === "custom" && entry.customType === "engine-request-operation") {
+				const data = entry.data;
+				const live = this.#requestContinuations.get(input.requestId);
+				if (!live || live.run.binding !== binding || !live.run.members.has(input.requestId))
+					throw new EngineTargetError("source_unavailable", "recovery_required: composite stack is unavailable; parent and siblings will not replay");
+				if (!isRecord(data) || data.attemptId !== binding.attemptId || data.bindingId !== binding.bindingId ||
+					data.rootEffectId !== live.run.rootEffectId || data.toolName !== retained.tool_name ||
+					data.toolCallId !== retained.tool_call_id || data.argumentsHash !== retained.arguments_hash || !isRecord(data.arguments))
+					throw new EngineTargetError("stale_target", "Retained nested operation ownership changed");
+				validateRuntimeValue("submittedOperation", data.root);
+				const root = data.root as SubmittedOperation; // Validated canonical locator shape above.
+				if (executionHash(root) !== executionHash(live.run.root) ||
+					!originalArguments(branch.find(source => source.id === root.transcript.entry_id), root))
+					throw new EngineTargetError("stale_target", "Nested operation lost its original submitted root");
+				const candidate = dispatch.validate(retained.tool_name, data.arguments);
+				if (`sha256:${sha256(stableStringifyJson(candidate))}` === retained.arguments_hash) originalArgs = candidate;
+			} else originalArgs = originalArguments(entry, retained);
 			if (!originalArgs) throw new EngineTargetError("stale_target", "Original operation name, arguments or call identity changed");
 			operation = retained;
 			args = originalArgs;
@@ -4029,25 +4186,36 @@ export class EngineRuntime {
 			})]);
 			if (approval.request.kind === "spawn")
 				binding.spawnApprovals.set(operation.tool_call_id, approval.decision_record.origin_receipt_id);
+			const continuation = this.#requestContinuations.get(requestId);
+			if (continuation) {
+				continuation.run.wrapperCallId = callId;
+				continuation.run.dispatch.setUpdateHandler(dispatch.onUpdate);
+				for (const id of continuation.run.members) {
+					const record = this.#toolInvocations.get(id);
+					if (record) record.wrapperCallId = callId;
+				}
+				continuation.run.pending.delete(requestId);
+				this.#requestContinuations.delete(requestId);
+				continuation.gate.resolve();
+				this.#submittedRunChanged(continuation.run);
+				return this.#awaitSubmittedRun(continuation.run);
+			}
 		}
 		binding.submittedCalls.set(operation.tool_call_id, {
 			operation, handling, wrapperCallId: callId, continuing: input.action === "continue",
 		});
-		try {
-			let result: AgentToolResult<unknown> | undefined;
-			try { result = await dispatch.execute(operation.tool_name, operation.tool_call_id, args); }
-			catch (error) { if (!(error instanceof EngineRequestPending) || error.requestId !== requestId) throw error; }
-			const approval = await this.store.getApproval(requestId);
-			if (input.action === "submit" && approval?.request.handling === "nonblocking") {
-				const pending = { requestId, effectId: requestId, status: "pending", handling: "nonblocking" };
-				validateRuntimeValue("requestToolPending", pending);
-				return reply(pending);
+		const run: SubmittedRun = { binding, root: operation, rootEffectId: requestId, wrapperCallId: callId, handling, dispatch,
+			controller: new AbortController(), pending: new Set(), members: new Set(), changed: Promise.withResolvers<void>(),
+			cancellationBoundaries: new Set(), activeSideRequests: 0 };
+		run.execution = this.#submittedRun.run(run, async () => {
+			try { run.outcome = { result: await dispatch.execute(operation.tool_name, operation.tool_call_id, args, run.controller.signal) }; }
+			catch (error) { run.outcome = { error }; }
+			finally {
+				binding.submittedCalls.delete(operation.tool_call_id);
+				this.#submittedRunChanged(run);
 			}
-			if (!result) throw new EngineTargetError("source_unavailable", "Original operation did not return its outcome");
-			return result;
-		} finally {
-			binding.submittedCalls.delete(operation.tool_call_id);
-		}
+		});
+		return this.#awaitSubmittedRun(run);
 	}
 
 	async #requestInput(
@@ -4176,7 +4344,7 @@ export class EngineRuntime {
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
 		// The tool's source blocks must be durable before publishing its admission.
-		const checkpoint = await this.#effectCheckpoint(binding);
+		let checkpoint = await this.#effectCheckpoint(binding);
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) throw binding.messageWriteError;
 		const policy = binding.execution.config.continuationConfiguration.toolPolicies[call.toolName] ?? "unrestricted";
@@ -4188,6 +4356,28 @@ export class EngineRuntime {
 		}
 		const done = Promise.withResolvers<void>();
 		const submitted = binding.submittedCalls.get(call.toolCallId);
+		const owner = this.#submittedRun.getStore();
+		if (owner && (owner.binding !== binding || owner.outcome || owner.controller.signal.aborted))
+			throw new EngineTargetError("stale_target", "Submitted operation owner is no longer active");
+		let nestedOperation: SubmittedOperation | undefined;
+		const parentId = owner && call.toolCallId !== owner.root.tool_call_id ? this.#submittedParent.getStore() : undefined;
+		if (owner && call.toolCallId !== owner.root.tool_call_id) {
+			const parent = parentId ? this.#toolInvocations.get(parentId) : undefined;
+			if (!parent || parent.submittedRun !== owner || parent.executionFinished)
+				throw new EngineTargetError("stale_target", "Nested dispatch lacks its live trusted parent invocation");
+			if (!isRecord(call.input) || stableStringifyJson(owner.dispatch.validate(call.toolName, call.input)) !== input)
+				throw new EngineTargetError("invalid_request", "Nested operation arguments must match the validated tool schema");
+			const manager = binding.session.sessionManager;
+			const entryId = manager.appendCustomEntry("engine-request-operation", {
+				attemptId: binding.attemptId, bindingId: binding.bindingId, root: owner.root, rootEffectId: owner.rootEffectId,
+				parentEffectId: parentId,
+				toolName: call.toolName, toolCallId: call.toolCallId, arguments: call.input, argumentsHash: `sha256:${inputHash}`,
+			});
+			checkpoint = await manager.flushAndCheckpoint();
+			nestedOperation = { tool_name: call.toolName, tool_call_id: call.toolCallId,
+				arguments_hash: `sha256:${inputHash}`, transcript: {
+					session_id: manager.getSessionId(), entry_id: entryId, leaf_id: entryId } };
+		}
 		const record: ToolInvocationRecord = {
 			invocationId,
 			policy,
@@ -4196,6 +4386,9 @@ export class EngineRuntime {
 			inputHash,
 			...(submitted ? { submittedOperation: submitted.operation, requestHandling: submitted.handling,
 				wrapperCallId: submitted.wrapperCallId } : {}),
+			...(owner ? { submittedRun: owner, wrapperCallId: owner.wrapperCallId,
+				submittedParentEffectId: parentId,
+				requestHandling: owner.handling, submittedOperation: nestedOperation ?? owner.root } : {}),
 			origin:
 				binding.toolOrigins?.attemptId === binding.attemptId
 					? binding.toolOrigins.blocks.get(call.toolCallId)
@@ -4206,6 +4399,7 @@ export class EngineRuntime {
 			settled: false,
 		};
 		this.#toolInvocations.set(invocationId, record);
+		owner?.members.add(invocationId);
 		if (submitted?.continuing) {
 			const effect = await this.store.getEffect(invocationId);
 			if (!effect || effect.state !== "started" || effect.tool_call_id !== call.toolCallId ||
@@ -4466,6 +4660,18 @@ export class EngineRuntime {
 			if (!existing) this.#notifyEvents([await this.store.requestStartedEffectApproval(
 				this.#snapshot(binding), record.invocationId, approval)]);
 			this.#armApprovalDeadline(binding, existing?.request ?? approval);
+			if (record.submittedRun && record.submittedRun.rootEffectId !== record.invocationId) {
+				try { await this.#parkSubmittedLeaf(record, signal); }
+				catch (error) {
+					this.#toolInvocations.delete(record.invocationId);
+					record.resolveDone();
+					throw error;
+				}
+				const decision = (await this.store.getApproval(record.invocationId))?.decision_record;
+				if (!decision || decision.decision === "deny")
+					throw new EngineTargetError("cancelled", "Nested escalation was not approved");
+				return decision.origin_receipt_id;
+			}
 			this.#toolInvocations.delete(record.invocationId);
 			record.resolveDone();
 			throw new EngineRequestPending(record.invocationId);
@@ -4573,7 +4779,16 @@ export class EngineRuntime {
 				this.#notifyEvents([event]);
 				this.#armApprovalDeadline(binding, request);
 			}
-			if (request.handling === "nonblocking") throw new EngineRequestPending(record.invocationId);
+			if (request.handling === "nonblocking") {
+				this.#pendingToolApprovals.delete(record.invocationId);
+				await this.#parkSubmittedLeaf(record, signal);
+				const approved = await this.store.getApproval(record.invocationId);
+				if (approved?.request.status !== "approved" || !approved.decision_record?.origin_receipt_id)
+					throw new EngineTargetError("cancelled", "Nested operation was not approved");
+				if (approved.request.kind === "spawn")
+					binding.spawnApprovals.set(record.toolCallId, approved.decision_record.origin_receipt_id);
+				return { invocationId: record.invocationId };
+			}
 		} catch (error) {
 			this.#pendingToolApprovals.delete(record.invocationId);
 			this.#toolInvocations.delete(record.invocationId);
@@ -4645,6 +4860,7 @@ export class EngineRuntime {
 			// Runs inside the persistence slot: draining that slot here would deadlock.
 			const checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
 			for (const record of records) {
+				if (record.submittedRun && !record.executionFinished) continue;
 				record.checkpoint = checkpoint;
 				if (record.outcome)
 					await this.#completeToolInvocation(
@@ -4686,17 +4902,21 @@ export class EngineRuntime {
 	): void {
 		const record = this.#toolInvocations.get(token.invocationId);
 		if (!record || record.toolCallId !== call.toolCallId || record.toolName !== call.toolName) return;
+		record.executionFinished = true;
+		if (record.submittedRun) this.#submittedRunChanged(record.submittedRun);
 		const jobs = this.asyncJobManager
 			.getAllJobs({ ownerId: record.target.engineAgentId, attemptId: record.target.attemptId })
 			.filter(job => job.sourceToolCallId === record.toolCallId);
 		const settle = async () => {
 			const failed = jobs.find(job => job.status === "failed");
 			const cancelled = jobs.find(job => job.status === "cancelled");
+			const termination = record.submittedRun?.rootEffectId === record.invocationId ? record.submittedRun.termination : undefined;
 			record.outcome = {
-				status: outcome.isError || failed ? "failed" : cancelled ? "cancelled" : "completed",
-				error: outcome.error ?? failed?.errorText,
+				status: termination?.status ?? (outcome.isError || failed ? "failed" : cancelled ? "cancelled" : "completed"),
+				error: termination?.reason ?? outcome.error ?? failed?.errorText,
 				jobIds: jobs.map(job => job.id),
 			};
+			if (record.submittedRun) this.#submittedRunChanged(record.submittedRun);
 			// Native completion is gated by the toolResult persistence callback.
 			if (record.checkpoint)
 				await this.#completeToolInvocation(
@@ -4728,7 +4948,7 @@ export class EngineRuntime {
 
 	async #completeToolInvocation(
 		record: ToolInvocationRecord,
-		status: "completed" | "failed" | "cancelled",
+		status: "completed" | "failed" | "cancelled" | "unknown",
 		error?: string,
 		jobIds?: string[],
 	): Promise<void> {
@@ -4762,15 +4982,66 @@ export class EngineRuntime {
 
 	async #waitForToolInvocations(binding: LiveBinding, attemptId: string): Promise<void> {
 		for (;;) {
+			const parked = this.#parkedSubmittedWork(binding).effects;
 			const pending = [...this.#toolInvocations.values()].filter(
-				record => record.target.bindingId === binding.bindingId && record.target.attemptId === attemptId,
+				record => record.target.bindingId === binding.bindingId && record.target.attemptId === attemptId &&
+					!(!record.executionFinished && parked.has(record.invocationId)),
 			);
 			if (pending.length === 0) return;
 			await Promise.all(pending.map(record => record.done));
 		}
 	}
 
+	#cancelSubmittedRun(run: SubmittedRun, reason: string, outcome: "failed" | "cancelled" | "unknown" = "cancelled"): Promise<void> {
+		const cancellation = run.cancellation ??= Promise.resolve().then(() => this.#finishSubmittedCancellation(run, reason, outcome));
+		if (!run.forceCancellationRequested &&
+			(this.#disposed || run.binding.attemptState === "cancel_requested" || run.binding.state === "released")) {
+			run.forceCancellationRequested = true;
+			for (const force of run.cancellationBoundaries) force();
+		}
+		return cancellation;
+	}
+
+	async #finishSubmittedCancellation(run: SubmittedRun, reason: string, outcome: "failed" | "cancelled" | "unknown"): Promise<void> {
+		run.termination = { status: outcome, reason };
+		const waiting = [...run.pending];
+		run.pending.clear();
+		run.controller.abort(new EngineTargetError("cancelled", reason));
+		for (const id of waiting) {
+			const continuation = this.#requestContinuations.get(id);
+			this.#requestContinuations.delete(id);
+			continuation?.gate.reject(new EngineTargetError("cancelled", reason));
+		}
+		this.#submittedRunChanged(run);
+		for (const id of waiting) {
+			const approval = await this.store.getApproval(id);
+			if (approval?.state === "pending")
+				this.#notifyEvents(await this.store.resolveApproval(this.#snapshot(run.binding), id, "cancelled", null));
+		}
+		// Existing worker/HTTP cancellation drains the actual root, including shielded critical phases.
+		const manager = run.binding.session.sessionManager;
+		manager.appendCustomEntry("engine-request-termination-requested", { attemptId: run.binding.attemptId,
+			rootEffectId: run.rootEffectId, outcome: "recovery_required", reason });
+		await manager.flushAndCheckpoint();
+		await run.execution;
+		manager.appendCustomEntry("engine-request-terminated", { attemptId: run.binding.attemptId,
+			rootEffectId: run.rootEffectId, outcome, reason });
+		const checkpoint = await manager.flushAndCheckpoint();
+		for (const id of run.members) {
+			const record = this.#toolInvocations.get(id);
+			if (!record) continue;
+			record.checkpoint = checkpoint;
+			if (id === run.rootEffectId) record.outcome = { status: outcome, error: reason };
+			if (record.outcome) await this.#completeToolInvocation(record,
+				record.outcome.status, record.outcome.error, record.outcome.jobIds);
+		}
+	}
+
 	async #cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): Promise<void> {
+		const submitted = new Set<SubmittedRun>();
+		for (const record of this.#toolInvocations.values())
+			if (record.target.bindingId === binding.bindingId && record.submittedRun) submitted.add(record.submittedRun);
+		for (const run of submitted) if (!run.outcome) await this.#cancelSubmittedRun(run, reason);
 		for (const pending of this.#pendingToolApprovals.values()) {
 			if (
 				pending.record.target.bindingId !== binding.bindingId ||
@@ -4927,6 +5198,7 @@ export class EngineRuntime {
 			const changed = this.store.changeSignal();
 			const progress = binding.pauseProgress.promise;
 			const suspended = new Set<string>(binding.parkedEffectTools);
+			for (const call of this.#parkedSubmittedWork(binding).calls) suspended.add(call);
 			for (const [toolCallId, child] of binding.childWaits) {
 				const childBinding = child.attemptId ? undefined : await this.store.getBinding(child.agentInstanceId);
 				const childAttempt = await this.store.getAttempt(child.attemptId ?? childBinding?.attemptId ?? "");
@@ -5334,6 +5606,9 @@ export class EngineRuntime {
 		if (!binding || this.#bindings.get(binding.agentInstanceId) !== binding ||
 			TERMINAL_ATTEMPT_STATES.has(binding.attemptState))
 			throw new EngineTargetError("too_late", "Provider work needs an active Attempt");
+		const submitted = this.#submittedRun.getStore();
+		if (submitted?.binding === binding && (submitted.termination || submitted.controller.signal.aborted))
+			throw new EngineTargetError("cancelled", "Submitted operation cannot admit another provider request");
 		if (binding.sideAttemptId !== binding.attemptId) {
 			binding.sideAttemptId = binding.attemptId;
 			binding.sideAbort = new AbortController();
@@ -5361,6 +5636,9 @@ export class EngineRuntime {
 	/** Every model call stays registered through its final durable settlement, even inside a reused scope. */
 	async #trackSideWork<T>(binding: LiveBinding, work: () => Promise<T>, modelCall = false): Promise<T> {
 		const done = Promise.withResolvers<void>();
+		const submitted = this.#submittedRun.getStore();
+		const owner = submitted?.binding === binding ? submitted : undefined;
+		if (owner) owner.activeSideRequests++;
 		binding.sideRequests.add(done.promise);
 		binding.activeModelCalls.add(done.promise);
 		if (modelCall) binding.sideModelCalls.add(done.promise);
@@ -5370,6 +5648,10 @@ export class EngineRuntime {
 			done.resolve();
 			binding.sideRequests.delete(done.promise);
 			binding.activeModelCalls.delete(done.promise);
+			if (owner) {
+				owner.activeSideRequests--;
+				this.#submittedRunChanged(owner);
+			}
 			if (modelCall) {
 				binding.sideModelCalls.delete(done.promise);
 				this.#notifyPauseProgress(binding);
@@ -6208,14 +6490,16 @@ export class EngineRuntime {
 					continue;
 				}
 			}
-			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
+			const parked = this.#parkedSubmittedWork(binding).calls;
+			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId,
+				isParked: job => Boolean(job.sourceToolCallId && parked.has(job.sourceToolCallId)) });
 			await this.asyncJobManager.drainDeliveries({ filter });
 			await this.#waitForToolInvocations(binding, attemptId);
 			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 			binding.streamAdmission?.check();
 			await binding.session.waitForIdle();
 			if (
-				this.asyncJobManager.getRunningJobs(filter).length === 0 &&
+				this.asyncJobManager.getRunningJobs(filter).every(job => job.sourceToolCallId && parked.has(job.sourceToolCallId)) &&
 				!this.asyncJobManager.hasPendingDeliveries(filter)
 			) {
 				return;

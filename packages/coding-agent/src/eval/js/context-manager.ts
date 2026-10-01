@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger, postmortem, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -46,6 +47,8 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
+	runInOwnerContext: <T>(work: () => T) => T;
+	requestOwned: boolean;
 	resolve(value: { value: unknown }): void;
 	reject(error: Error): void;
 	toolCalls: Map<string, AbortController>;
@@ -279,12 +282,15 @@ async function runOnce(
 		runState: VmRunState;
 	},
 ): Promise<{ value: unknown }> {
+	options.runState.signal?.throwIfAborted();
 	const runId = `r-${Snowflake.next()}`;
 	const { promise, resolve, reject } = Promise.withResolvers<{ value: unknown }>();
 	const pending: PendingRun = {
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
+		runInOwnerContext: AsyncLocalStorage.snapshot(),
+		requestOwned: options.session.engineRequest?.ownsCurrentOperation() === true,
 		resolve,
 		reject,
 		toolCalls: new Map(),
@@ -294,7 +300,7 @@ async function runOnce(
 	};
 	session.pending.set(runId, pending);
 
-	const onAbort = (): void => {
+	const abortRun = (force: boolean): void => {
 		const reason = options.runState.signal?.reason;
 		const abortError = reasonToError(reason, "Execution aborted");
 		// Stop delegated work at once — this is what kills spawned subagents —
@@ -302,6 +308,9 @@ async function runOnce(
 		// phases that had already started.
 		pending.aborted = true;
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(abortError);
+		// Per-submission refusal has no authority to kill other runs sharing this persistent kernel.
+		// Keep awaiting the real result; an uncooperative cancelled run remains non-quiescent.
+		if (!force && pending.requestOwned && !pending.toolSession.engineRequest?.mayTerminateSharedKernel()) return;
 		// A critical host phase ignores its abort once started (isolation
 		// worktree setup, merge/cherry-pick). Killing the worker now would
 		// settle the cell on top of a git operation still in progress, so wait
@@ -314,6 +323,9 @@ async function runOnce(
 		}
 		void killSessionFor(session, abortError, { force: true });
 	};
+	const onAbort = () => abortRun(false);
+	const unregisterCancellation = pending.requestOwned
+		? pending.toolSession.engineRequest?.registerCancellationBoundary(() => abortRun(true)) : undefined;
 
 	if (options.runState.signal?.aborted) {
 		queueMicrotask(onAbort);
@@ -332,6 +344,7 @@ async function runOnce(
 		return await promise;
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
+		unregisterCancellation?.();
 		session.pending.delete(runId);
 	}
 }
@@ -533,14 +546,14 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 	const ctrl = new AbortController();
 	pending.toolCalls.set(msg.id, ctrl);
 	try {
-		const value = await callSessionTool(msg.name, msg.args, {
+		const value = await pending.runInOwnerContext(() => callSessionTool(msg.name, msg.args, {
 			session: pending.toolSession,
 			signal: ctrl.signal,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
 				pending.runState.onDisplay?.({ type: "status", event });
 			},
-		});
+		}));
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });

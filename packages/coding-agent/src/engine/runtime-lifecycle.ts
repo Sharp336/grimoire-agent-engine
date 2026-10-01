@@ -1,7 +1,7 @@
 import type { EngineEvent } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 
-const lifecycleKinds = {
+export const lifecycleKinds: Readonly<Record<string, readonly [string, string]>> = {
 	running: ["started", "Attempt started"],
 	paused: ["paused", "Paused"],
 	resumed: ["running", "Resumed"],

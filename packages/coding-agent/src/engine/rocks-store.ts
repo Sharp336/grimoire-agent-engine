@@ -5,7 +5,7 @@ import type { ExtensionAskDialogQuestion } from "../extensibility/extensions/typ
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
-import type { StorageDependency, StoragePayload, StorageRuntimeIndex, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
+import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
@@ -1042,20 +1042,27 @@ export class RocksEngineMutations {
 
 	async retainedRequestInputs(target: EventTarget): Promise<RocksProjection[]> {
 		const retained: RocksProjection[] = [];
-		let cursor: string | undefined;
+		let after: string | undefined;
 		do {
-			const page = await this.records.query("projection_attempt" as StorageRuntimeIndex, ["input", target.attemptId], cursor);
+			// UI projection indexes intentionally omit resolved inputs; the retained Agent index does not.
+			const page = await this.records.query("agent_records", [target.agentInstanceId], undefined, 100,
+				after ? [after] : undefined);
 			for (const record of page.records) {
+				if (record.kind !== "projection") continue;
 				const row = record.value as unknown as RocksProjection;
-				if (row.agent_instance_id !== target.agentInstanceId || !row.body) continue;
+				if (row.subtype !== "input" || row.agent_instance_id !== target.agentInstanceId ||
+					row.attempt_id !== target.attemptId || !row.body) continue;
 				const effect = row.body.kind === "approval" ? await this.getEffect(String(row.value.inputId)) : undefined;
 				const nonblocking = row.body.handling === "nonblocking" ||
 					(row.body.request as { handling?: string } | undefined)?.handling === "nonblocking";
 				if (!row.resolved || (nonblocking && !requestConsumptionMatches(row)) || effect?.state === "planned" || effect?.state === "started")
 					retained.push(row);
 			}
-			cursor = page.nextCursor ?? undefined;
-		} while (cursor);
+			const next = page.nextCursor ? page.records.at(-1)?.id : undefined;
+			if (page.nextCursor && (!next || next === after))
+				throw new EngineTargetError("source_unavailable", "Retained request index did not advance");
+			after = next;
+		} while (after);
 		return retained;
 	}
 
@@ -1160,7 +1167,7 @@ export class RocksEngineMutations {
 				start.identity.agentInstanceId !== command.agentInstanceId || !start.identity.bindingSnapshot ||
 				!sameSemanticBinding(start.identity.bindingSnapshot, binding.binding_snapshot) ||
 				!approval || approval.state !== "pending" || approval.decision_record ||
-				!["pending", "waiting_human_paused"].includes(approval.request.status) ||
+				!["pending", "waiting_human_paused", "waiting_human_pending"].includes(approval.request.status) ||
 				approval.request.requester_attempt_id !== command.attemptId ||
 				approval.request.requester_agent_ref !== command.agentInstanceRef ||
 				approval.request.principal_id !== command.principalId ||
@@ -2699,7 +2706,7 @@ export class RocksEngineMutations {
 	async settleToolEffect(
 		target: EventTarget,
 		id: string,
-		outcome: "completed" | "failed" | "cancelled",
+		outcome: "completed" | "failed" | "cancelled" | "unknown",
 		options: { error?: string; jobIds?: string[]; checkpoint?: SessionDurabilityCheckpoint } = {},
 	): Promise<EngineEvent> {
 		if (outcome === "completed" && !options.checkpoint?.native) throw new EngineEffectConflictError(id);

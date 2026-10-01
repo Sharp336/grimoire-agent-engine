@@ -1073,6 +1073,161 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it.each(["mounted", "nested", "denied", "worker", "worker-denied", "worker-shared-denied", "worker-stop", "parallel"] as const)("preserves %s request ownership through the real mounted tool boundary", async mode => {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const allRequested = Promise.withResolvers<void>();
+		const independentLive = Promise.withResolvers<void>();
+		const shared = mode === "worker-shared-denied";
+		let independentLaunched = false;
+		const requests: Array<Extract<EngineEvent, { kind: "tool_approval_requested" }>["payload"]> = [];
+		const worker = mode.startsWith("worker") || mode === "parallel";
+		const denied = mode.endsWith("denied");
+		let continuationOrdinal = 0;
+		let phase = 0;
+		let requestId = "";
+		let decision: { decisionRevision: number; inputRevision: number } | undefined;
+		const call = (id: string, name: string, args: Record<string, unknown>) =>
+			({ content: [{ type: "toolCall" as const, id, name, arguments: args }] });
+		const mock = createMockModel({ handler: async context => {
+			switch (phase++) {
+				case 0: return call("submit-mounted", "request", { action: "submit", handling: "nonblocking",
+					operation: worker ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
+						'globalThis.requestKernelMarker="same-kernel"; await tool.write({path:"sibling-before.txt",content:"before"});' +
+						(mode === "parallel"
+							? 'const value=await Promise.all([tool.read({path:"protected-read.txt"}),tool.read({path:"protected-read.txt"})]);'
+							: 'const value=await tool.read({path:"protected-read.txt"});') +
+						'await tool.write({path:"sibling-after.txt",content:"after"}); display(value);' } }
+						: mode === "mounted" ? { toolName: "read", arguments: { path: "protected-read.txt" } }
+							: { toolName: "write", arguments: { path: "xd://read", content: JSON.stringify({ path: "protected-read.txt" }) } } });
+				case 1:
+					if (shared && !independentLaunched) {
+						independentLaunched = true;
+						phase = 1;
+						return call("independent-eval", "eval", { language: "js", timeout: 0, code:
+							'if(globalThis.requestKernelMarker!=="same-kernel") throw new Error("different kernel");' +
+							'const independentGate=Promise.withResolvers(); globalThis.releaseIndependent=independentGate.resolve; display("INDEPENDENT_RUNNING"); await independentGate.promise; display("INDEPENDENT_COMPLETED");' });
+					}
+					reached.resolve();
+					if (mode === "worker-stop") { phase = 4; return { content: ["Wait for the request."] }; }
+					await release.promise;
+					return call(`read-mounted-decision-${continuationOrdinal}`, "request", { action: "read", requestId });
+				case 2: {
+					const result = context.messages.findLast(message => message.role === "toolResult" && message.toolCallId === `read-mounted-decision-${continuationOrdinal}`);
+					if (!result || result.role !== "toolResult") throw new Error("Missing delivered decision");
+					decision = JSON.parse(result.content.filter(block => block.type === "text").map(block => block.text).join(""));
+					return call(`continue-mounted-${continuationOrdinal}`, "request", { action: "continue", requestId,
+						expectedDecisionRevision: decision!.decisionRevision, expectedInputRevision: decision!.inputRevision });
+				}
+				case 3: {
+					const result = context.messages.findLast(message => message.role === "toolResult" && message.toolCallId === `continue-mounted-${continuationOrdinal}`);
+					if (mode === "parallel" && continuationOrdinal === 0) {
+						if (!result || result.role !== "toolResult") throw new Error("Missing next leaf handle");
+						const next = JSON.parse(result.content.filter(block => block.type === "text").map(block => block.text).join(""));
+						expect(next.status).toBe("pending");
+						requestId = next.requestId;
+						continuationOrdinal++;
+						phase = 2;
+						return call(`read-mounted-decision-${continuationOrdinal}`, "request", { action: "read", requestId });
+					}
+					if (shared) return call("release-independent", "eval", { language: "js", timeout: 0,
+						code: 'globalThis.releaseIndependent(); display("RELEASED");' });
+					return call("independent-write", "write", { path: "independent-after-request.txt", content: "still authorized" });
+				}
+				case 4:
+					if (shared) return call("independent-write", "write", { path: "independent-after-request.txt", content: "still authorized" });
+					return { content: ["done"] };
+				default: return { content: ["done"] };
+			}
+		} });
+		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
+			toolNames: ["request", "write", "read", ...(worker ? ["eval"] : [])], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"],
+		} });
+		const { runtime, cwd } = await createRuntime(execution, async (session, input, identity) => {
+			await session.setActiveToolPresentation(["request", "write", ...(shared ? ["eval"] : [])],
+				["read", ...(worker && !shared ? ["eval"] : [])]);
+			expect(session.getActiveToolNames()).not.toContain("read");
+			expect(session.getEnabledToolNames()).toContain("read");
+			return session.prompt(input, identity);
+		}, {}, [], { "tools.xdev": true, ...(shared ? { "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 0 } : {}) });
+		fs.writeFileSync(path.join(cwd, "protected-read.txt"), "whole-operation-value");
+		const register = runtime.asyncJobManager.register.bind(runtime.asyncJobManager);
+		const registration = shared ? spyOn(runtime.asyncJobManager, "register").mockImplementation((type, label, run, options) =>
+			register(type, label, run, { ...options, onProgress: async (text, details) => {
+				if (options?.sourceToolCallId === "independent-eval" && text.includes("INDEPENDENT_RUNNING")) independentLive.resolve();
+				await options?.onProgress?.(text, details);
+			} })) : undefined;
+		const unsubscribe = runtime.subscribe(event => {
+			if (event.kind !== "tool_approval_requested") return;
+			requests.push(event.payload);
+			if (requests.length === (mode === "parallel" ? 2 : 1)) allRequested.resolve();
+		});
+		try {
+			const requested = nextEngineEvent(runtime, "tool_approval_requested");
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: `mounted-${mode}`, agentInstanceId: `mounted-${mode}`,
+				agentInstanceRef: `grimoire://tasks/grimoire/requests/agents/mounted-${mode}`,
+				executionId: `mounted-execution-${mode}`, attemptId: `mounted-attempt-${mode}`,
+			}, { cwd, principalId: "owner", input: "Use the enabled mounted operation" }));
+			const event = await requested;
+			if (event.kind !== "tool_approval_requested") throw new Error("Missing original leaf approval");
+			requestId = event.payload.id;
+			await reached.promise;
+			await allRequested.promise;
+			if (shared) await withTimeout(independentLive.promise, 5_000, "Independent eval did not enter the same live kernel");
+			if (worker) {
+				expect(fs.readFileSync(path.join(cwd, "sibling-before.txt"), "utf8")).toBe("before");
+				expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBeFalse();
+			}
+			if (mode === "worker-stop") {
+				await runtime.drain();
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+				await runtime.pause({ ...started, commandId: "pause-worker-request", initiator: { kind: "human" } });
+				await runtime.resume({ ...started, commandId: "resume-worker-request", initiator: { kind: "human" } });
+				await runtime.drain();
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+				await runtime.cancel({ ...started, commandId: "stop-worker-request" });
+				await runtime.drain();
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+				expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBeFalse();
+				expect((await runtime.store.getApproval(requestId))?.request.status).toBe("cancelled");
+				expect((await runtime.store.attemptToolEffects(started.attemptId)).filter(effect =>
+					effect.state === "started" || effect.state === "planned")).toEqual([]);
+				return;
+			}
+			for (const request of requests) {
+				expect(request.handling).toBe("nonblocking");
+				expect(JSON.stringify(request)).not.toContain("protected-read.txt");
+				const answer = approvalDecisionFor(execution, started, `answer-${mode}-${request.id}`, request, denied ? "deny" : "approve");
+				await runtime.resolveApproval({ ...started, commandId: answer.command_id, approvalDecision: answer });
+				if (!denied) expect((await runtime.store.getEffect(request.id))?.state).toBe("planned");
+			}
+			release.resolve();
+			await runtime.drain();
+			const result = toolResultOf(mock, `continue-mounted-${continuationOrdinal}`);
+			expect(result?.isError).toBe(denied);
+			if (!denied) expect(JSON.stringify(result?.content)).toContain("whole-operation-value");
+			if (worker) expect(fs.existsSync(path.join(cwd, "sibling-after.txt"))).toBe(!denied);
+			expect(fs.readFileSync(path.join(cwd, "independent-after-request.txt"), "utf8")).toBe("still authorized");
+			if (shared) {
+				const independent = runtime.asyncJobManager.getAllJobs({ ownerId: started.engineAgentId, attemptId: started.attemptId })
+					.find(job => job.sourceToolCallId === "independent-eval");
+				expect(independent).toMatchObject({ status: "completed" });
+				expect(independent?.resultText).toContain("INDEPENDENT_COMPLETED");
+			}
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+			const effects = await runtime.store.attemptToolEffects(started.attemptId);
+			expect(effects.filter(effect => effect.state === "started" || effect.state === "planned")).toEqual([]);
+			for (const request of requests) expect((await runtime.store.pendingEvents(1000)).filter(event =>
+				event.kind === "tool_started" && event.payload?.invocationId === request.id)).toHaveLength(denied ? 0 : 1);
+		} finally {
+			release.resolve();
+			unsubscribe();
+			registration?.mockRestore();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
 	it("freezes the captured reachable limit from the full roster and never resizes it on Resume", async () => {
 		const release = Promise.withResolvers<boolean>();
 		const entered = Promise.withResolvers<void>();
@@ -1152,6 +1307,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				executionId: "q1-q2-execution", attemptId: "q1-q2-attempt",
 			}, { cwd: created.cwd, principalId: "owner", input: "Ask without blocking independent work" }));
 			const firstEvent = await first;
+			if (firstEvent.kind !== "input_requested") throw new Error("Q1 request event is missing");
 			q1 = String(firstEvent.payload?.inputId);
 			await independent.promise;
 			const second = nextEngineEvent(runtime, "input_requested");
@@ -1162,9 +1318,17 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			expect((await runtime.store.requestProjection(started, q1))?.result_consumption).toBeUndefined();
 			release.resolve();
 			const secondEvent = await second;
+			if (secondEvent.kind !== "input_requested") throw new Error("Q2 request event is missing");
 			const q2 = String(secondEvent.payload?.inputId);
 			await runtime.drain();
 			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_request");
+			const waitEvent = (await runtime.store.pendingEvents(1000)).findLast(event => event.kind === "request_waiting");
+			if (!waitEvent) throw new Error("Natural drain did not retain its wait event");
+			const historyPage = await runtime.sessionHistoryPage(started.agentInstanceId,
+				started.bindingSnapshot!.agentInstanceRef, undefined, 100, started.attemptId);
+			const lifecycle = await runtime.store.nativeLifecyclePage(started.agentInstanceId,
+				started.bindingSnapshot!.agentInstanceRef, 1, started.attemptId, historyPage.lifecycleContext);
+			expect(lifecycle.activities).toMatchObject([{ eventId: String(waitEvent.eventId), status: "waiting", terminal: false }]);
 			expect((await runtime.store.retainedRequestInputs(started)).map(row => row.value.inputId).sort()).toEqual([q1, q2].sort());
 			expect((await runtime.store.requestProjection(started, q1))?.result).toEqual({
 				status: "answered", result: { kind: "submit", results: [{ id: "choice", selectedOptionIndexes: [1] }] },

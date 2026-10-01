@@ -7,6 +7,7 @@
  * `ToolSession` registered for the current execution and forwards to the same
  * `callSessionTool` implementation the JS bridge uses.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
@@ -28,6 +29,7 @@ export interface PyToolBridgeEntry {
 	shieldedSignal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
+	runInOwnerContext?: <T>(work: () => T) => T;
 }
 
 export interface PyToolBridgeInfo {
@@ -67,11 +69,12 @@ async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: 
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
 	}
-	const call = callSessionTool(name, args, {
+	const invoke = () => callSessionTool(name, args, {
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
 	});
+	const call = entry.runInOwnerContext ? entry.runInOwnerContext(invoke) : invoke();
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
 	if (signal.aborted) {
@@ -176,9 +179,10 @@ function bridgeRegistrationKey(sessionId: string, runId: string): string {
 
 export function registerPyToolBridge(sessionId: string, runId: string, entry: PyToolBridgeEntry): () => void {
 	const key = bridgeRegistrationKey(sessionId, runId);
-	registrations.set(key, entry);
+	const owned = { ...entry, runInOwnerContext: AsyncLocalStorage.snapshot() };
+	registrations.set(key, owned);
 	return () => {
-		if (registrations.get(key) === entry) {
+		if (registrations.get(key) === owned) {
 			registrations.delete(key);
 		}
 	};

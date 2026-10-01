@@ -16,7 +16,7 @@ import { projectionId, terminal } from "./rocks-runtime-projection";
 import type { RocksAttempt, RocksBinding, RocksCommand } from "./rocks-runtime-rows";
 import { queryWork, type RocksEngineStore, runtimeQueryBytes } from "./rocks-runtime-store";
 import type { EngineNativeHistoryPage } from "./runtime-history";
-import type { HistoryLifecycleContext } from "./runtime-lifecycle";
+import { lifecycleKinds, type HistoryLifecycleContext } from "./runtime-lifecycle";
 import type { RuntimeQueryWork } from "./runtime-projection";
 import { type RuntimeRemainingWork, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 
@@ -303,20 +303,6 @@ export async function nativeHistoryEntry(
 		nextOffset: end < bytes.length ? end : null,
 	};
 }
-const lifecycleKinds: Record<string, [string, string]> = {
-	running: ["started", "Attempt started"],
-	paused: ["paused", "Paused"],
-	resumed: ["running", "Resumed"],
-	input_requested: ["waiting", "Needs input"],
-	input_resolved: ["running", "Input received"],
-	retry_scheduled: ["waiting", "Retry scheduled"],
-	retry_settled: ["settled", "Retry settled"],
-	interrupted: ["failed", "Interrupted"],
-	completed: ["succeeded", "Completed"],
-	cancelled: ["cancelled", "Stopped"],
-	failed: ["failed", "Failed"],
-	rejected: ["failed", "Command rejected"],
-};
 export async function nativeLifecyclePage(
 	store: RocksEngineStore,
 	agentId: string,
@@ -369,10 +355,15 @@ export async function nativeLifecyclePage(
 	candidates.sort((a, b) => b.eventId - a.eventId);
 	const activities: Record<string, unknown>[] = [];
 	let before = position.before;
+	let consumed = 0;
 	for (const event of candidates) {
 		if (activities.length >= limit) break;
 		const mapped = lifecycleKinds[event.kind];
-		if (!mapped) continue;
+		if (!mapped) {
+			before = event.eventId;
+			consumed++;
+			continue;
+		}
 		const anchor = pinned.anchors?.findLast(
 			row => row.attemptId === event.attemptId && row.eventId <= event.eventId,
 		)?.entryId;
@@ -399,9 +390,10 @@ export async function nativeLifecyclePage(
 		if (jsonBytes(activities) + jsonBytes(activity) + 2048 > maxBytes) break;
 		activities.push(activity);
 		before = event.eventId;
+		consumed++;
 	}
-	const more = limit === 0 || pageMore || candidates.length > activities.length;
-	if (!activities.length && more && limit > 0)
+	const more = limit === 0 || pageMore || candidates.length > consumed;
+	if (!activities.length && more && limit > 0 && before === position.before)
 		throw new EngineTargetError("restore_budget", "Lifecycle item cannot fit its requested page");
 	const result = {
 		sessionId: pinned.sessionId,

@@ -108,6 +108,8 @@ export interface ToolExecutionHook {
 		token: ToolExecutionHookToken,
 		outcome: ToolExecutionHookOutcome,
 	): void | Promise<void>;
+	/** Host-only invocation ancestry; captured by existing worker/HTTP bridge registrations. */
+	run?<T>(call: ToolExecutionHookCall, token: ToolExecutionHookToken, work: () => Promise<T>): Promise<T>;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;

@@ -691,12 +691,19 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			if (previous && event.kind.endsWith("resolved")) {
 				const approval = event.kind === "input_resolved" ? undefined : await tx.get<EngineApprovalRow>("approval", inputId);
 				const { result_consumption: _oldProof, ...unconsumed } = previous;
+				let result: Record<string, unknown>;
+				if (event.kind === "input_resolved") {
+					result = { status: event.payload?.status ?? "answered",
+						...(event.payload?.result ? { result: event.payload.result } : {}) };
+				} else {
+					if (!payload || !("outcome" in payload) || !approval?.decision)
+						throw new EngineTargetError("stale_target", "Resolved approval lost its decision");
+					result = { status: payload.outcome, result: { decision: approval.decision,
+						...(approval.decision_record?.reason ? { reason: approval.decision_record.reason } : {}) } };
+				}
 				await tx.put("projection", id, { ...unconsumed, resolved: true,
 					value: { ...previous.value, revision: event.eventId },
-					result: event.kind === "input_resolved"
-						? { status: payload?.status ?? "answered", ...(payload?.result ? { result: payload.result } : {}) }
-						: { status: payload?.outcome, result: { decision: approval?.decision,
-							...(approval?.decision_record?.reason ? { reason: approval.decision_record.reason } : {}) } },
+					result,
 				});
 			} else if (previous && (event.kind === "approval_escalated" || event.kind === "approval_timed_out")) {
 				const approval = await tx.get<EngineApprovalRow>("approval", inputId);

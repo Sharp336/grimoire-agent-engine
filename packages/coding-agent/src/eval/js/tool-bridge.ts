@@ -1,4 +1,5 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { validateToolArguments } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { ToolError } from "../../tools/tool-errors";
@@ -126,8 +127,10 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const tool = getTool(options.session, name);
-	const normalizedArgs = normalizeArgs(args);
+	let normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
+	if (options.session.engineRequest?.ownsCurrentOperation())
+		normalizedArgs = normalizeArgs(validateToolArguments(tool, { type: "toolCall", id: toolCallId, name, arguments: normalizedArgs }));
 	try {
 		const result = await tool.execute(
 			toolCallId,

@@ -176,10 +176,11 @@ interface BridgeAbortShield {
 	abortRequested: boolean;
 	timedOut: boolean;
 	handleStatus?: (event: JsStatusEvent) => void;
+	forceAbort?: () => void;
 	dispose?: () => void;
 }
 
-function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortShield {
+function createBridgeAbortShield(source: AbortSignal | undefined, mayAbortKernel?: () => boolean): BridgeAbortShield {
 	const shield: BridgeAbortShield = {
 		signal: undefined,
 		abortRequested: false,
@@ -189,6 +190,7 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 
 	const controller = new AbortController();
 	let pauseDepth = 0;
+	let forced = false;
 	let abortReason: unknown;
 	let removeAbortListener: (() => void) | undefined;
 
@@ -200,7 +202,7 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 				? reason.name === "TimeoutError"
 				: reason instanceof Error && reason.name === "TimeoutError");
 		abortReason = reason;
-		if (pauseDepth > 0 || controller.signal.aborted) return;
+		if (pauseDepth > 0 || controller.signal.aborted || (!forced && mayAbortKernel && !mayAbortKernel())) return;
 		controller.abort(reason);
 	};
 
@@ -210,6 +212,7 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 	};
 
 	shield.signal = controller.signal;
+	shield.forceAbort = () => { forced = true; requestAbort(source.reason ?? new Error("Execution aborted")); };
 	shield.handleStatus = (event: JsStatusEvent): void => {
 		if (event.deferExternalAbort !== true) return;
 		if (event.op === EVAL_TIMEOUT_PAUSE_OP) {
@@ -218,7 +221,8 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 		}
 		if (event.op !== EVAL_TIMEOUT_RESUME_OP || pauseDepth === 0) return;
 		pauseDepth--;
-		if (shield.abortRequested && !controller.signal.aborted) controller.abort(abortReason);
+		if (pauseDepth === 0 && shield.abortRequested && !controller.signal.aborted &&
+			(forced || !mayAbortKernel || mayAbortKernel())) controller.abort(abortReason);
 	};
 	shield.dispose = (): void => {
 		removeAbortListener?.();
@@ -458,7 +462,12 @@ export async function executeWithKernelBase<
 		options?.signal && timeoutSignal
 			? AbortSignal.any([options.signal, timeoutSignal])
 			: (timeoutSignal ?? options?.signal);
-	const abortShield = createBridgeAbortShield(abortSource);
+	const requestOwner = options?.toolSession?.engineRequest;
+	const requestOwned = requestOwner?.ownsCurrentOperation() === true;
+	const abortShield = createBridgeAbortShield(abortSource,
+		requestOwned && requestOwner ? () => requestOwner.mayTerminateSharedKernel() : undefined);
+	const unregisterCancellation = requestOwned && requestOwner
+		? requestOwner.registerCancellationBoundary(() => abortShield.forceAbort?.()) : undefined;
 
 	const collectDisplay = (output: KernelDisplayOutput): void => {
 		if (output.type === "status") {
@@ -587,6 +596,7 @@ export async function executeWithKernelBase<
 	} finally {
 		await sink.dispose();
 		unregisterBridge?.();
+		unregisterCancellation?.();
 		abortShield.dispose?.();
 	}
 }

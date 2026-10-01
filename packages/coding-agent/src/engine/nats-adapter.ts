@@ -1461,6 +1461,8 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "command.rejected";
 		case "running":
 			return "attempt.started";
+		case "request_waiting":
+			return "attempt.waiting_request";
 		case "reconciled":
 			return "reconcile.snapshot";
 		case "steered":

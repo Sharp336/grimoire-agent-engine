@@ -557,7 +557,7 @@ export interface EngineApprovalEventPayloads {
 		to: ApprovalAddressee;
 		expires_at: string | null;
 	};
-	approval_timed_out: { request_id: string; address_revision: number; status: "pending" | "waiting_human_paused" };
+	approval_timed_out: { request_id: string; address_revision: number; status: "pending" | "waiting_human_paused" | "waiting_human_pending" };
 	executor_route_changed: ChoiceTransition;
 }
 export type EngineApprovalResolved = {

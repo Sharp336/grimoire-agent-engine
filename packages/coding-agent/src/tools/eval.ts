@@ -431,6 +431,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		};
 
 		const autoBgManager = session.asyncJobManager;
+		const requestOwned = session.engineRequest?.ownsCurrentOperation() === true;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every eval call until a slot frees up.
 		if (!session.settings.get("eval.autoBackground.enabled") || !autoBgManager || autoBgManager.atCapacity) {
@@ -499,14 +500,20 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			},
 		);
 
-		if (startBackgrounded) {
+		if (startBackgrounded && !requestOwned) {
 			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
 		}
 		// Suppress the completion delivery up front so a job finishing while we
 		// foreground-wait cannot also be injected by the delivery loop. Lifted
 		// via resumeDeliveries() if we end up backgrounding after all.
 		autoBgManager.acknowledgeDeliveries([jobId]);
-		const waitResult = await raceJobSettlement(
+		const waitResult = requestOwned ? await (async () => {
+			const abort = () => { autoBgManager.cancel(jobId); };
+			if (signal?.aborted) abort();
+			else signal?.addEventListener("abort", abort, { once: true });
+			try { return await completion.promise; }
+			finally { signal?.removeEventListener("abort", abort); }
+		})() : await raceJobSettlement(
 			completion.promise,
 			autoBackgroundWaitMs,
 			signal,

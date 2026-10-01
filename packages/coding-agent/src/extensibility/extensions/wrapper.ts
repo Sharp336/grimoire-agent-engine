@@ -360,9 +360,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
 			// registry with this class whenever a runner exists). Inert with no
 			// fallback registered: no scope is entered.
-			result = await withFileMutationSession(this.runner.sessionId, () =>
-				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
-			);
+			const execute = () => withFileMutationSession(this.runner.sessionId, () =>
+				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context));
+			result = executionHook?.run && hookToken ? await executionHook.run(hookCall, hookToken, execute) : await execute();
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
 			result = {

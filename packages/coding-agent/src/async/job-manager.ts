@@ -545,14 +545,15 @@ export class AsyncJobManager {
 	 */
 	async waitForOwnerJobs(
 		ownerId: string,
-		options?: { timeoutMs?: number; excludeSuppressed?: boolean; attemptId?: string },
+		options?: { timeoutMs?: number; excludeSuppressed?: boolean; attemptId?: string; isParked?: (job: AsyncJob) => boolean },
 	): Promise<boolean> {
 		const deadline =
 			options?.timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + Math.max(0, options.timeoutMs);
 		const awaited = new Set<string>();
 		for (;;) {
 			const pending = this.#filterJobs(this.#jobs.values(), { ownerId, attemptId: options?.attemptId }).filter(
-				job => !awaited.has(job.id) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
+				job => !awaited.has(job.id) && !options?.isParked?.(job) &&
+					(options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
 			);
 			if (pending.length === 0) return true;
 			for (const job of pending) awaited.add(job.id);

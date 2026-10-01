@@ -147,6 +147,69 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		}
 	}, 30_000);
 
+	it("publishes natural request waits with the Core-consumed state name and the same Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-nats-request-wait-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		registerMockApi("nats-request-wait");
+		const model = createMockModel({ responses: [
+			{ content: [{ type: "toolCall", id: "ask-pending", name: "ask", arguments: {
+				handling: "nonblocking", questions: [{ id: "q", question: "Choose", options: [{ label: "Yes" }] }],
+			} }] },
+			{ content: ["Independent turn finished."] },
+		] });
+		const registry = new ModelRegistry(auth, path.join(tempDir, "models.yml"));
+		const execution = admittedExecution(model.model, registry, {
+			continuation: { toolNames: ["ask", "request"], restrictToolNames: true },
+		});
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite"),
+			...execution.optionsFor({ deviceId: "device-1", sessionDefaults: {
+				cwd, agentDir: path.join(tempDir, "agent"), modelRegistry: registry,
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
+				disableExtensionDiscovery: true, enableMCP: false, enableLsp: false,
+				skills: [], contextFiles: [], promptTemplates: [], slashCommands: [],
+			} }),
+		});
+		const adapter = await NatsEngineAdapter.connect({ runtime, deviceId: "device-1", engineId: "engine-1",
+			servers: broker.url, authorizeCommand: () => {}, authorizeMessage: () => {} });
+		const client = await connect({ servers: broker.url });
+		const events: Array<Record<string, unknown>> = [];
+		const subscription = client.subscribe(adapter.eventSubject("request-wait", "*"), {
+			callback: (_error, message) => { events.push(JSON.parse(new TextDecoder().decode(message.data))); },
+		});
+		try {
+			await client.flush();
+			const started = await admitStart(runtime, execution, startRequest(execution, {
+				commandId: "request-wait-start", agentInstanceId: "request-wait",
+				agentInstanceRef: "grimoire://tasks/grimoire/requests/agents/nats",
+				attemptId: "request-wait-attempt", executionId: "request-wait-execution",
+			}, { cwd, principalId: "owner", input: "Ask without blocking" }));
+			await runtime.drain();
+			await adapter.flushEvents();
+			await waitFor(() => events.some(event => event.type === "attempt.waiting_request"));
+			expect(events.filter(event => event.type === "attempt.waiting_request")).toMatchObject([
+				{ attemptId: started.attemptId, executionId: started.executionId },
+			]);
+			expect(events.some(event => event.type === "attempt.request_waiting" || event.type === "attempt.completed")).toBeFalse();
+			await runtime.cancel({ ...started, commandId: "stop-request-wait" });
+			await runtime.drain();
+			await adapter.flushEvents();
+			await waitFor(() => events.some(event => event.type === "attempt.cancelled"));
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		} finally {
+			subscription.unsubscribe();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			auth.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
 	for (const phase of ["running", "terminal"] as const) {
 		it(`recovers an exact ${phase} IPC Start through later Core delivery without another execution`, async () => {
 			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-ipc-replay-${Snowflake.next()}-`));
