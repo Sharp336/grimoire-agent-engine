@@ -3711,6 +3711,15 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 							},
 						});
 					}
+					if (origin === "owned" && message.method === "tools/call") {
+						const caller = JSON.parse(request.headers.get("X-Grimoire-Client-Caller-Context") ?? "{}");
+						const proof = await runtime.store.runtimeCommand("route-root-command-4", { principalId: "owner" },
+							undefined, caller);
+						if ((proof.effect as { started?: boolean } | undefined)?.started !== true)
+							return Response.json({ error: "caller_effect_stale" }, { status: 403 });
+						return Response.json({ jsonrpc: "2.0", id: message.id,
+							result: { content: [{ type: "text", text: "owned effect admitted" }] } });
+					}
 					return Response.json({
 						jsonrpc: "2.0",
 						id: message.id,
@@ -3725,11 +3734,19 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			sources: {},
 			exaApiKeys: [],
 		});
-		const mock = createMockModel({ handler: { content: ["done"] } });
+		let callOwnedProbe = false;
+		const mock = createMockModel({ handler: () => {
+			if (callOwnedProbe) {
+				callOwnedProbe = false;
+				return { content: [{ type: "toolCall", id: "owned-effect-call",
+					name: "mcp__grimoire_engine_owned_probe", arguments: {} }] };
+			}
+			return { content: ["done"] };
+		} });
 		const execution = admittedExecution(mock.model, modelRegistry, {
 			continuation: { enableMCP: true },
 		});
-		const setup = await createRuntime(execution, (session, input) => session.prompt(input));
+		const setup = await createRuntime(execution, (session, input) => session.prompt(input), {}, [], { "tools.xdev": false });
 		let runtime = setup.runtime;
 		const request = (agent: string, turn: number) =>
 			startRequest(execution, {
@@ -3768,8 +3785,13 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				},
 			};
 			runtime = await openRuntime(boundOptions);
+			callOwnedProbe = true;
 			const upgraded = await admitRequest(runtime, request("route-root", 4));
 			await runtime.drain();
+			const result = toolResultOf(mock, "owned-effect-call");
+			expect(result, JSON.stringify(result)).toMatchObject({
+				isError: false, content: [{ type: "text", text: "owned effect admitted" }],
+			});
 			expect(upgraded.sessionFile).toBe(first.sessionFile);
 			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
 			expect(calls.foreign).toBe(foreignCallsBeforeBinding);

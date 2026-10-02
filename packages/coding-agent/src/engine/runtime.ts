@@ -3441,7 +3441,7 @@ export class EngineRuntime {
 							const context = JSON.stringify({
 								agentInstanceRef: request.agentInstanceRef, attemptId: request.attemptId,
 								bindingRevision: request.bindingSnapshot.bindingRevision, dispatchHash: request.dispatchHash,
-								effectId, toolCallId, toolName: mcpName, canonicalCallHash,
+								effectId, toolCallId, toolName, canonicalCallHash,
 							});
 							return {
 								"X-Grimoire-Client-Caller-Context": context,
