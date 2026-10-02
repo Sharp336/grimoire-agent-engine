@@ -1061,7 +1061,7 @@ export class RocksEngineMutations {
 		return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(encoded)) as ExtensionAskDialogQuestion[];
 	}
 
-	async retainedRequestInputs(target: EventTarget): Promise<RocksProjection[]> {
+	async retainedRequestInputs(target: EventTarget, includeDeniedBlocking = false): Promise<RocksProjection[]> {
 		const retained: RocksProjection[] = [];
 		let after: string | undefined;
 		do {
@@ -1076,7 +1076,8 @@ export class RocksEngineMutations {
 				const effect = row.body.kind === "approval" ? await this.getEffect(String(row.value.inputId)) : undefined;
 				const nonblocking = row.body.handling === "nonblocking" ||
 					(row.body.request as { handling?: string } | undefined)?.handling === "nonblocking";
-				if (!row.resolved || (nonblocking && !requestConsumptionMatches(row)) || effect?.state === "planned" || effect?.state === "started")
+				if (!row.resolved || (nonblocking && !requestConsumptionMatches(row)) || effect?.state === "planned" || effect?.state === "started" ||
+					(includeDeniedBlocking && !nonblocking && effect?.state === "settled" && effect.outcome === "denied"))
 					retained.push(row);
 			}
 			const next = page.nextCursor ? page.records.at(-1)?.id : undefined;
@@ -2911,11 +2912,6 @@ export class RocksEngineMutations {
 				request: resolved,
 				updated_at: Date.now(),
 			} satisfies EngineApprovalRow);
-			if (status === "denied" && effect &&
-				(await tx.get<RocksAttempt>("attempt", target.attemptId))?.state === "paused")
-				await tx.put("metadata", `approval-recovery:${target.attemptId}`, {
-					subtype: "approval_recovery", request_id: id,
-				});
 			const events = [
 				await this.append(tx, target, {
 					kind: `${request.kind}_approval_resolved`,
@@ -3774,24 +3770,28 @@ export class RocksEngineMutations {
 		return messages;
 	}
 
-	/** Only unapplied native gates or a proven unsent consultant reservation survive. */
+	/** Only unapplied native gates, unconsumed denials, or proven unsent consultant reservations survive. */
 	async retainedApproval(effect: RocksEffect, approval: EngineApprovalRow | undefined,
 		attempt: RocksAttempt, binding: EngineBindingSnapshot): Promise<boolean> {
 		if (!approval || approval.request.requester_attempt_id !== attempt.attempt_id ||
 			effect.attempt_id !== attempt.attempt_id || effect.binding_id !== binding.bindingId ||
 			approval.request.effect_id !== effect.effect_id) return false;
-		if (effect.effect_kind === "model") {
-			if (approval.request.kind !== "consultant" || effect.state !== "planned" ||
-				effect.tool_name !== "model_dispatch_primary" || effect.runtime_event_id !== 0 ||
-				!Array.isArray(effect.requests) || effect.requests.length !== 0 ||
-				!(approval.state === "pending" || approval.request.status === "approved") ||
-				!binding.sessionFile) return false;
+		const denied = effect.state === "settled" && effect.outcome === "denied" &&
+			approval.state === "resolved" && approval.decision === "deny" && approval.request.status === "denied";
+		if (effect.effect_kind === "model" || denied) {
+			if (effect.effect_kind === "model" &&
+				(approval.request.kind !== "consultant" || (!denied && effect.state !== "planned") ||
+					effect.tool_name !== "model_dispatch_primary" || effect.runtime_event_id !== 0 ||
+					!Array.isArray(effect.requests) || effect.requests.length !== 0 ||
+					!(approval.state === "pending" || approval.request.status === "approved" || denied))) return false;
+			if (!binding.sessionFile) return false;
 			const { familyId, generationId } = parseNativeSessionLocator(binding.sessionFile);
 			if (attempt.transcript_native?.familyId !== familyId || attempt.transcript_native.generationId !== generationId) return false;
 			const session = await SessionManager.openNative(new RocksNativeSessionStorage(this.storageClient, familyId, generationId));
 			try {
 				if (session.getSessionId() !== attempt.transcript_session_id) return false;
-				return session.getContextBranch().some(entry => {
+				const entries = session.getContextBranch();
+				if (effect.effect_kind === "model") return entries.some(entry => {
 					if (entry.type !== "custom" || entry.customType !== "engine-consultant-input" || !isRecord(entry.data)) return false;
 					const data = entry.data;
 					return data.attemptId === attempt.attempt_id && data.bindingId === binding.bindingId &&
@@ -3800,6 +3800,17 @@ export class RocksEngineMutations {
 						typeof data.prepared.input === "string" && isRecord(data.prepared.identity) &&
 						data.prepared.identity.sourceCommandId === attempt.command_id;
 				});
+				let pending = false;
+				for (const entry of entries) {
+					if (entry.type !== "message") continue;
+					const message = entry.message;
+					if (message.role === "toolResult" && message.toolCallId === effect.tool_call_id) pending = false;
+					else if (message.role === "assistant" &&
+						(!effect.assistant_message_id || entry.assistantMessageId === effect.assistant_message_id) &&
+						message.content.some(part => part.type === "toolCall" &&
+							part.id === effect.tool_call_id && part.name === effect.tool_name)) pending = true;
+				}
+				return pending;
 			} finally { session.seal(); }
 		}
 		if (effect.effect_kind !== "tool") return false;
@@ -3817,7 +3828,7 @@ export class RocksEngineMutations {
 		const binding = await this.getBinding(attempt.agent_instance_id);
 		if (binding?.attemptId !== attemptId || binding.state !== "running" ||
 			!binding.sessionFile?.startsWith("native:")) return undefined;
-		const inputs = await this.retainedRequestInputs(binding);
+		const inputs = await this.retainedRequestInputs(binding, true);
 		const nonblocking = inputs.some(input => input.body?.handling === "nonblocking" ||
 			(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
 		if (attempt.state === "paused" && !["approval_deadline", "request_recovery", "recovery_required"].includes(attempt.cause ?? "") &&
@@ -3836,13 +3847,15 @@ export class RocksEngineMutations {
 			approvals.push(approval!.request);
 		}
 		if (!effects.length && !nonblocking) {
-			const marker = (await this.records.get("metadata", `approval-recovery:${attemptId}`)).value as
-				{ request_id?: string } | null;
-			const approval = marker?.request_id ? await this.getApproval(marker.request_id) : undefined;
-			if (!approval || approval.request.requester_attempt_id !== attemptId ||
-				approval.request.status !== "denied" || approval.state !== "resolved")
-				return undefined;
-			approvals.push(approval.request);
+			for (const input of inputs) {
+				const id = String(input.value.inputId);
+				const approval = await this.getApproval(id);
+				if (approval?.state !== "resolved" || approval.request.status !== "denied") continue;
+				const effect = await this.getEffect(id);
+				if (effect && await this.retainedApproval(effect, approval, attempt, binding))
+					approvals.push(approval.request);
+			}
+			if (!approvals.length) return undefined;
 		}
 		return approvals;
 	}

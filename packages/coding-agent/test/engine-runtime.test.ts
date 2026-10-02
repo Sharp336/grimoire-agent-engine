@@ -1023,6 +1023,9 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			const decision = approvalDecisionFor(execution, started, "deny-while-paused", event.payload, "deny");
 			await runtime.resolveApproval({ ...started, commandId: decision.command_id, approvalDecision: decision });
 			expect(toolResultOf(mock, "paused-denied-read")).toBeUndefined();
+			expect(await runtime.store.durableRequestWait(started.attemptId)).toMatchObject([
+				{ id: event.payload.id, status: "denied", handling: "blocking" },
+			]);
 			await runtime.resume({ ...started, commandId: "resume-denial", initiator: { kind: "human" } });
 			await withTimeout(runtime.drain(), 10_000, "Decided blocking waiter did not finish after Resume");
 			expect(toolResultOf(mock, "paused-denied-read")?.isError).toBeTrue();
