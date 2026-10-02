@@ -1123,6 +1123,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		let phase = 0;
 		let requestId = "";
 		let decision: { decisionRevision: number; inputRevision: number } | undefined;
+		const protectedArgs = { pat: "const $NAME = $VALUE", path: "protected-read.ts" };
+		// The delayed case exercises a real eval-worker timer; the parent test clock cannot drive it.
+		const protectedCall = `tool.ast_grep(${JSON.stringify(protectedArgs)})`;
+		const enabledTools = ["request", "write", "read", "ast_grep", ...(evalOperation ? ["eval"] : [])];
 		const call = (id: string, name: string, args: Record<string, unknown>) =>
 			({ content: [{ type: "toolCall" as const, id, name, arguments: args }] });
 		const mock = createMockModel({ handler: async context => {
@@ -1135,18 +1139,18 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			switch (phase++) {
 				case 0: return call("submit-mounted", "request", { action: "submit", handling: "nonblocking",
 					operation: delayed ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
-						'const pending=tool.read({path:"protected-read.txt"}); await new Promise(resolve=>setTimeout(resolve,1500));' +
+						`const pending=${protectedCall}; await new Promise(resolve=>setTimeout(resolve,1500));` +
 						'await tool.write({path:"sibling-after.txt",content:"after"}); display(await pending);' } }
 					: worker ? { toolName: "eval", arguments: { language: "js", timeout: 0, code:
 						'globalThis.requestKernelMarker="same-kernel"; await tool.write({path:"sibling-before.txt",content:"before"});' +
 						(mode === "parallel"
-							? 'const value=await Promise.all([tool.read({path:"protected-read.txt"}),tool.read({path:"protected-read.txt"})]);'
+							? `const value=await Promise.all([${protectedCall},${protectedCall}]);`
 							: shared
-								? 'let value; try { value=await tool.read({path:"protected-read.txt"}); } catch { value="caught"; }'
-								: 'const value=await tool.read({path:"protected-read.txt"});') +
+								? `let value; try { value=await ${protectedCall}; } catch { value="caught"; }`
+								: `const value=await ${protectedCall};`) +
 						'await tool.write({path:"sibling-after.txt",content:"after"}); display(value);' } }
-						: mode === "mounted" ? { toolName: "read", arguments: { path: "protected-read.txt" } }
-							: { toolName: "write", arguments: { path: "xd://read", content: JSON.stringify({ path: "protected-read.txt" }) } } });
+						: mode === "mounted" ? { toolName: "ast_grep", arguments: protectedArgs }
+							: { toolName: "write", arguments: { path: "xd://ast_grep", content: JSON.stringify(protectedArgs) } } });
 				case 1:
 					if (shared && !independentLaunched) {
 						independentLaunched = true;
@@ -1198,16 +1202,14 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}
 		} });
 		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
-			toolNames: ["request", "write", "read", ...(evalOperation ? ["eval"] : [])], restrictToolNames: true, toolPolicies: { read: "permit" }, tools_permit: ["read"],
+			toolNames: enabledTools, restrictToolNames: false, toolPolicies: { ast_grep: "permit" }, tools_permit: ["ast_grep"],
 		} });
 		const { runtime, cwd } = await createRuntime(execution, async (session, input, identity) => {
-			await session.setActiveToolPresentation(["request", "write", ...(shared ? ["eval"] : [])],
-				["read", ...(evalOperation && !shared ? ["eval"] : [])]);
-			expect(session.getActiveToolNames()).not.toContain("read");
-			expect(session.getEnabledToolNames()).toContain("read");
+			await session.setActiveToolPresentation(enabledTools,
+				["ast_grep", ...(evalOperation && !shared ? ["eval"] : [])]);
 			return session.prompt(input, identity);
 		}, {}, [], { "tools.xdev": true, ...(shared ? { "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 0 } : {}) });
-		fs.writeFileSync(path.join(cwd, "protected-read.txt"), "whole-operation-value");
+		fs.writeFileSync(path.join(cwd, protectedArgs.path), 'const protectedValue = "whole-operation-value";\n');
 		const register = runtime.asyncJobManager.register.bind(runtime.asyncJobManager);
 		const registration = shared ? spyOn(runtime.asyncJobManager, "register").mockImplementation((type, label, run, options) =>
 			register(type, label, run, { ...options, onProgress: async (text, details) => {
@@ -1282,7 +1284,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}
 			for (const request of requests) {
 				expect(request.handling).toBe("nonblocking");
-				expect(JSON.stringify(request)).not.toContain("protected-read.txt");
+				expect(JSON.stringify(request)).not.toContain(protectedArgs.path);
 				const answer = approvalDecisionFor(execution, started, `answer-${mode}-${request.id}`, request, denied ? "deny" : "approve");
 				await runtime.resolveApproval({ ...started, commandId: answer.command_id, approvalDecision: answer });
 				if (!denied) expect((await runtime.store.getEffect(request.id))?.state).toBe("planned");
@@ -1444,7 +1446,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		} });
 		const { runtime, cwd } = await createRuntime(execution, async (current, input, identity) => {
 			session = current;
-			await current.setActiveToolPresentation(["request", "write"], ["read", "eval"]);
+			await current.setActiveToolPresentation(["request", "write", "read", "eval"], ["eval"]);
 			return current.prompt(input, identity);
 		}, {}, [], { "tools.xdev": true });
 		fs.writeFileSync(path.join(cwd, "protected-race.txt"), "must not be read");

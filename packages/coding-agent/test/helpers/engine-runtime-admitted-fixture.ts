@@ -195,6 +195,8 @@ export function admittedExecution(
 			return {
 				options: {
 					model: selected, modelRegistry,
+					toolNames: execution.continuationConfiguration.restrictToolNames
+						? execution.continuationConfiguration.toolNames : undefined,
 					managedServiceTier: runtimeModel => {
 						const route = frozen.find(candidate =>
 							candidate.provider === runtimeModel.provider && candidate.modelId === runtimeModel.id);
