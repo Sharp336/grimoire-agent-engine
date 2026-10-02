@@ -46,13 +46,14 @@ import {
 	RocksNativeSessionStorage,
 } from "@oh-my-pi/pi-coding-agent/session/rocks-native-session-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { StorageClientError, storageCanonicalJson } from "@oh-my-pi/pi-coding-agent/session/storage-client";
 import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
 import { Database } from "bun:sqlite";
 import { startStorageWorker, storageBlobsDir } from "./helpers/storage-worker-fixture";
+import { EvalTool } from "../src/tools/eval";
 import { semanticBinding } from "./helpers/runtime-v1-rocks-fixture";
 import {
 	admitStart,
@@ -1392,16 +1393,159 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it("drains acknowledged queued steer when its submitted root finishes inside input admission", async () => {
+		const pendingHandle = Promise.withResolvers<string>();
+		const readDecision = Promise.withResolvers<void>();
+		const rootReturned = Promise.withResolvers<void>();
+		const releaseRoot = Promise.withResolvers<void>();
+		const rootFinishing = Promise.withResolvers<void>();
+		const releaseSettlement = Promise.withResolvers<void>();
+		const releaseOwnerDrain = Promise.withResolvers<void>();
+		const idleOwner = Promise.withResolvers<void>();
+		const queuedText = "Execute this accepted message after the submitted root finishes";
+		let phase = 0;
+		let requestId = "";
+		let waitingForSteer = false;
+		let session: AgentSession | undefined;
+		const call = (id: string, name: string, args: Record<string, unknown>) =>
+			({ content: [{ type: "toolCall" as const, id, name, arguments: args }] });
+		const mock = createMockModel({ handler: async context => {
+			switch (phase++) {
+				case 0:
+					return call("race-submit", "request", { action: "submit", handling: "nonblocking",
+						operation: { toolName: "eval", arguments: { language: "js", timeout: 0,
+							code: 'display(await tool.read({path:"protected-race.txt"}));' } } });
+				case 1: {
+					const result = context.messages.findLast(message => message.role === "toolResult" && message.toolCallId === "race-submit");
+					if (!result || result.role !== "toolResult" || result.isError)
+						throw new Error("Race fixture did not receive its real submitted request handle");
+					const handle = JSON.parse(result.content.filter(block => block.type === "text").map(block => block.text).join(""));
+					if (handle.status !== "pending" || typeof handle.requestId !== "string")
+						throw new Error("Race fixture submission was not pending");
+					requestId = handle.requestId;
+					pendingHandle.resolve(requestId);
+					await readDecision.promise;
+					return call("race-read", "request", { action: "read", requestId });
+				}
+				case 2:
+					waitingForSteer = true;
+					return { content: ["Wait for the submitted operation to quiesce."] };
+				case 3: {
+					const user = context.messages.findLast(message => message.role === "user");
+					expect(JSON.stringify(user?.content)).toContain(queuedText);
+					return call("race-queued-write", "write", { path: "queued-race.txt", content: "processed exactly once" });
+				}
+				default: return { content: ["Queued input processed."] };
+			}
+		} });
+		const execution = admittedExecution(mock.model, modelRegistry, { continuation: {
+			toolNames: ["request", "eval", "read", "write"], restrictToolNames: true,
+			toolPolicies: { read: "permit" }, tools_permit: ["read"],
+		} });
+		const { runtime, cwd } = await createRuntime(execution, async (current, input, identity) => {
+			session = current;
+			await current.setActiveToolPresentation(["request", "write"], ["read", "eval"]);
+			return current.prompt(input, identity);
+		}, {}, [], { "tools.xdev": true });
+		fs.writeFileSync(path.join(cwd, "protected-race.txt"), "must not be read");
+		const execute = EvalTool.prototype.execute;
+		const rootBoundary = spyOn(EvalTool.prototype, "execute").mockImplementation(async function (
+			this: EvalTool, ...args: Parameters<EvalTool["execute"]>
+		) {
+			try { return await execute.apply(this, args); }
+			finally { rootReturned.resolve(); await releaseRoot.promise; }
+		});
+		const settle = runtime.store.settleToolEffect.bind(runtime.store);
+		const settlementBoundary = spyOn(runtime.store, "settleToolEffect").mockImplementation(async (...args) => {
+			if ((await runtime.store.getEffect(args[1]))?.tool_name === "eval") {
+				rootFinishing.resolve();
+				await releaseSettlement.promise;
+			}
+			return settle(...args);
+		});
+		const waitOwnerJobs = runtime.asyncJobManager.waitForOwnerJobs.bind(runtime.asyncJobManager);
+		const ownerDrainBoundary = spyOn(runtime.asyncJobManager, "waitForOwnerJobs").mockImplementation(async (...args) => {
+			const completed = await waitOwnerJobs(...args);
+			await releaseOwnerDrain.promise;
+			return completed;
+		});
+		const retainedInputs = runtime.store.retainedRequestInputs.bind(runtime.store);
+		const drainBoundary = spyOn(runtime.store, "retainedRequestInputs").mockImplementation(async (...args) => {
+			const inputs = await retainedInputs(...args);
+			if (waitingForSteer && session && !session.isStreaming) idleOwner.resolve();
+			return inputs;
+		});
+		const accept = AgentSession.prototype.acceptEngineQueuedInput;
+		const acceptanceBoundary = spyOn(AgentSession.prototype, "acceptEngineQueuedInput").mockImplementation(async function (
+			this: AgentSession, ...args: Parameters<AgentSession["acceptEngineQueuedInput"]>
+		) {
+			const accepted = await accept.apply(this, args);
+			if (args[0] === queuedText) {
+				releaseRoot.resolve();
+				await withTimeout(rootFinishing.promise, 5_000, "Submitted root did not finish inside steer admission");
+			}
+			return accepted;
+		});
+		try {
+			const requested = nextEngineEvent(runtime, "tool_approval_requested");
+			const started = await admitRequest(runtime, startRequest(execution, {
+				commandId: "drain-race-start", agentInstanceId: "drain-race-agent",
+				agentInstanceRef: `${execution.taskRef}/agents/drain-race`,
+				executionId: "drain-race-execution", attemptId: "drain-race-attempt",
+			}, { cwd, principalId: "owner", input: "Submit a protected operation without blocking" }));
+			const id = await withTimeout(pendingHandle.promise, 20_000, "Race request handle was not delivered");
+			const event = await requested;
+			if (event.kind !== "tool_approval_requested") throw new Error("Missing race approval");
+			expect(event.payload.id).toBe(id);
+			const decision = approvalDecisionFor(execution, started, "drain-race-deny", event.payload, "deny");
+			await runtime.resolveApproval({ ...started, commandId: decision.command_id, approvalDecision: decision });
+			await withTimeout(rootReturned.promise, 5_000, "Denied evaluator did not return");
+			await withTimeout(runtime.asyncJobManager.waitForAll(), 5_000, "Evaluator job did not quiesce");
+			readDecision.resolve();
+			await withTimeout(idleOwner.promise, 5_000, "Sole prompt owner did not enter root-effect drain");
+			expect((await runtime.store.requestProjection(started, id))?.result_consumption).toBeDefined();
+			const queued = await runtime.enqueueInbox(started, { sourceEventId: "drain-race-message",
+				sourceType: "user", body: queuedText, createdAt: Date.now() });
+			await runtime.steer({ ...started, commandId: "drain-race-steer", queueId: queued.item.queueId,
+				expectedRevision: queued.item.revision, mutationId: "drain-race-ack" });
+			expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("acknowledged");
+			releaseSettlement.resolve();
+			releaseOwnerDrain.resolve();
+			await withTimeout(runtime.drain(), 10_000, "Accepted queued input did not finish draining");
+			expect(fs.readFileSync(path.join(cwd, "queued-race.txt"), "utf8")).toBe("processed exactly once");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+			const entries = (await nativeSession(runtime, started.sessionFile!)).getContextBranch();
+			expect(entries.filter(entry => entry.type === "message" && entry.message.role === "user" &&
+				entry.clientMessageId === "drain-race-message")).toHaveLength(1);
+			expect((await runtime.store.attemptToolEffects(started.attemptId)).filter(effect =>
+				effect.tool_call_id === "race-queued-write" && effect.outcome === "completed")).toHaveLength(1);
+		} finally {
+			readDecision.resolve();
+			releaseRoot.resolve();
+			releaseSettlement.resolve();
+			releaseOwnerDrain.resolve();
+			rootBoundary.mockRestore();
+			settlementBoundary.mockRestore();
+			drainBoundary.mockRestore();
+			ownerDrainBoundary.mockRestore();
+			acceptanceBoundary.mockRestore();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
 	it.each(["verified", "missing", "mismatch", "known-below-floor"] as const)(
 		"admits a private exact human null-tier pin without extending its authority: %s", async scenario => {
 			const mock = createMockModel({ handler: { content: ["human-selected result"] } });
-			const execution = admittedExecution(mock.model, modelRegistry);
+			const ordinary = admittedExecution(mock.model, modelRegistry);
+			const originalRoute = ordinary.config.routes.routes[0]!;
+			const execution = admittedExecution(mock.model, modelRegistry, {
+				dispatch: { ...ordinary.config.dispatch, requirement: { ...ordinary.config.dispatch.requirement,
+					min_tier: 2, pin: { model_id: originalRoute.model_id, route_ref: originalRoute.route_ref,
+						effort: originalRoute.effort, reason: "explicit human selection" } } },
+			});
 			const route = execution.config.routes.routes[0]!;
 			route.tier = scenario === "known-below-floor" ? 1 : null;
-			execution.config.dispatch.requirement.min_tier = 2;
-			execution.config.dispatch.requirement.pin = {
-				model_id: route.model_id, route_ref: route.route_ref, effort: route.effort, reason: "explicit human selection",
-			};
+			route.order_match = { scope_ref: execution.taskRef, index: 0, for_tags: [] };
 			const verify = execution.optionsFor({}).verifyOriginReceipt!;
 			const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {
 				verifyOriginReceipt: async identity => {
@@ -1429,7 +1573,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				await runtime.drain();
 				const choice = (await runtime.store.getAttempt(started.attemptId))!.execution!.executor_choice;
 				expect(choice.selected).toMatchObject({ basis: "user", model_id: route.model_id, route_ref: route.route_ref,
-					effort: route.effort, service_tier: route.service_tier });
+					effort: route.effort, service_tier: route.service_tier, order_match: null });
 				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 			} finally { await runtime.dispose(); }
 		}, 30_000,
@@ -1507,16 +1651,20 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		} finally { await runtime.dispose(); }
 	}, 30_000);
 
-	it.each(["approve", "deny", "missing_carrier"] as const)(
+	it.each(["approve", "deny", "missing_carrier", "timeout-held", "timeout-expired"] as const)(
 		"recovers a consultant's exact prepared image and context only after cold %s admission",
 		async mode => {
 			const mock = createMockModel({ handler: { content: ["consultation complete"] } });
 			mock.input.push("image");
 			const ordinary = admittedExecution(mock.model, modelRegistry);
+			const expires = mode === "timeout-held" || mode === "timeout-expired";
+			const limits = { timeout_seconds: expires ? 60 : null, max_iterations: null };
+			let clock: { mockRestore(): void } | undefined;
 			const execution = admittedExecution(mock.model, modelRegistry, {
-				dispatch: { ...ordinary.config.dispatch, execution_kind: "consultation",
+				dispatch: { ...ordinary.config.dispatch, execution_kind: "consultation", limits,
 					special_ref: { kind: "consultation", definition_ref: "gctx:eeeeeeeeeeeeeeee",
 						definition_revision: 1, call_id: "retained-consultation" } },
+				continuation: { limits },
 			});
 			const base = execution.optionsFor({ deviceId: "engine-runtime-test-device" });
 			let materializations = 0;
@@ -1564,26 +1712,55 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				const event = await requested;
 				if (event.kind !== "consultant_approval_requested") throw new Error("Consultant approval was not retained");
 				legacyCarrier?.mockRestore();
+				const paused = nextEngineEvent(runtime, "paused");
 				await runtime.pause({ ...started, commandId: "consultant-pause", initiator: { kind: "human" } });
+				await withTimeout(paused, 5_000, "Consultant did not reach a quiescent manual pause");
+				const originalAttempt = (await runtime.store.getAttempt(started.attemptId))!;
+				if (mode === "approve") {
+					const effect = (await runtime.store.getEffect(event.payload.id))!;
+					const approval = await runtime.store.getApproval(effect.effect_id);
+					const target = (await runtime.store.getBinding(started.agentInstanceId))!;
+					expect(await runtime.store.retainedApproval(effect, approval, originalAttempt, target)).toBeTrue();
+					expect(await runtime.store.retainedApproval({ ...effect, state: "started" }, approval, originalAttempt, target)).toBeFalse();
+					expect(await runtime.store.retainedApproval({ ...effect, requests: undefined }, approval, originalAttempt, target)).toBeFalse();
+				}
 				await runtime.dispose();
+				if (expires) {
+					const now = Date.now;
+					const offset = originalAttempt.created_at + 60_000 - now() + (mode === "timeout-expired" ? 1 : -10_000);
+					clock = spyOn(Date, "now").mockImplementation(() => now() + offset);
+				}
 				runtime = await openRuntime(setup.options);
 				expect(runtime.getBinding(started.agentInstanceId)).toBeUndefined();
 				expect(materializations).toBe(1);
 				expect(mock.calls).toEqual([]);
+				if (mode === "missing_carrier") {
+					expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("interrupted");
+					expect((await runtime.store.intent(started.agentInstanceId)).holds.some(hold => hold.kind === "recovery")).toBeTrue();
+					return;
+				}
+				if (expires) {
+					if (mode === "timeout-held") expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+					await withTimeout(runtime.store.waitAttemptResult(started.agentInstanceId, started.commandId, started.attemptId),
+						15_000, "Cold consultant deadline did not cancel the same Attempt");
+					await runtime.drain();
+					expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+						state: "cancelled", created_at: originalAttempt.created_at,
+						cause: "dispatch_timeout: immutable Attempt deadline elapsed",
+					});
+					expect((await runtime.store.getApproval(event.payload.id))?.request.status).toBe("cancelled");
+					expect(materializations).toBe(1);
+					expect(mock.calls).toEqual([]);
+					return;
+				}
 				const retained = (await runtime.store.getBinding(started.agentInstanceId))!;
 				const approval = (await runtime.store.getApproval(event.payload.id))!.request;
 				const decision = approvalDecisionFor(execution, retained, "consultant-decision", approval,
 					mode === "deny" ? "deny" : "approve");
 				await runtime.resolveApproval({ ...retained, commandId: "consultant-decision", approvalDecision: decision });
+				expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
 				expect(materializations).toBe(1);
 				const resume = runtime.resume({ ...retained, commandId: "consultant-resume", initiator: { kind: "human" } });
-				if (mode === "missing_carrier") {
-					await expect(resume).rejects.toThrow("original prepared consultant input is unavailable");
-					expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
-					expect(materializations).toBe(1);
-					expect(mock.calls).toEqual([]);
-					return;
-				}
 				await resume;
 				await runtime.drain();
 				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe(mode === "deny" ? "failed" : "completed");
@@ -1608,6 +1785,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				}
 			} finally {
 				legacyCarrier?.mockRestore();
+				clock?.mockRestore();
 				await runtime!.dispose();
 			}
 		}, 60_000,

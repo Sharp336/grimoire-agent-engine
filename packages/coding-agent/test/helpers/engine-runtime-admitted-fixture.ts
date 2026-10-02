@@ -195,6 +195,13 @@ export function admittedExecution(
 			return {
 				options: {
 					model: selected, modelRegistry,
+					managedServiceTier: runtimeModel => {
+						const route = frozen.find(candidate =>
+							candidate.provider === runtimeModel.provider && candidate.modelId === runtimeModel.id);
+						if (!route) throw new EngineTargetError("stale_target", "Fixture helper model is outside its admitted routes");
+						return route.service_tier === "standard"
+							? runtimeModel.api.startsWith("openai-") ? "default" : undefined : route.service_tier;
+					},
 					...(runtimeOptions.sessionDefaults?.settings
 						? { settings: runtimeOptions.sessionDefaults.settings }
 						: {}),

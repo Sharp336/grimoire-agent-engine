@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "../extensibility/extensions/types";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
@@ -3773,10 +3774,35 @@ export class RocksEngineMutations {
 		return messages;
 	}
 
-	/** Only native tool effects fenced by their own undecided or decided-but-unapplied approval survive. */
-	retainedApproval(effect: RocksEffect, approval: EngineApprovalRow | undefined, attemptId: string): boolean {
-		if (!approval || effect.effect_kind !== "tool" || approval.request.requester_attempt_id !== attemptId ||
+	/** Only unapplied native gates or a proven unsent consultant reservation survive. */
+	async retainedApproval(effect: RocksEffect, approval: EngineApprovalRow | undefined,
+		attempt: RocksAttempt, binding: EngineBindingSnapshot): Promise<boolean> {
+		if (!approval || approval.request.requester_attempt_id !== attempt.attempt_id ||
+			effect.attempt_id !== attempt.attempt_id || effect.binding_id !== binding.bindingId ||
 			approval.request.effect_id !== effect.effect_id) return false;
+		if (effect.effect_kind === "model") {
+			if (approval.request.kind !== "consultant" || effect.state !== "planned" ||
+				effect.tool_name !== "model_dispatch_primary" || effect.runtime_event_id !== 0 ||
+				!Array.isArray(effect.requests) || effect.requests.length !== 0 ||
+				!(approval.state === "pending" || approval.request.status === "approved") ||
+				!binding.sessionFile) return false;
+			const { familyId, generationId } = parseNativeSessionLocator(binding.sessionFile);
+			if (attempt.transcript_native?.familyId !== familyId || attempt.transcript_native.generationId !== generationId) return false;
+			const session = await SessionManager.openNative(new RocksNativeSessionStorage(this.storageClient, familyId, generationId));
+			try {
+				if (session.getSessionId() !== attempt.transcript_session_id) return false;
+				return session.getContextBranch().some(entry => {
+					if (entry.type !== "custom" || entry.customType !== "engine-consultant-input" || !isRecord(entry.data)) return false;
+					const data = entry.data;
+					return data.attemptId === attempt.attempt_id && data.bindingId === binding.bindingId &&
+						data.effectId === effect.effect_id && data.modelCallId === effect.tool_call_id &&
+						data.inputHash === effect.input_hash && isRecord(data.prepared) &&
+						typeof data.prepared.input === "string" && isRecord(data.prepared.identity) &&
+						data.prepared.identity.sourceCommandId === attempt.command_id;
+				});
+			} finally { session.seal(); }
+		}
+		if (effect.effect_kind !== "tool") return false;
 		if (effect.state === "started")
 			return approval.request.kind === "escalation" && approval.request.status !== "cancelled";
 		return effect.state === "planned" && approval.request.kind !== "escalation" &&
@@ -3794,7 +3820,8 @@ export class RocksEngineMutations {
 		const inputs = await this.retainedRequestInputs(binding);
 		const nonblocking = inputs.some(input => input.body?.handling === "nonblocking" ||
 			(input.body?.request as { handling?: string } | undefined)?.handling === "nonblocking");
-		if (attempt.state === "paused" && attempt.cause !== "approval_deadline" && !nonblocking) return undefined;
+		if (attempt.state === "paused" && !["approval_deadline", "request_recovery", "recovery_required"].includes(attempt.cause ?? "") &&
+			!binding.manualHold && !nonblocking) return undefined;
 		const effects = [
 			...(await this.records.query("effect_attempt", [attemptId, "planned"], undefined, 1_000)).records,
 			...(await this.records.query("effect_attempt", [attemptId, "started"], undefined, 1_000)).records,
@@ -3804,7 +3831,7 @@ export class RocksEngineMutations {
 		for (const row of effects) {
 			const effect = row.value as unknown as RocksEffect;
 			const approval = await this.getApproval(effect.effect_id);
-			if (!this.retainedApproval(effect, approval, attemptId)) return undefined;
+			if (!await this.retainedApproval(effect, approval, attempt, binding)) return undefined;
 			if ((await this.requestProjection(binding, effect.effect_id))?.continuation_claimed) return undefined;
 			approvals.push(approval!.request);
 		}
@@ -3839,12 +3866,13 @@ export class RocksEngineMutations {
 				...await tx.query<RocksEffect>("effect_attempt", [attemptId, "started"]),
 			];
 			for (const effect of effects)
-				if (!this.retainedApproval(effect, await tx.get<EngineApprovalRow>("approval", effect.effect_id), attemptId))
+				if (!await this.retainedApproval(effect, await tx.get<EngineApprovalRow>("approval", effect.effect_id), current, bindingSnapshot(binding)))
 					return undefined;
 			if (current.state === "waiting_request") await stageRelease(tx, attemptId, undefined, true);
 			await tx.put("binding", attempt.agent_instance_id, { ...binding, engine_generation: generation });
 			await tx.put("attempt", attemptId, { ...current, engine_generation: generation,
-				...(current.state === "waiting_request" ? { state: "paused", cause: "request_recovery" } : {}) });
+				...(current.state === "waiting_request" || binding.manual_hold
+					? { state: "paused", cause: "request_recovery" } : {}) });
 			for (const effect of effects)
 				await tx.put("effect", effect.effect_id, { ...effect, engine_generation: generation });
 			return { ...bindingSnapshot(binding), engineGeneration: generation };

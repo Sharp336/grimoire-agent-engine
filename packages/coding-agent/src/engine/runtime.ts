@@ -354,7 +354,6 @@ interface LiveBinding extends EngineBindingSnapshot {
 	modelCallSequence: number;
 	modelEffect?: EngineModelEffectInput;
 	primaryTurn?: { attemptId: string; admission: StreamAdmission | undefined; iterationEffectId?: string; retryEffectId?: string };
-	dispatchDeadlineTimer?: NodeJS.Timeout;
 	/** The Engine-composed admission/fact hook every model request of this binding must use. */
 	providerRequestHook: NonNullable<CreateAgentSessionOptions["providerRequestHook"]>;
 	/** Admitted immutable execution: frozen route units index-aligned with their native selectors. */
@@ -362,6 +361,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 		config: EngineExecutionConfiguration;
 		frozen: EngineExecutionRoute[];
 		selectors: Array<string | undefined>;
+		managedServiceTier: CreateAgentSessionOptions["managedServiceTier"];
 		verifyCandidate: ResolvedEngineExecution["verifyCandidate"];
 		activateCandidate: ResolvedEngineExecution["activateCandidate"];
 		ruleEventsPending?: string[];
@@ -663,6 +663,7 @@ export class EngineRuntime {
 	readonly #pendingConsultants = new Map<string, PromiseWithResolvers<"approve" | "deny"> & { binding: LiveBinding }>();
 	readonly #approvalTimers = new Map<string, NodeJS.Timeout>();
 	readonly #retainedApprovals = new Map<string, EngineBindingSnapshot>();
+	readonly #dispatchDeadlineTimers = new Map<string, NodeJS.Timeout>();
 	readonly #recoveryTimers = new Map<string, NodeJS.Timeout>();
 	readonly #approvalRoutingWakes = new Set<string>();
 	readonly #pendingStarts = new Set<PendingStartResolution>();
@@ -2284,6 +2285,8 @@ export class EngineRuntime {
 		this.#approvalTimers.clear();
 		for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
 		this.#recoveryTimers.clear();
+		for (const timer of this.#dispatchDeadlineTimers.values()) clearTimeout(timer);
+		this.#dispatchDeadlineTimers.clear();
 		this.#signalInboxWake();
 		for (const pending of this.#pendingStarts)
 			pending.controller.abort(new EngineTargetError("cancelled", "Engine stopped during profile resolution"));
@@ -2693,10 +2696,11 @@ export class EngineRuntime {
 		}
 		const route = preview.frozen[0];
 		if (!route) throw new EngineTargetError("admission_state_unknown", "Admitted route is missing");
+		const basis = humanSelectionMatches(humanSelection, route) ? "user" : requirement.pin ? "pin" : route.order_match ? "order" : "rank";
 		const selected: SelectedExecutor = {
 			...candidateIdentity(route),
-			basis: humanSelectionMatches(humanSelection, route) ? "user" : requirement.pin ? "pin" : route.order_match ? "order" : "rank",
-			order_match: route.order_match,
+			basis,
+			order_match: basis === "order" ? route.order_match : null,
 		};
 		const candidates = preview.frozen.map(frozenCandidate);
 		const l1Rules = l1For(config.instruction_sources, candidateIdentity(route));
@@ -3351,7 +3355,7 @@ export class EngineRuntime {
 								...parent.execution.choice.selected,
 								...candidateIdentity(candidate),
 								...billing,
-								order_match: candidate.order_match,
+								order_match: parent.execution.choice.selected.basis === "order" ? candidate.order_match : null,
 							};
 							const digest = executionHash({
 								schema: "artel.execution.v2",
@@ -3526,6 +3530,7 @@ export class EngineRuntime {
 				unsubscribe: () => {},
 				disposeExecution: resolved.dispose,
 				execution: { config, frozen: [...frozen], selectors: resolved.selectors, choice,
+					managedServiceTier: resolved.options.managedServiceTier,
 					verifyCandidate: resolved.verifyCandidate, activateCandidate: resolved.activateCandidate },
 				providerRequestHook: sessionOptions.providerRequestHook!,
 				requireYieldTool: config.continuationConfiguration.requireYieldTool,
@@ -3782,7 +3787,7 @@ export class EngineRuntime {
 			unsubscribeCreated = binding.unsubscribe;
 			const deadline = await this.#assertDispatchDeadline(binding.attemptId, binding.execution.config);
 			this.#bindings.set(request.agentInstanceId, binding);
-			this.#armDispatchDeadline(binding, deadline);
+			this.#armDispatchDeadline(this.#snapshot(binding), deadline);
 			return binding;
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
@@ -4379,6 +4384,8 @@ export class EngineRuntime {
 			kind: "cancelled", causationCommandId: commandId, payload: { reason },
 		}], { expectedStates: ["cancel_requested"], cause: reason }));
 		this.#retainedApprovals.delete(target.agentInstanceId);
+		clearTimeout(this.#dispatchDeadlineTimers.get(target.attemptId));
+		this.#dispatchDeadlineTimers.delete(target.attemptId);
 	}
 
 	async #cancelPendingInput(
@@ -5422,7 +5429,8 @@ export class EngineRuntime {
 		const current = binding.execution.frozen.find(route =>
 			candidateRef(route) === candidateRef(currentIdentity(choice)));
 		if (!current) throw new EngineTargetError("stale_target", "Billing route is outside the frozen choices");
-		const selected = { ...choice.selected, ...candidateIdentity(proposal.to), order_match: current.order_match };
+		const selected = { ...choice.selected, ...candidateIdentity(proposal.to),
+			order_match: choice.selected.basis === "order" ? current.order_match : null };
 		const digest = executionHash({
 			schema: "artel.execution.v2",
 			dispatchHash: binding.dispatchHash,
@@ -5529,22 +5537,30 @@ export class EngineRuntime {
 		return deadline;
 	}
 
-	#armDispatchDeadline(binding: LiveBinding, deadline: number | undefined): void {
-		if (deadline === undefined) return;
-		const attemptId = binding.attemptId;
+	#armDispatchDeadline(target: EngineBindingSnapshot, deadline: number | undefined): void {
+		clearTimeout(this.#dispatchDeadlineTimers.get(target.attemptId));
+		this.#dispatchDeadlineTimers.delete(target.attemptId);
+		if (deadline === undefined || this.#disposed) return;
 		const arm = () => {
-			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding ||
-				binding.attemptId !== attemptId || TERMINAL_ATTEMPT_STATES.has(binding.attemptState)) return;
+			this.#dispatchDeadlineTimers.delete(target.attemptId);
+			const live = this.#bindings.get(target.agentInstanceId);
+			const current = live ?? this.#retainedApprovals.get(target.agentInstanceId);
+			if (this.#disposed || !current || current.attemptId !== target.attemptId ||
+				current.bindingId !== target.bindingId || current.executionId !== target.executionId ||
+				current.engineGeneration !== target.engineGeneration || current.bindingGeneration !== target.bindingGeneration ||
+				current.authorityGeneration !== target.authorityGeneration ||
+				(live && TERMINAL_ATTEMPT_STATES.has(live.attemptState))) return;
 			const remaining = deadline - Date.now();
 			if (remaining <= 0) {
 				this.#trackRun((async () => {
-					await this.#branchControl({ ...this.#snapshot(binding),
-						commandId: `dispatch-timeout-${attemptId}`, reason: "dispatch_timeout: immutable Attempt deadline elapsed" }, "stop", false);
+					await this.#branchControl({ ...target,
+						commandId: `dispatch-timeout-${target.attemptId}`, reason: "dispatch_timeout: immutable Attempt deadline elapsed" }, "stop", false);
 				})());
 				return;
 			}
-			binding.dispatchDeadlineTimer = setTimeout(arm, Math.min(remaining, 2_147_483_647));
-			binding.dispatchDeadlineTimer.unref?.();
+			const timer = setTimeout(arm, Math.min(remaining, 2_147_483_647));
+			timer.unref?.();
+			this.#dispatchDeadlineTimers.set(target.attemptId, timer);
 		};
 		arm();
 	}
@@ -5953,8 +5969,12 @@ export class EngineRuntime {
 			return undefined;
 		}
 		const hook = binding.providerRequestHook;
+		const managedTier = binding.execution.managedServiceTier;
+		if (!managedTier) throw new EngineTargetError("stale_target", "Helper model has no verified managed service tier");
 		return await this.#sideModelCall(binding, model, signal => completeSimple(model, context, {
 			...options,
+			serviceTier: managedTier(model),
+			strictServiceTier: true,
 			signal: options.signal ? AbortSignal.any([options.signal, signal]) : signal,
 			fetch: hook.wrapFetch(model, options.fetch ?? globalThis.fetch),
 			physicalRequest: request => {
@@ -6693,16 +6713,36 @@ export class EngineRuntime {
 		try {
 			for (;;) {
 				const progress = binding.pauseProgress.promise;
-				const live = binding.attemptId === attemptId && this.#submittedWorkActive(binding);
-				binding.drainingAttemptId = live ? attemptId : undefined;
-				const turn = live ? await this.#drainTurn(binding, attemptId) : undefined;
+				const turn = await this.#inLane<"queued" | "request" | "done" | undefined>(binding.agentInstanceId, async () => {
+					if (binding.attemptId === attemptId) {
+						binding.drainingAttemptId = attemptId;
+						const live = this.#submittedWorkActive(binding);
+						if (this.#idleDrainOwner(binding)) {
+							// A steer already accepted by this owner survives the submitted root's completion.
+							if (binding.session.agent.hasQueuedMessages()) return "queued";
+							if (live) {
+								const notices = (await this.store.retainedRequestInputs(this.#snapshot(binding))).filter(row =>
+									row.resolved && !requestConsumptionMatches(row) &&
+									!binding.requestNotices.has(`${row.value.inputId}:${row.value.revision}`));
+								if (notices.length) {
+									await this.store.assertIntent(binding.agentInstanceId, binding.intentRevision, true);
+									for (const row of notices) binding.requestNotices.add(`${row.value.inputId}:${row.value.revision}`);
+									return "request";
+								}
+							}
+						}
+						// Close admission in the same lane as the final empty-queue decision.
+						if (!live || finished) binding.drainingAttemptId = undefined;
+					}
+					return finished ? "done" : undefined;
+				});
+				if (turn === "done") {
+					await settled;
+					return undefined;
+				}
 				if (turn) {
 					settled.catch(() => undefined);
 					return turn;
-				}
-				if (finished) {
-					await settled;
-					return undefined;
 				}
 				await Promise.race([settled, progress]);
 			}
@@ -6711,19 +6751,6 @@ export class EngineRuntime {
 		}
 	}
 
-	#drainTurn(binding: LiveBinding, attemptId: string): Promise<"queued" | "request" | undefined> {
-		return this.#inLane(binding.agentInstanceId, async () => {
-			if (binding.attemptId !== attemptId || !this.#idleDrainOwner(binding)) return undefined;
-			if (binding.session.agent.hasQueuedMessages()) return "queued";
-			const notices = (await this.store.retainedRequestInputs(this.#snapshot(binding))).filter(row =>
-				row.resolved && !requestConsumptionMatches(row) &&
-				!binding.requestNotices.has(`${row.value.inputId}:${row.value.revision}`));
-			if (!notices.length) return undefined;
-			await this.store.assertIntent(binding.agentInstanceId, binding.intentRevision, true);
-			for (const row of notices) binding.requestNotices.add(`${row.value.inputId}:${row.value.revision}`);
-			return "request";
-		});
-	}
 
 	async #waitForAttemptQuiescence(binding: LiveBinding, attemptId: string): Promise<void> {
 		const filter = { ownerId: binding.engineAgentId, attemptId };
@@ -6971,8 +6998,8 @@ export class EngineRuntime {
 		retainApproval = false,
 	): Promise<void> {
 		binding.sideAbort.abort(new EngineTargetError("cancelled", reason));
-		clearTimeout(binding.dispatchDeadlineTimer);
-		binding.dispatchDeadlineTimer = undefined;
+		clearTimeout(this.#dispatchDeadlineTimers.get(binding.attemptId));
+		this.#dispatchDeadlineTimers.delete(binding.attemptId);
 		clearInterval(binding.leaseHeartbeat);
 		binding.leaseHeartbeat = undefined;
 		binding.session.beginDispose();
@@ -7296,7 +7323,10 @@ export class EngineRuntime {
 		validateRuntimeValue("engineExecutionConfiguration", config);
 		if (executionHash(config.dispatch) !== current.dispatchHash || !config.roster_complete)
 			throw new EngineTargetError("stale_target", "Retained approval has no matching admitted execution");
-		await this.#assertDispatchDeadline(target.attemptId, config);
+		const deadline = config.dispatch.limits.timeout_seconds === null ? undefined
+			: attempt.created_at + config.dispatch.limits.timeout_seconds * 1_000;
+		this.#armDispatchDeadline(current, deadline);
+		if (deadline !== undefined && deadline <= Date.now()) return undefined;
 		const intent = await this.store.intent(target.agentInstanceId);
 		const approvals = await this.store.durableRequestWait(target.attemptId);
 		const inputs = await this.store.retainedRequestInputs(current);
@@ -7340,6 +7370,8 @@ export class EngineRuntime {
 			}], { expectedStates: ["paused"], cause: "consultant_denied",
 				terminalResult: { error: "Consultant route reselection denied" } }));
 			this.#retainedApprovals.delete(target.agentInstanceId);
+			clearTimeout(this.#dispatchDeadlineTimers.get(target.attemptId));
+			this.#dispatchDeadlineTimers.delete(target.attemptId);
 			return undefined;
 		}
 		const frozen = attempt.execution.executor_choice.candidates.map(saved => {
@@ -7495,6 +7527,7 @@ export class EngineRuntime {
 			if (reacquired) this.#notifyEvents(await this.store.commitAttemptTransition(current, "paused", [{
 				kind: "paused", payload: { cause: "recovery_required", reason: safeEngineErrorDetail(error) },
 			}], { expectedStates: ["running", "waiting_request"], cause: "recovery_required" }));
+			if (this.#retainedApprovals.has(target.agentInstanceId)) this.#armDispatchDeadline(current, deadline);
 			throw error;
 		} finally {
 			clearInterval(materializationHeartbeat);
