@@ -1479,16 +1479,17 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 	}, 60_000);
 
 	it("stops before a second primary model iteration without counting the first iteration's tool", async () => {
-		const mock = createMockModel({ handler: [
+		const mock = createMockModel({ responses: [
 			{ content: [{ type: "toolCall", id: "limited-write", name: "write",
 				arguments: { path: "limited-output.txt", content: "first iteration executed" } }] },
 			{ content: ["must not reach another primary iteration"] },
 		] });
+		const limits = { timeout_seconds: null, max_iterations: 1 };
+		const ordinary = admittedExecution(mock.model, modelRegistry);
 		const execution = admittedExecution(mock.model, modelRegistry, {
-			continuation: { toolNames: ["write"], restrictToolNames: true },
+			dispatch: { ...ordinary.config.dispatch, limits },
+			continuation: { toolNames: ["write"], restrictToolNames: true, limits },
 		});
-		execution.config.dispatch.limits = { timeout_seconds: null, max_iterations: 1 };
-		execution.config.continuationConfiguration.limits = { ...execution.config.dispatch.limits };
 		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity));
 		try {
 			const started = await admitRequest(runtime, startRequest(execution, {
@@ -1595,10 +1596,12 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					const user = mock.calls[0].context.messages.findLast(message => message.role === "user")!;
 					expect(JSON.stringify(mock.calls[0].context)).toContain("ORIGINAL_CONSULTANT_CONTEXT");
 					expect(JSON.stringify(user.content)).toContain("Inspect the retained pixel");
-					expect(Array.isArray(user.content) ? user.content.filter(part => part.type === "image") : []).toEqual(
-						await normalizeModelContextImages([{ type: "image", mimeType: "image/png", data: png.toString("base64") }],
-							{ model: mock.model }),
-					);
+					const providerImages = await normalizeModelContextImages(
+						[{ type: "image", mimeType: "image/png", data: png.toString("base64") }], { model: mock.model });
+					if (!providerImages || providerImages.length !== 1)
+						throw new Error("Consultant fixture did not prepare its required image");
+					if (!Array.isArray(user.content)) throw new Error("Consultant user content lost image blocks");
+					expect(user.content.filter(part => part.type === "image")).toEqual(providerImages);
 					const manager = await nativeSession(runtime, started.sessionFile!);
 					await withOriginalAttachment(manager, "attachment://original/message/consultant-message/0",
 						async file => expect(await Bun.file(file).bytes()).toEqual(new Uint8Array(png)));

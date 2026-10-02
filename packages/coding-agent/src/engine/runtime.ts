@@ -5537,8 +5537,10 @@ export class EngineRuntime {
 				binding.attemptId !== attemptId || TERMINAL_ATTEMPT_STATES.has(binding.attemptState)) return;
 			const remaining = deadline - Date.now();
 			if (remaining <= 0) {
-				this.#trackRun(this.#branchControl({ ...this.#snapshot(binding),
-					commandId: `dispatch-timeout-${attemptId}`, reason: "dispatch_timeout: immutable Attempt deadline elapsed" }, "stop", false));
+				this.#trackRun((async () => {
+					await this.#branchControl({ ...this.#snapshot(binding),
+						commandId: `dispatch-timeout-${attemptId}`, reason: "dispatch_timeout: immutable Attempt deadline elapsed" }, "stop", false);
+				})());
 				return;
 			}
 			binding.dispatchDeadlineTimer = setTimeout(arm, Math.min(remaining, 2_147_483_647));
