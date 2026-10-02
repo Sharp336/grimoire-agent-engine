@@ -1208,7 +1208,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			await session.setActiveToolPresentation(enabledTools,
 				["ast_grep", ...(evalOperation && !shared ? ["eval"] : [])]);
 			return session.prompt(input, identity);
-		}, {}, [], { "tools.xdev": true, ...(shared ? { "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 0 } : {}) });
+		}, {}, [], { "tools.xdev": true, "astGrep.enabled": true, ...(shared ? { "eval.autoBackground.enabled": true, "eval.autoBackground.thresholdMs": 0 } : {}) });
 		fs.writeFileSync(path.join(cwd, protectedArgs.path), 'const protectedValue = "whole-operation-value";\n');
 		const register = runtime.asyncJobManager.register.bind(runtime.asyncJobManager);
 		const registration = shared ? spyOn(runtime.asyncJobManager, "register").mockImplementation((type, label, run, options) =>
