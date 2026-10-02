@@ -739,6 +739,11 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 			inputHash: approvalHash,
 			origin: { messageId: "assistant_permission", blockId: "block_1" },
 		}, permitRequest);
+		expect((await store.runtimeInput(request)).items).toMatchObject([
+			{ inputId: "effect-permit", kind: "approval", handling: "blocking" },
+		]);
+		expect((await store.runtimeSnapshot({ ...scope, kinds: ["input"] }, request)).agents[0].pendingInputs)
+			.toMatchObject([{ inputId: "effect-permit", kind: "approval", handling: "blocking" }]);
 		const snapshot = await store.runtimeSnapshot(scope, request);
 		const detail = snapshot.agents[0];
 		const tools = detail.tools as Array<{ toolCallId: string; revision: number; phase: string }>;

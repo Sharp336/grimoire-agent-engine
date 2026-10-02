@@ -11,6 +11,7 @@ import {
 } from "./rocks-runtime-history";
 import {
 	inputBodyPrefix,
+	inputOverview,
 	nativeCommandReceipt,
 	type ProjectedEvent,
 	projectEvent,
@@ -593,12 +594,13 @@ export class RocksEngineStore extends RocksEngineMutations {
 				next = page.nextCursor;
 				break;
 			}
-			if (size(items) + size(row.value) > runtimeLimits.httpPageBytes - 4096) {
+			const item = subtype === "input" ? inputOverview(row) : row.value;
+			if (size(items) + size(item) > runtimeLimits.httpPageBytes - 4096) {
 				next = cursor ?? null;
 				if (!items.length) throw new EngineTargetError("restore_budget", "Projection item cannot fit its page");
 				break;
 			}
-			items.push(row.value);
+			items.push(item);
 			next = page.nextCursor;
 			if (!next) break;
 			cursor = next;

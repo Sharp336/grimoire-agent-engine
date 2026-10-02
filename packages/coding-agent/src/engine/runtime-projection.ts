@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { type EngineEvent, EngineTargetError } from "./contracts";
 import {
 	type RuntimeAccess,
@@ -39,6 +40,15 @@ export function boundedItems<T>(items: T[], maxBytes: number, maxItems: number):
 		bytes += size;
 	}
 	return selected;
+}
+
+export function runtimeInputHandling(body: Record<string, unknown> | undefined): "blocking" | "nonblocking" {
+	const request = body?.kind === "approval" ? body.request : body;
+	if (!isRecord(request)) throw new EngineTargetError("source_unavailable", "Input handling has no retained request body");
+	const handling = request.handling ?? "blocking";
+	if (handling !== "blocking" && handling !== "nonblocking")
+		throw new EngineTargetError("source_unavailable", "Retained input handling is invalid");
+	return handling;
 }
 
 export function runtimeInputBody(event: EngineEvent): Record<string, unknown> {

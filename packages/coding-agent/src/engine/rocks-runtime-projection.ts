@@ -28,6 +28,7 @@ import {
 	projectionChange,
 	type RuntimeQueryWork,
 	runtimeInputBody,
+	runtimeInputHandling,
 	runtimeInputPreview,
 	runtimeInputQuestions,
 } from "./runtime-projection";
@@ -493,6 +494,14 @@ export function toolSnapshot(row: RocksEffect): Record<string, unknown> {
 	validateRuntimeValue("toolSnapshot", item);
 	return item;
 }
+
+/** Older overviews retain their exact handling in the saved request body. */
+export function inputOverview(row: RocksProjection): Record<string, unknown> {
+	return row.value.handling === undefined
+		? { ...row.value, handling: runtimeInputHandling(row.body) }
+		: row.value;
+}
+
 async function projectedTools(
 	tx: RuntimeTransaction,
 	identity: RocksIdentity,
@@ -563,7 +572,7 @@ export async function projectedDetail(
 					]),
 					row => projectionId("input", attempt.attempt_id, String(row.value.inputId)),
 					row => row.subtype === "input" && row.attempt_id === attempt.attempt_id && !row.resolved,
-				).map(row => row.value)
+				).map(inputOverview)
 			: [];
 	let executorRoute: Record<string, unknown> | undefined;
 	if (attempt?.executor_route_state) {
@@ -683,7 +692,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 				event,
 				"input",
 				id,
-				{ inputId, kind: body.kind, revision: event.eventId },
+				{ inputId, kind: body.kind, revision: event.eventId, handling: runtimeInputHandling(body) },
 				{ body, resolved: false, ...(parts ? { parts } : {}) },
 			);
 		} else {
