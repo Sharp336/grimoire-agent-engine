@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Updated the shared Codex client version to 0.155.1 so ChatGPT model discovery and requests meet the GPT-6 backend version gate.
 - Omitted unsupported reasoning effort for fixed-reasoning Grok models behind OpenAI-compatible gateways.
 
 ## [18.0.7] - 2026-08-26
