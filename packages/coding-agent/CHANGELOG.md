@@ -20,6 +20,7 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Engine `request` uses an object-root Codex/Responses tool schema with explicit non-strict free-form operation arguments. Action-specific validation remains enforced by the runtime protocol.
 - Engine preserves the original non-retryable HTTP status and error body when rejecting a nested transport fallback, including Codex zstd rejection, instead of replacing it with a transient retry error. Physical-request limits remain unchanged.
 - Hosted MCP calls attest the persisted native ToolEffect name, while the canonical call hash continues to bind the remote MCP name and arguments. Qualified tools no longer fail the ClientHost started-effect check.
 - Side-provider admission verifies the original serialized Start and current native lease for both browser and headless commands without rewriting immutable browser receipt targets. Pause waits for admitted side model calls to finish durable settlement before releasing its routing lease, but does not wait on outer maintenance scopes that may depend on the paused primary turn.

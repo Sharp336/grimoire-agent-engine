@@ -7,10 +7,19 @@ import requestDescription from "../prompts/tools/request.md" with { type: "text"
 import type { ToolSession } from "../tools";
 import { validateRuntimeValue } from "./runtime-protocol";
 
-const schema = arkType({ action: "'submit'", handling: "'blocking' | 'nonblocking'",
+const inputSchema = arkType({ action: "'submit'", handling: "'blocking' | 'nonblocking'",
 	operation: { toolName: "string", arguments: "object" } }).or({ action: "'read'", requestId: "string" })
 	.or({ action: "'continue'", requestId: "string", expectedDecisionRevision: "number", expectedInputRevision: "number" });
-export type EngineRequestInput = typeof schema.infer;
+export type EngineRequestInput = typeof inputSchema.infer;
+// Responses requires an object root. The action-dependent contract is enforced below.
+const schema = arkType({
+	action: "'submit' | 'read' | 'continue'",
+	"handling?": "'blocking' | 'nonblocking'",
+	"operation?": { toolName: "string", arguments: "object" },
+	"requestId?": "string",
+	"expectedDecisionRevision?": "number",
+	"expectedInputRevision?": "number",
+});
 export interface EngineRequestDispatch {
 	validate(name: string, args: object): Record<string, unknown>;
 	execute(name: string, callId: string, args: Record<string, unknown>, ownerSignal?: AbortSignal): Promise<AgentToolResult<unknown>>;
@@ -34,9 +43,10 @@ export class EngineRequestTool implements AgentTool<typeof schema, unknown> {
 	readonly label = "Request";
 	readonly description = requestDescription;
 	readonly parameters = schema;
-	readonly strict = true;
+	// Protected operations carry arbitrary tool arguments, which strict mode cannot represent.
+	readonly strict = false;
 	constructor(readonly session: ToolSession) {}
-	async execute(callId: string, input: EngineRequestInput, signal?: AbortSignal,
+	async execute(callId: string, input: typeof schema.infer, signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<unknown>, context?: AgentToolContext): Promise<AgentToolResult<unknown>> {
 		validateRuntimeValue("requestToolInput", input);
 		const controller = this.session.engineRequest;
@@ -49,7 +59,7 @@ export class EngineRequestTool implements AgentTool<typeof schema, unknown> {
 			return tool;
 		};
 		let activeUpdate = onUpdate;
-		return controller.invoke(callId, input, {
+		return controller.invoke(callId, input as EngineRequestInput, {
 			onUpdate,
 			setUpdateHandler: handler => { activeUpdate = handler; },
 			validate: (name, args) => {

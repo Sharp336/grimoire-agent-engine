@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	adaptSchemaForStrict,
 	normalizeSchemaForCCA,
@@ -10,7 +12,7 @@ import {
 	validateStrictSchemaEnforcement,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BUILTIN_TOOLS, createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 interface ToolSchemaEntry {
 	name: string;
@@ -78,6 +80,44 @@ function formatCompatibilityIssues(
 }
 
 describe("builtin tool schemas provider compatibility", () => {
+	it("sends object-root schemas for every Engine builtin and hidden tool to Codex", async () => {
+		const unavailable = async (): Promise<never> => { throw new Error("Schema audit cannot execute operations"); };
+		const session: ToolSession = {
+			...createTestSession(),
+			engineMode: true,
+			engineRequest: {
+				ownsCurrentOperation: () => false,
+				mayTerminateSharedKernel: () => false,
+				registerCancellationBoundary: () => () => {},
+				invoke: unavailable,
+			},
+			engineChildLauncher: { parentAgentInstanceRef: "schema-audit", launch: unavailable },
+			engineInbox: { invoke: unavailable },
+		};
+		const tools = [];
+		for (const factory of Object.values({ ...BUILTIN_TOOLS, ...HIDDEN_TOOLS })) {
+			const tool = await factory(session);
+			if (tool) tools.push(tool);
+		}
+		const model = buildModel({
+			id: "gpt-6.1-sol", name: "Codex schema audit", api: "openai-codex-responses",
+			provider: "openai-codex", baseUrl: "https://chatgpt.com/backend-api/codex",
+			reasoning: true, input: ["text"], contextWindow: 272000, maxTokens: 128000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
+		const payloads = convertOpenAICodexResponsesTools(tools, model);
+		const functions = payloads.filter(tool => tool.type === "function");
+		console.log("Engine Codex schema audit:", functions.map(tool => tool.name).join(", "));
+		expect(functions.map(tool => tool.name)).toContain("request");
+		expect(functions.map(tool => tool.name)).toContain("hub");
+		expect(functions.map(tool => tool.name)).toContain("task");
+		expect(functions.filter(tool => tool.parameters.type !== "object").map(tool => tool.name)).toEqual([]);
+		const request = functions.find(tool => tool.name === "request")!;
+		expect(request.parameters.anyOf).toBeUndefined();
+		expect(request.parameters.oneOf).toBeUndefined();
+		expect(request.strict).toBe(false);
+	});
+
 	it("keeps todo strict and marks task non-strict for free-form output schemas", async () => {
 		const tools = await builtinToolsPromise;
 		const task = tools.find(tool => tool.name === "task");
