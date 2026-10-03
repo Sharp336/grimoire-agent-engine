@@ -104,7 +104,17 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Requ
 							: deferredError(error instanceof Error ? error.message : String(error), { cause: error });
 					throw state.failure;
 				}
-				if (!isRetryableStatus(response.status)) return response;
+				if (!isRetryableStatus(response.status)) {
+					if (!response.ok) {
+						// A transport fallback may discard this body before the nested-request guard runs.
+						const body = await response.clone().text().catch(() => undefined);
+						state.failure = new EngineProviderRetryError(
+							PROVIDER_RETRY_PERMANENT_CODE,
+							`${retryDescription(response.status, response.statusText, undefined)}${body ? `; ${body}` : ""}`,
+						);
+					}
+					return response;
+				}
 				const body = await response
 					.clone()
 					.text()

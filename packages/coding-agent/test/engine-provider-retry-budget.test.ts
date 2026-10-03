@@ -82,6 +82,43 @@ describe("Engine provider retry budget", () => {
 		expect(safeEngineErrorDetail(publicError)).toBe(publicError);
 	});
 
+	it("preserves Codex HTTP rejection through compressed-body fallback without retrying it", async () => {
+		const model = buildModel({
+			id: "gpt-6-sol",
+			name: "Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			preferWebsockets: false,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 872000,
+			maxTokens: 128000,
+		});
+		for (const status of [400, 415]) {
+			let requests = 0;
+			const token = `aaa.${Buffer.from(JSON.stringify({
+				"https://api.openai.com/auth": { chatgpt_account_id: "test-account" },
+			})).toString("base64url")}.bbb`;
+			const result = await withProviderRetryBudget(4, () =>
+				streamSimple(model, { messages: [{ role: "user", content: "Hello", timestamp: 1 }] }, {
+					apiKey: token,
+					fetch: createProviderRetryBudgetHook().wrapFetch(model, async (_input, init) => {
+						requests++;
+						expect(new Headers(init?.headers).get("content-encoding")).toBe("zstd");
+						return new Response('{"error":{"message":"unsupported content encoding"}}', { status });
+					}),
+					providerRetryWait: deferNestedProviderRetry,
+				}).result(),
+			);
+			expect(requests).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain(`${PROVIDER_RETRY_PERMANENT_CODE}: HTTP ${status}`);
+			expect(result.errorMessage).toContain("unsupported content encoding");
+		}
+	});
+
 	it("resets after every successful logical request across more than four tool turns", async () => {
 		let physicalRequests = 0;
 		const hook = createProviderRetryBudgetHook();
