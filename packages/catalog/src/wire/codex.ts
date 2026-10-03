@@ -8,10 +8,10 @@ export const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
  * Pinned OpenAI Codex client version (corresponds to @openai/codex package version).
  *
  * The backend version-gates model availability against this value on both
- * `/models?client_version=` and `/responses`; 0.155.1 exposes GPT-6 Sol and Luna.
+ * `/models?client_version=` and `/responses`; 0.160.0 also exposes GPT-6.1 Sol.
  * An older pin silently hides newer SKUs from discovery.
  */
-export const CODEX_CLIENT_VERSION = "0.155.1";
+export const CODEX_CLIENT_VERSION = "0.160.0";
 
 export const OPENAI_HEADERS = {
 	BETA: "OpenAI-Beta",
