@@ -68,6 +68,52 @@ describe.skipIf(!fs.existsSync(natsServer) || storageWorkerUnavailable)("NatsEng
 		if (tempDir) removeSyncWithRetries(tempDir);
 		tempDir = undefined;
 	});
+	it.each([false, true])("migrates a legacy approval consumer only when drained (pending=%s)", async pending => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-consumer-upgrade-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"), deviceId: "consumer-upgrade-device",
+		});
+		const options = {
+			runtime, deviceId: "consumer-upgrade-device", engineId: "consumer-upgrade-engine",
+			servers: broker.url, authorizeCommand: () => {}, authorizeMessage: () => {},
+		};
+		const client = await connect({ servers: broker.url });
+		let adapter: NatsEngineAdapter | undefined;
+		try {
+			adapter = await NatsEngineAdapter.connect(options);
+			const durable = `engine_${adapter.engineRoute}_control`;
+			const manager = await jetstreamManager(client);
+			const original = await manager.consumers.info(ENGINE_COMMAND_STREAM, durable);
+			const filters = original.config.filter_subjects!;
+			const legacy = filters.map(subject => subject.replace(".cmd.resolve_approval", ".cmd.resolve_tool_approval"));
+			await adapter.dispose();
+			adapter = undefined;
+			await manager.consumers.update(ENGINE_COMMAND_STREAM, durable, { ...original.config, filter_subjects: legacy });
+			if (pending) {
+				const subject = legacy.find(value => value.endsWith(".cmd.resolve_tool_approval"))!.replace(".a.*.", ".a.retained.");
+				await jetstream(client).publish(subject, "retained legacy approval");
+				expect((await manager.consumers.info(ENGINE_COMMAND_STREAM, durable)).num_pending).toBe(1);
+				await expect(NatsEngineAdapter.connect(options)).rejects.toThrow("does not match the Engine contract");
+				const retained = await manager.consumers.info(ENGINE_COMMAND_STREAM, durable);
+				expect(retained.config.filter_subjects).toEqual(legacy);
+				expect(retained.num_pending).toBe(1);
+			} else {
+				adapter = await NatsEngineAdapter.connect(options);
+				const upgraded = await manager.consumers.info(ENGINE_COMMAND_STREAM, durable);
+				expect(upgraded.config.filter_subjects).toEqual(filters);
+				expect(upgraded.delivered).toEqual(original.delivered);
+				expect(upgraded.ack_floor).toEqual(original.ack_floor);
+			}
+		} finally {
+			await adapter?.dispose();
+			await client.drain();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30_000);
+
 	it("delivers a non-browser native rejection and releases its hosted claim without creating an Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-native-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);

@@ -441,11 +441,22 @@ export class NatsEngineAdapter {
 				current.config.replay_policy !== ReplayPolicy.Instant ||
 				current.config.max_ack_pending !== maxAckPending
 			) {
+				const legacyApprovalFilter = Array.isArray(filter) &&
+					durable === `engine_${this.engineRoute}_control` &&
+					current.config.filter_subjects?.length === filter.length &&
+					filter.every((subject, index) =>
+						current.config.filter_subjects![index] === subject.replace(".cmd.resolve_approval", ".cmd.resolve_tool_approval")) &&
+					current.config.filter_subjects.some(subject => subject.endsWith(".cmd.resolve_tool_approval")) &&
+					current.config.ack_policy === AckPolicy.Explicit &&
+					current.config.deliver_policy === DeliverPolicy.All &&
+					current.config.replay_policy === ReplayPolicy.Instant &&
+					current.config.max_ack_pending === maxAckPending &&
+					current.num_pending === 0 && current.num_ack_pending === 0;
 				if (
 					stream === ENGINE_COMMAND_STREAM &&
 					Array.isArray(filter) &&
-					current.config.filter_subject ===
-						`grimoire.engine.v1.d.${this.deviceRoute}.e.${this.engineRoute}.a.*.cmd.*`
+					(current.config.filter_subject ===
+						`grimoire.engine.v1.d.${this.deviceRoute}.e.${this.engineRoute}.a.*.cmd.*` || legacyApprovalFilter)
 				) {
 					await this.#manager.consumers.update(stream, durable, {
 						...current.config,
