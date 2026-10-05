@@ -71,9 +71,13 @@ export const storageWorkerUnavailable = !(storageTestExecutable && storageTestRu
 
 export async function removeStorageTestRoot(root: string | undefined): Promise<void> {
 	if (!root) return;
-	const relative = path.relative(await fs.realpath(os.tmpdir()), await fs.realpath(root));
+	const resolved = await fs.realpath(root);
+	const relative = path.relative(await fs.realpath(os.tmpdir()), resolved);
 	if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
 		throw new Error("Refusing to remove a storage test root outside the system temp directory");
+	const cwdRelative = path.relative(resolved, await fs.realpath(process.cwd()));
+	if (!cwdRelative || cwdRelative !== ".." && !cwdRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(cwdRelative))
+		throw new Error("Refusing to remove the working directory or its ancestor");
 	await fs.rm(root, { recursive: true, force: true, maxRetries: 5 });
 }
 

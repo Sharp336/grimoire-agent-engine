@@ -4,17 +4,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { removeStorageTestRoot } from "./helpers/storage-worker-fixture";
 
-it("storage cleanup preserves cwd and temp root after setup failure", async () => {
-	const sentinel = path.join(process.cwd(), `storage-cleanup-${crypto.randomUUID()}`);
+it("storage cleanup refuses a disposable working directory and its ancestors", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "artel-cleanup-cwd-"));
+	const cwd = path.join(root, "checkout");
+	const sentinel = path.join(cwd, "keep");
+	await fs.mkdir(cwd);
 	await fs.writeFile(sentinel, "keep");
 	try {
+		for (const target of [cwd, root]) {
+			const child = Bun.spawn([process.execPath, "--eval", `
+				import { removeStorageTestRoot } from ${JSON.stringify(path.join(import.meta.dir, "helpers/storage-worker-fixture.ts"))};
+				try {
+					await removeStorageTestRoot(${JSON.stringify(target)});
+					process.exitCode = 1;
+				} catch (error) {
+					if (!String(error).includes("Refusing to remove")) throw error;
+				}
+			`], { cwd, stdout: "pipe", stderr: "pipe" });
+			expect(await child.exited).toBe(0);
+			expect(await fs.readFile(sentinel, "utf8")).toBe("keep");
+		}
 		await removeStorageTestRoot(undefined);
 		await removeStorageTestRoot("");
-		await expect(removeStorageTestRoot(process.cwd())).rejects.toThrow("Refusing to remove");
-		await expect(removeStorageTestRoot(os.tmpdir())).rejects.toThrow("Refusing to remove");
 		expect(await fs.readFile(sentinel, "utf8")).toBe("keep");
 	} finally {
-		await fs.rm(sentinel);
+		await fs.rm(root, { recursive: true, force: true });
 	}
 });
 
