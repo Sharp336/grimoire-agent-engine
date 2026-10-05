@@ -86,7 +86,7 @@ export async function executorPolicyPreview(store: RocksEngineStore, deviceId: s
 	return response;
 }
 
-/** Called only by ClientHost after hosted ACL/credential/record attestation, before any provider effect. */
+/** Called only by ClientHost after current hosted ACL/credential attestation, before any provider effect. */
 export async function executorPolicyAdmission(store: RocksEngineStore, params: Record<string, unknown>): Promise<Record<string, unknown>> {
 	if (typeof params.principalId !== "string" || !isRecord(params.identity) || !isRecord(params.verified) ||
 		params.verified.allowed !== true || !isRecord(params.verified.route))
@@ -114,18 +114,19 @@ export async function executorPolicyAdmission(store: RocksEngineStore, params: R
 		candidate.route_ref !== identity.routeRef || candidate.account_ref !== identity.providerAccountRef)
 		throw new EngineTargetError("stale_target", "Provider route is outside the frozen Attempt");
 	const live = params.verified.route;
-	if (live.route_ref !== candidate.route_ref || live.account_ref !== candidate.account_ref || live.model_id !== candidate.model_id ||
-		!isRecord(live.execution) || !Array.isArray(params.verified.observations) || !Array.isArray(params.verified.policy_scopes))
-		throw new EngineTargetError("stale_target", "Fresh facts name another route");
+	if (live.route_ref !== candidate.route_ref || live.account_ref !== candidate.account_ref ||
+		!isRecord(live.execution) || !isRecord(live.execution.credential) ||
+		live.execution.credential.generation !== captured.execution.credential.generation ||
+		!Array.isArray(params.verified.observations))
+		throw new EngineTargetError("stale_target", "Current authority differs from the frozen route or credential generation");
+	// A running Attempt keeps its captured policy; only readiness and provider facts are live.
 	const facts: ExecutorPolicyFacts = { ...executionPolicyFacts(captured), credential_status: String(live.credential_status),
-		observations: params.verified.observations as Record<string, unknown>[],
-		billing_pools: live.pools as EngineExecutionRoute["billing_pools"], quota_windows: live.quota_windows as EngineExecutionRoute["quota_windows"],
-		hard_quota_window_ids: live.hard_quota_window_ids as string[] };
-	if (params.candidate === null && (params.verified.policy_scopes as PolicyScope[]).some(scope => scope.fallback?.same_model_other_pool === false))
+		observations: params.verified.observations as Record<string, unknown>[] };
+	if (params.candidate === null && config.policy_scopes.some(scope => scope.fallback?.same_model_other_pool === false))
 		facts.billing_pools = facts.billing_pools.filter(pool => pool.pool_id === candidate.billing_pool_id);
 	const manual = humanSelectedCandidate(choice, candidate);
 	if (choice.selected.basis === "user" && !manual) throw new EngineTargetError("stale_target", "Human selection cannot authorize this route");
-	const result = evaluateExecutorPolicy(facts, choice.effective_requirement, manual, params.verified.policy_scopes as PolicyScope[], config.dispatch.limits);
+	const result = evaluateExecutorPolicy(facts, choice.effective_requirement, manual, config.policy_scopes, config.dispatch.limits);
 	const blocked = result.blocking_checks.filter(item => params.check_billing !== false || !["provider_quota", "quota_policy", "provider_availability"].includes(item.code));
 	if (blocked.length) return { allowed: false, status: "provider_admission_denied", reason: blocked.map(item => item.code).join(", ") };
 	if (params.check_billing === false) return { allowed: true };

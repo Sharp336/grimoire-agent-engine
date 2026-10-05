@@ -110,6 +110,26 @@ describe.skipIf(storageWorkerUnavailable)("local executor policy queries", () =>
 		const verified = { allowed: true, route: { ...route, pools: route.billing_pools }, observations: [], policy_scopes: [] };
 		const params = { principalId: "owner", identity, verified, candidate: null, check_billing: true };
 		expect((await executorPolicyAdmission(store, params)).allowed).toBe(true);
+		const edited = { ...verified, route: { ...verified.route, model_id: "replacement-model",
+			record_revisions: { [route.route_ref]: 2 }, display_name: "Renamed",
+			execution: { ...route.execution, base_url: "https://changed.invalid", trusted: false },
+			pools: route.billing_pools.map(pool => ({ ...pool, reserve: 999, cap: { user: 0, provider: 0 } })),
+		}, policy_scopes: [{ deny: [{ kind: "route", id: route.route_ref }] }] };
+		expect(await executorPolicyAdmission(store, { ...params, verified: edited })).toMatchObject({
+			allowed: true, billing: { billing_pool_id: route.billing_pool_id },
+		});
+		await expect(executorPolicyAdmission(store, { ...params, verified: { ...verified, allowed: false } }))
+			.rejects.toMatchObject({ code: "stale_target" });
+		await expect(executorPolicyAdmission(store, { ...params, verified: { ...verified,
+			route: { ...verified.route, execution: { ...route.execution,
+				credential: { ...route.execution.credential, generation: route.execution.credential.generation + 1 } } },
+		} })).rejects.toMatchObject({ code: "stale_target" });
+		expect(await executorPolicyAdmission(store, { ...params, verified: { ...verified,
+			route: { ...verified.route, credential_status: "revoked" },
+		} })).toMatchObject({ allowed: false, status: "provider_admission_denied" });
+		expect(await executorPolicyAdmission(store, { ...params, verified: { ...verified,
+			observations: [{ dimension: "route", dimension_id: route.route_ref, metric: "health", value: "unavailable" }],
+		} })).toMatchObject({ allowed: false, status: "provider_admission_denied" });
 		await expect(executorPolicyAdmission(store, { ...params, identity: { ...identity, dispatchHash: `sha256:${"f".repeat(64)}` } })).rejects.toMatchObject({ code: "stale_target" });
 		await store.mutation(target.agentInstanceId, tx => tx.put("attempt", target.attemptId, {
 			...row, execution: { ...row.execution!, executor_choice: { ...choice, selected: { ...choice.selected, basis: "user" },
@@ -120,13 +140,14 @@ describe.skipIf(storageWorkerUnavailable)("local executor policy queries", () =>
 		const exhausted = await executorPolicyAdmission(store, { ...params, verified: { ...verified,
 			observations: [{ dimension: "pool", dimension_id: route.billing_pool_id, metric: "remaining", value: 0 }] } });
 		expect(exhausted).toMatchObject({ allowed: false, status: "provider_admission_denied" });
-		const providerCap = await executorPolicyAdmission(store, { ...params, verified: {
+		// A newly configured cap is not evidence that the provider exhausted the old Attempt.
+		const editedCap = await executorPolicyAdmission(store, { ...params, verified: {
 			...verified, route: { ...verified.route, pools: verified.route.pools.map(pool => ({
 				...pool, cap: { provider: 20, user: 10 },
 			})) }, observations: [{ dimension: "pool", dimension_id: route.billing_pool_id,
 				metric: "used", value: 20, unit: "requests" }],
 		} });
-		expect(providerCap).toMatchObject({ allowed: false, status: "provider_admission_denied" });
+		expect(editedCap).toMatchObject({ allowed: true });
 		const foreign = { ...candidateIdentity(route), model_id: "another-model" };
 		await expect(executorPolicyAdmission(store, { ...params, candidate: foreign })).rejects.toMatchObject({ code: "stale_target" });
 	});
