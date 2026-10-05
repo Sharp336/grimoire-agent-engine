@@ -7,6 +7,8 @@ import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
 import { type StorageClient, storageCanonicalJson } from "../session/storage-client";
 import type { StorageDependency, StoragePayload, StorageRuntimeKind, StorageRuntimeMutation, StorageUsageProbeBinding } from "../session/storage-protocol";
+import { humanSelectedCandidate } from "./contracts";
+import { evaluateExecutorPolicy, executionPolicyFacts } from "./executor-policy";
 import type {
 	ApprovalDecision,
 	ApprovalRequest,
@@ -2577,7 +2579,7 @@ export class RocksEngineMutations {
 			const config = command?.identity.serializedCommand
 				? (JSON.parse(command.identity.serializedCommand) as { payload?: { executionConfiguration?: EngineExecutionConfiguration } })
 					.payload?.executionConfiguration : undefined;
-			const limits = config?.dispatch.limits;
+			const limits = attempt.execution?.executor_choice.selected.basis === "user" ? undefined : config?.dispatch.limits;
 			cached = { agentId: target.agentInstanceId, bindingId: target.bindingId, generation: target.engineGeneration,
 				deadline: limits?.timeout_seconds == null ? null : attempt.created_at + limits.timeout_seconds * 1_000,
 				maxIterations: limits?.max_iterations ?? null };
@@ -3123,12 +3125,11 @@ export class RocksEngineMutations {
 				.map(({ ref, revision, content_hash }) => ({ ref, revision, content_hash }));
 			const route = config.routes.routes.find(candidate => candidateRef(candidate) === candidateRef(to));
 			const requirement = choice.effective_requirement;
+			const humanPinned = humanSelectedCandidate(choice, to);
 			if (!route || to.model_id !== route.model_id || to.account_ref !== route.account_ref ||
-				(requirement.require_trusted_provider && !route.execution.trusted) ||
-				(route.tier === null ? requirement.min_tier > 0 : route.tier < requirement.min_tier) ||
-				(requirement.pin && (route.model_id !== requirement.pin.model_id ||
-					route.effort !== requirement.pin.effort ||
-					(requirement.pin.route_ref !== null && route.route_ref !== requirement.pin.route_ref))) ||
+				(choice.selected.basis === "user" && !humanPinned) ||
+				evaluateExecutorPolicy(executionPolicyFacts(route), requirement, humanPinned,
+					config.policy_scopes, config.dispatch.limits).blocking_checks.length > 0 ||
 				(!sameRoute && (requirement.fallback_mode === "none" ||
 					(requirement.fallback_mode === "same_model" && route.model_id !== choice.selected.model_id))) ||
 				(!route.billing_pools.some(pool => pool.pool_id === to.billing_pool_id)))

@@ -1009,6 +1009,45 @@ describe.skipIf(storageWorkerUnavailable)("runtime v1 durable boundaries", () =>
 		expect(await store.getEffect("effect-invalid")).toBeUndefined();
 	});
 
+	it.each(["exact", "any-provider"] as const)(
+		"keeps a durable human pin below the automatic floor during route transitions: %s", async mode => {
+			const store = await createStore();
+			const execution = admittedExecutionFixture(identity("root").bindingSnapshot.taskRef!);
+			const route = execution.config.routes.routes[0]!;
+			route.tier = 1;
+			const alternate = { ...structuredClone(route), route_ref: "gctx:dddddddddddddddd" };
+			execution.config.routes.routes.push(alternate);
+			// Start admission provenance is covered by engine-runtime.test; this boundary consumes its durable choice.
+			const target = await active(store, "root", execution);
+			const row = (await store.getAttempt(target.attemptId))!;
+			const saved = row.execution!;
+			const choice = saved.executor_choice;
+			const requirement = { ...choice.effective_requirement, min_tier: 2,
+				fallback_mode: "same_model" as const,
+				pin: { model_id: route.model_id, effort: route.effort,
+					route_ref: mode === "exact" ? route.route_ref : null, reason: "Selected by the user" } };
+			const to = candidateIdentity(mode === "exact" ? route : alternate);
+			const reason = mode === "exact" ? "billing_pool_observed" : "route_fallback";
+			const digest = `sha256:${"e".repeat(64)}`;
+			await store.mutation(target.agentInstanceId, tx => tx.put("attempt", target.attemptId, {
+				...row, execution: { ...saved, executor_choice: { ...choice, effective_requirement: requirement } },
+			}));
+			await expect(store.commitExecutorRoute(target, to, reason, digest, execution.config.routingLimits))
+				.rejects.toMatchObject({ code: "stale_target" });
+			await store.mutation(target.agentInstanceId, tx => tx.put("attempt", target.attemptId, {
+				...row, execution: { ...saved, executor_choice: { ...choice, effective_requirement: requirement,
+					selected: { ...choice.selected, basis: "user" } } },
+			}));
+			const changed = await store.commitExecutorRoute(target, to, reason, digest, execution.config.routingLimits);
+			expect(changed?.choice.transitions.at(-1)?.to).toEqual(to);
+			expect(changed?.choice.candidates.map(candidate => candidate.tier)).toEqual([1, 1]);
+			if (mode === "exact") {
+				await expect(store.commitExecutorRoute(target, candidateIdentity(alternate), "route_fallback",
+					digest, execution.config.routingLimits)).rejects.toMatchObject({ code: "stale_target" });
+			}
+		},
+	);
+
 	it("projects an admitted executor fallback and invalidates usage without changing app summaries", async () => {
 		let store = await createStore();
 		const agentInstanceRef = identity("root").agentInstanceRef;

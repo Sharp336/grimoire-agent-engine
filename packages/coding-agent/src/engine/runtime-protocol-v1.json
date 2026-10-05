@@ -288,67 +288,148 @@
     "usageProbeBindingGet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["principalId", "accountRef"],
+      "required": [
+        "principalId",
+        "accountRef"
+      ],
       "properties": {
-        "principalId": { "type": "string", "minLength": 1 },
-        "accountRef": { "type": "string", "minLength": 1 }
+        "principalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountRef": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "usageProbeBindingSet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["principalId", "accountRef", "expectedRevision", "modulePath"],
+      "required": [
+        "principalId",
+        "accountRef",
+        "expectedRevision",
+        "modulePath"
+      ],
       "properties": {
-        "principalId": { "type": "string", "minLength": 1 },
-        "accountRef": { "type": "string", "minLength": 1 },
-        "expectedRevision": { "type": "integer", "minimum": 0 },
+        "principalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
         "modulePath": {
           "oneOf": [
-            { "type": "string" },
-            { "type": "null" }
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
       }
     },
     "usageProbeBindingResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["accountRef", "modulePath", "revision", "timeoutMs"],
+      "required": [
+        "accountRef",
+        "modulePath",
+        "revision",
+        "timeoutMs"
+      ],
       "properties": {
-        "accountRef": { "type": "string", "minLength": 1 },
+        "accountRef": {
+          "type": "string",
+          "minLength": 1
+        },
         "modulePath": {
           "oneOf": [
-            { "type": "string" },
-            { "type": "null" }
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "revision": { "type": "integer", "minimum": 0 },
-        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
       }
     },
     "usageProbeRun": {
       "type": "object",
-      "required": ["principalId", "accountRef", "kind", "account", "credential"],
+      "required": [
+        "principalId",
+        "accountRef",
+        "kind",
+        "account",
+        "credential"
+      ],
       "properties": {
-        "principalId": { "type": "string", "minLength": 1 },
-        "accountRef": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["builtin", "module"] },
-        "account": { "type": "object" },
+        "principalId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accountRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "builtin",
+            "module"
+          ]
+        },
+        "account": {
+          "type": "object"
+        },
         "credential": {
           "oneOf": [
-            { "type": "object" },
-            { "type": "null" }
+            {
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
     },
     "usageProbeRunResult": {
       "type": "object",
-      "required": ["status", "observations"],
+      "required": [
+        "status",
+        "observations"
+      ],
       "properties": {
-        "status": { "type": "string" },
-        "observations": { "type": "array", "items": {} }
+        "status": {
+          "type": "string"
+        },
+        "observations": {
+          "type": "array",
+          "items": {}
+        }
       }
     },
     "attachmentUploadIds": {
@@ -9690,6 +9771,24 @@
         "execution": {
           "$ref": "#/$defs/executionDescriptor"
         },
+        "autoselect": {
+          "enum": [
+            "auto",
+            "manual",
+            "grant_only"
+          ]
+        },
+        "latency_ms": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "family": {
           "oneOf": [
             {
@@ -9754,6 +9853,25 @@
               "type": "null"
             }
           ]
+        },
+        "credential_status": {
+          "enum": [
+            "pending",
+            "ready",
+            "revoked"
+          ]
+        },
+        "service_tiers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/serviceTier"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
         }
       },
       "required": [
@@ -9776,11 +9894,16 @@
         "billing_pools",
         "quota_windows",
         "execution",
+        "autoselect",
+        "latency_ms",
         "family",
         "tags",
         "efforts",
         "hard_quota_window_ids",
-        "order_match"
+        "order_match",
+        "credential_status",
+        "service_tiers",
+        "observations"
       ],
       "additionalProperties": false
     },
@@ -9959,6 +10082,75 @@
         },
         "roster_complete": {
           "const": true
+        },
+        "policy_scopes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/executorPolicyScope"
+          }
+        },
+        "consultant_selection": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "on_pin_unavailable": {
+                  "enum": [
+                    "fail",
+                    "reselect",
+                    "ask"
+                  ]
+                },
+                "pin": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "effort": {
+                          "enum": [
+                            "high",
+                            "low",
+                            "max",
+                            "medium",
+                            "minimal",
+                            "none",
+                            "xhigh"
+                          ],
+                          "type": "string"
+                        },
+                        "reason": {
+                          "maxLength": 16000,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "route_ref": {
+                          "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "route_ref",
+                        "effort",
+                        "reason"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "on_pin_unavailable",
+                "pin"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -9973,7 +10165,9 @@
         "routingLimits",
         "scope_revision",
         "roster_revision",
-        "roster_complete"
+        "roster_complete",
+        "policy_scopes",
+        "consultant_selection"
       ],
       "additionalProperties": false
     },
@@ -19761,6 +19955,541 @@
           "additionalProperties": false
         }
       ]
+    },
+    "executorPolicyPreviewRequest": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/workTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selection": {
+          "type": "object",
+          "properties": {
+            "dispatch_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "instructions": {
+              "type": "string"
+            },
+            "skill_refs": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/dispatchSkill"
+              }
+            },
+            "display_name": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "preset": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/presetReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tools_permit": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "tools_on_request": {
+              "enum": [
+                "auto",
+                "none"
+              ]
+            },
+            "spawn": {
+              "$ref": "#/$defs/dispatchSpawnRequest"
+            },
+            "requirement": {
+              "$ref": "#/$defs/dispatchRequirementRequest"
+            },
+            "output_schema": {
+              "oneOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "limits": {
+              "$ref": "#/$defs/dispatchLimitsRequest"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "target",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "executorPolicyPreview": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "artel.executor_policy_preview.v1"
+        },
+        "evaluated_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "model_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effort": {
+                "$ref": "#/$defs/effort"
+              },
+              "route_ref": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/artifactRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "status": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ]
+              },
+              "blocking_checks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 40
+              },
+              "ignored_checks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 40
+              }
+            },
+            "required": [
+              "model_id",
+              "effort",
+              "route_ref",
+              "status",
+              "blocking_checks",
+              "ignored_checks"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 4096
+        },
+        "selection": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "automatic",
+                "manual"
+              ]
+            },
+            "status": {
+              "enum": [
+                "available",
+                "unavailable"
+              ]
+            },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "status": {
+                    "enum": [
+                      "pass",
+                      "ignored",
+                      "blocked",
+                      "unknown"
+                    ]
+                  }
+                },
+                "required": [
+                  "code",
+                  "message",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 40
+            }
+          },
+          "required": [
+            "mode",
+            "status",
+            "checks"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "evaluated_at",
+        "options",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "executorPolicyScope": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "items": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "maxLength": 16000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "provider",
+                      "account",
+                      "model",
+                      "route"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "effort": {
+                    "enum": [
+                      "high",
+                      "low",
+                      "max",
+                      "medium",
+                      "minimal",
+                      "none",
+                      "xhigh"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "maxLength": 16000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "model_effort"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "effort"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "deny": {
+          "items": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "maxLength": 16000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "provider",
+                      "account",
+                      "model",
+                      "route"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "effort": {
+                    "enum": [
+                      "high",
+                      "low",
+                      "max",
+                      "medium",
+                      "minimal",
+                      "none",
+                      "xhigh"
+                    ],
+                    "type": "string"
+                  },
+                  "id": {
+                    "maxLength": 16000,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "model_effort"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "effort"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "grants": {
+          "items": {
+            "maxLength": 16000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "fallback": {
+          "additionalProperties": false,
+          "properties": {
+            "downgrade": {
+              "type": "boolean"
+            },
+            "same_model_other_pool": {
+              "type": "boolean"
+            },
+            "same_tier_any_model": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "same_model_other_pool",
+            "same_tier_any_model",
+            "downgrade"
+          ],
+          "type": "object"
+        },
+        "tools_deny": {
+          "items": {
+            "maxLength": 16000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "max_children": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_depth": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "for_tags": {
+                "items": {
+                  "maxLength": 16000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "maxLength": 16000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "kind": {
+                        "enum": [
+                          "provider",
+                          "account",
+                          "model",
+                          "route"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "effort": {
+                        "enum": [
+                          "high",
+                          "low",
+                          "max",
+                          "medium",
+                          "minimal",
+                          "none",
+                          "xhigh"
+                        ],
+                        "type": "string"
+                      },
+                      "id": {
+                        "maxLength": 16000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "kind": {
+                        "const": "model_effort"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id",
+                      "effort"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "target",
+              "for_tags"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [],
+      "additionalProperties": true
     }
   }
 }

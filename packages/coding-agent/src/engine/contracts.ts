@@ -190,7 +190,7 @@ export const USAGE_PROBE_MAX_TIMEOUT_MS = 2_147_483_647;
 /** Private verified Core receipt evidence, never a model/browser Start flag. */
 export interface HumanSelectionProof {
 	modelId: CandidateIdentity["model_id"];
-	routeRef: CandidateIdentity["route_ref"];
+	routeRef: CandidateIdentity["route_ref"] | null;
 	effort: CandidateIdentity["effort"];
 	serviceTier: CandidateIdentity["service_tier"];
 	dispatchHash: string;
@@ -202,7 +202,7 @@ export function requireHumanSelectionProof(value: unknown, dispatchHash: string,
 		!["modelId", "routeRef", "effort", "serviceTier", "dispatchHash"].every(key => Object.hasOwn(value, key)) ||
 		typeof value.modelId !== "string" || !value.modelId.trim())
 		throw new EngineTargetError("stale_target", "Human selection proof has an invalid private shape");
-	validateRuntimeValue("artifactRef", value.routeRef);
+	if (value.routeRef !== null) validateRuntimeValue("artifactRef", value.routeRef);
 	validateRuntimeValue("effort", value.effort);
 	validateRuntimeValue("serviceTier", value.serviceTier);
 	validateRuntimeValue("hash", value.dispatchHash);
@@ -214,8 +214,21 @@ export function requireHumanSelectionProof(value: unknown, dispatchHash: string,
 }
 
 export function humanSelectionMatches(proof: HumanSelectionProof | null, candidate: CandidateIdentity): boolean {
-	return proof !== null && proof.modelId === candidate.model_id && proof.routeRef === candidate.route_ref &&
+	return proof !== null && proof.modelId === candidate.model_id &&
+		(proof.routeRef === null || proof.routeRef === candidate.route_ref) &&
 		proof.effort === candidate.effort && proof.serviceTier === candidate.service_tier;
+}
+
+/** Durable user basis is minted only after the original Core human receipt is verified. */
+export function humanSelectedCandidate(choice: ExecutorChoice, candidate: CandidateIdentity): boolean {
+	const pin = choice.effective_requirement.pin;
+	return choice.selected.basis === "user" && pin !== null &&
+		pin.model_id === choice.selected.model_id && pin.effort === choice.selected.effort &&
+		choice.effective_requirement.service_tier === choice.selected.service_tier &&
+		candidate.model_id === pin.model_id && candidate.effort === pin.effort &&
+		candidate.service_tier === choice.selected.service_tier &&
+		(pin.route_ref === null ||
+			pin.route_ref === choice.selected.route_ref && candidate.route_ref === pin.route_ref);
 }
 
 /** Immutable Core receipt capture, not a second source of policy defaults. */

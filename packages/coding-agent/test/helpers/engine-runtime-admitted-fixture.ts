@@ -118,6 +118,7 @@ export function admittedExecution(
 			account_binding_id: null,
 		},
 		family: null, tags: [], efforts: ["none"] as ["none"], hard_quota_window_ids: [], order_match: null,
+		autoselect: "auto", latency_ms: null, credential_status: "ready", service_tiers: ["standard"], observations: [],
 	});
 	const routes: EngineExecutionConfiguration["routes"]["routes"] = [route(primaryRouteRef, model)];
 	if (options.fallbackModel) routes.push(route(fallbackRouteRef, options.fallbackModel));
@@ -161,6 +162,7 @@ export function admittedExecution(
 		scope_revision: hash("engine-runtime-test-scope"),
 		roster_revision: hash("engine-runtime-test-roster"),
 		roster_complete: true,
+		policy_scopes: [], consultant_selection: null,
 	};
 	const dispatchHash = hash(config.dispatch);
 	const receipts = new Map<string, EngineCommandEnvelope>();

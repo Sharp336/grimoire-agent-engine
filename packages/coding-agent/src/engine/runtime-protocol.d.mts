@@ -733,6 +733,11 @@ export type EngineExecutionRoute = {
 	"billing_pools": Array<BillingPool>;
 	"quota_windows": Array<QuotaWindow>;
 	"execution": ExecutionDescriptor;
+	"autoselect": "auto" | "manual" | "grant_only";
+	"latency_ms": number | null;
+	"credential_status": "pending" | "ready" | "revoked";
+	"service_tiers": Array<ServiceTier>;
+	"observations": Array<Record<string, unknown>>;
 	"family": string | null;
 	"tags": Array<string>;
 	"efforts": Array<Effort>;
@@ -780,9 +785,22 @@ export type EngineExecutionConfiguration = {
 	"sessionDefaults": SessionDefaults;
 	"record_revisions": RecordRevisions;
 	"routingLimits": RoutingLimits;
+	"policy_scopes": Array<ExecutorPolicyScope>;
+	"consultant_selection": { on_pin_unavailable: "fail" | "reselect" | "ask"; pin: { route_ref: ArtifactRef; effort: Effort; reason: string } | null } | null;
 	"scope_revision": Hash;
 	"roster_revision": Hash;
 	"roster_complete": true;
+};
+
+export type ExecutorPolicyScope = Pick<ScopeLimits, "allow" | "deny" | "grants" | "fallback" | "tools_deny" | "max_children" | "max_depth" | "order"> & { ref?: string } & Record<string, unknown>;
+export type ExecutorPolicyPreviewRequest = { target: WorkTarget | null; selection: Partial<Omit<DispatchRequest, "target" | "prompt">> };
+export type ExecutorPolicyPreview = {
+	schema: "artel.executor_policy_preview.v1";
+	evaluated_at: string;
+	options: Array<{ model_id: string; effort: Effort; route_ref: ArtifactRef | null; status: "available" | "unavailable";
+		blocking_checks: Array<{ code: string; message: string }>; ignored_checks: Array<{ code: string; message: string }> }>;
+	selection: { mode: "automatic" | "manual"; status: "available" | "unavailable";
+		checks: Array<{ code: string; status: "pass" | "ignored" | "blocked" | "unknown"; message: string }> };
 };
 
 export type ContinuationDigestInput = {

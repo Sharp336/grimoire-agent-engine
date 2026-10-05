@@ -156,7 +156,8 @@ import {
 	executorRuleReplay, l1For, LEASE_HEARTBEAT_MS, renderRules,
 } from "./routing-admission";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
-import { type CapturedApprovalSettings, type HumanSelectionProof, requireApprovalSettings, requireHumanSelectionProof, humanSelectionMatches } from "./contracts";
+import { selectExecutorRoutes } from "./executor-policy";
+import { type CapturedApprovalSettings, type HumanSelectionProof, requireApprovalSettings, requireHumanSelectionProof, humanSelectionMatches, humanSelectedCandidate } from "./contracts";
 import { EngineRequestPending, type EngineRequestInput, type EngineRequestDispatch } from "./request-tool";
 import type { SubmittedOperation } from "./runtime-protocol.mjs";
 import engineRequestReadyPrompt from "../prompts/engine-request-ready.md" with { type: "text" };
@@ -515,7 +516,6 @@ export interface ApprovalAncestor {
 		tools: string[] | null;
 		tools_permit: string[];
 		spawn: EngineExecutionConfiguration["dispatch"]["spawn"];
-		trusted: boolean | "unknown";
 	};
 	terminal_known?: boolean;
 }
@@ -741,7 +741,7 @@ export class EngineRuntime {
 		const route = binding.execution.frozen.find(candidate => candidateRef(candidate) === candidateRef(current));
 		const trusted = route?.execution.trusted === true;
 		const currentHash = executionHash({
-			tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn, trusted,
+			tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn,
 		});
 		if (currentHash !== ceilingHash || !trusted ||
 			(kind === "tool" && !this.canApproveTool(agentInstanceId, attemptId, name)) ||
@@ -786,9 +786,17 @@ export class EngineRuntime {
 			attemptId = next.attempt_id!;
 			installationId = next.installation_id!;
 			const ceiling = next.ceiling!;
-			if (ceiling.trusted === "unknown") return "unknown";
+			let ancestor: LiveBinding | undefined;
+			for (const candidate of this.#bindings.values()) {
+				if (candidate.bindingSnapshot?.agentInstanceRef === agentInstanceRef && candidate.attemptId === attemptId &&
+					candidate.principalId === binding.principalId) { ancestor = candidate; break; }
+			}
+			if (!ancestor && !next.terminal_known) return "unknown";
+			const selected = ancestor && currentIdentity(ancestor.execution.choice);
+			const trusted = ancestor?.execution.frozen.find(route =>
+				selected && candidateRef(route) === candidateRef(selected))?.execution.trusted === true;
 			const canTool = (ceiling.tools === null || ceiling.tools.includes(name)) &&
-				!ceiling.tools_permit.includes(name) && ceiling.trusted;
+				!ceiling.tools_permit.includes(name) && trusted;
 			const capable = kind === "tool" || kind === "consultant"
 				? canTool : kind === "spawn" && subject && "requested_child_ordinal" in subject &&
 					ceiling.spawn.allowed === "auto" && ceiling.spawn.max_depth >= distance + 1 &&
@@ -843,7 +851,7 @@ export class EngineRuntime {
 		const candidate = binding.execution.frozen.find(route =>
 			candidateRef(route) === candidateRef(current) &&
 			route.billing_pools.some(pool => pool.pool_id === current.billing_pool_id));
-		if (!candidate || (config.dispatch.requirement.require_trusted_provider && !candidate.execution.trusted))
+		if (!candidate || (humanSelection !== null && !humanSelectionMatches(humanSelection, candidate)))
 			throw new EngineTargetError("stale_target", "Current executor is outside the admitted frozen choices");
 		const request: AdmissionRequest = {
 			principalId: binding.principalId, deviceId: this.#deviceId, engineGeneration: this.engineGeneration,
@@ -852,6 +860,7 @@ export class EngineRuntime {
 			dispatchRef: binding.dispatchRef, dispatchHash: binding.dispatchHash, originReceiptId,
 			authContextId: origin.authContextId, bindingSnapshot: binding.bindingSnapshot,
 			executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
+			humanSelection,
 			rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
 			maxFrozenCandidates: binding.approvalSettings.max_frozen_candidates,
 			candidates: [{ ...candidate, billing_pool_id: current.billing_pool_id,
@@ -2622,15 +2631,13 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "Dispatch hash does not match the normalized execution");
 		if (!config.roster_complete || config.routes.routes.length === 0)
 			throw new EngineTargetError("admission_state_unknown", "A complete authorized executor roster is required");
-		const requirement = config.dispatch.requirement;
-		const humanSelection = requireHumanSelectionProof(origin.humanSelection, request.dispatchHash, requirement);
-		const roster = config.routes.routes.filter(route =>
-			(!humanSelection || humanSelectionMatches(humanSelection, route)) &&
-			(!requirement.require_trusted_provider || route.execution.trusted) &&
-			(route.tier === null ? requirement.min_tier === 0 || humanSelectionMatches(humanSelection, route) : route.tier >= requirement.min_tier) &&
-			(!requirement.pin || (route.model_id === requirement.pin.model_id &&
-				route.effort === requirement.pin.effort &&
-				(requirement.pin.route_ref === null || route.route_ref === requirement.pin.route_ref))));
+		const humanSelection = requireHumanSelectionProof(origin.humanSelection, request.dispatchHash, config.dispatch.requirement);
+		const policy = selectExecutorRoutes(config, humanSelection);
+		const requirement = policy.requirement;
+		const roster = policy.routes;
+		const consultantApproval = policy.askPin ? {
+			kind: "consultant" as const, unavailable_pin: policy.askPin, proposed_reselection_hash: request.dispatchHash,
+		} : origin.specialApproval;
 		if (!roster.length)
 			throw new EngineTargetError("capacity_unavailable", "No route satisfies the admitted trust, tier and pin");
 		const { toolNames, restrictToolNames } = config.continuationConfiguration;
@@ -2653,6 +2660,7 @@ export class EngineRuntime {
 			authContextId: origin.authContextId,
 			bindingSnapshot: request.bindingSnapshot,
 			executionKind: request.executionKind,
+			humanSelection,
 			limits: config.routingLimits,
 			rosterRevision: config.roster_revision,
 			expectedRevisions: config.record_revisions,
@@ -2717,7 +2725,7 @@ export class EngineRuntime {
 			schema: "grimoire.executor_choice.v1",
 			dispatch_hash: request.dispatchHash,
 			preset_ref: config.dispatch.preset?.ref ?? null,
-			effective_requirement: config.dispatch.requirement,
+			effective_requirement: requirement,
 			scope_revision: config.scope_revision,
 			candidates,
 			filtered_counts: preview.filtered,
@@ -2884,11 +2892,11 @@ export class EngineRuntime {
 				!preparedAttachments?.originalAttachments.length ? "continue" : "prompt");
 		const promptContext = queuedItem ? undefined : request.context;
 		this.#trackRun((async () => {
-			if (origin.specialApproval) {
+			if (consultantApproval) {
 				try {
 					if (!request.specialRef || request.executionKind !== "consultation")
 						throw new EngineTargetError("stale_target", "Consultant approval requires the exact consultation Start");
-					await this.#requestConsultantApproval(binding, origin.specialApproval, request.specialRef,
+					await this.#requestConsultantApproval(binding, consultantApproval, request.specialRef,
 						{ input: promptInput, identity: promptIdentity, kind: promptKind, context: promptContext, images });
 				} catch (error) {
 					if (this.#disposed || binding.state === "released") return;
@@ -3347,7 +3355,8 @@ export class EngineRuntime {
 							if (requirement.fallback_mode === "none" ||
 								(requirement.fallback_mode === "same_model" &&
 									candidate.model_id !== parent.execution.choice.selected.model_id) ||
-								(requirement.require_trusted_provider && !candidate.execution.trusted))
+								(parent.execution.choice.selected.basis === "user" &&
+									!humanSelectedCandidate(parent.execution.choice, candidate)))
 								return false;
 							const billing = await parent.execution.verifyCandidate(index, parent.execution.choice.execution_digest, signal);
 							if (!candidate.billing_pools.some(pool => pool.pool_id === billing.billing_pool_id)) return false;
@@ -4428,6 +4437,8 @@ export class EngineRuntime {
 		call: ToolExecutionHookCall,
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
+		if (binding.execution.config.policy_scopes.some(scope => scope.tools_deny?.includes(call.toolName)))
+			throw new EngineTargetError("invalid_request", "Scope forbids this tool");
 		// The tool's source blocks must be durable before publishing its admission.
 		let checkpoint = await this.#effectCheckpoint(binding);
 		await binding.traceWriteTail;
@@ -5529,6 +5540,7 @@ export class EngineRuntime {
 		if (seconds === null) return undefined;
 		const attempt = await this.store.getAttempt(attemptId);
 		if (!attempt) throw new EngineTargetError("stale_target", "Dispatch deadline has no durable Attempt anchor");
+		if (attempt.execution?.executor_choice.selected.basis === "user") return undefined;
 		const deadline = attempt.created_at + seconds * 1_000;
 		if (deadline <= Date.now()) {
 			await this.store.cancelPausedRouting(attemptId);
@@ -7323,7 +7335,7 @@ export class EngineRuntime {
 		validateRuntimeValue("engineExecutionConfiguration", config);
 		if (executionHash(config.dispatch) !== current.dispatchHash || !config.roster_complete)
 			throw new EngineTargetError("stale_target", "Retained approval has no matching admitted execution");
-		const deadline = config.dispatch.limits.timeout_seconds === null ? undefined
+		const deadline = attempt.execution.executor_choice.selected.basis === "user" || config.dispatch.limits.timeout_seconds === null ? undefined
 			: attempt.created_at + config.dispatch.limits.timeout_seconds * 1_000;
 		this.#armDispatchDeadline(current, deadline);
 		if (deadline !== undefined && deadline <= Date.now()) return undefined;
@@ -7375,8 +7387,13 @@ export class EngineRuntime {
 			return undefined;
 		}
 		const frozen = attempt.execution.executor_choice.candidates.map(saved => {
-			const matches = config.routes.routes.filter(route =>
-				storageCanonicalJson(frozenCandidate(route)) === storageCanonicalJson(saved));
+			const matches = config.routes.routes.flatMap(route => {
+				const pool = route.billing_pools.find(item => item.pool_id === saved.billing_pool_id);
+				if (!pool) return [];
+				const restored = { ...route, billing_pool_id: saved.billing_pool_id, billing_pool_basis: saved.billing_pool_basis,
+					quota_window_ids: [...new Set([...route.hard_quota_window_ids, ...pool.quota_windows])] };
+				return storageCanonicalJson(frozenCandidate(restored)) === storageCanonicalJson(saved) ? [restored] : [];
+			});
 			if (matches.length !== 1)
 				throw new EngineTargetError("stale_target", "Retained route is not in the original frozen roster");
 			return matches[0];
@@ -7440,6 +7457,7 @@ export class EngineRuntime {
 				dispatchId: config.dispatch.dispatch_id, dispatchRef: current.dispatchRef, dispatchHash: current.dispatchHash,
 				originReceiptId: request.originReceiptId, authContextId: origin.authContextId, bindingSnapshot: request.bindingSnapshot,
 				executionKind: config.dispatch.execution_kind, limits: config.routingLimits,
+				humanSelection,
 				rosterRevision: config.roster_revision, expectedRevisions: config.record_revisions,
 				maxFrozenCandidates: approvalSettings.max_frozen_candidates,
 				candidates: [candidate], callerAttemptId: null, frozen: true,

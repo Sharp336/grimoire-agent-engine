@@ -206,8 +206,7 @@ export class EngineExecutionResolver {
 				signal?.throwIfAborted();
 				const fallback = config.dispatch.requirement.fallback_mode;
 				if (index > 0 && (fallback === "none" ||
-					(fallback === "same_model" && route.model_id !== primary.model_id) ||
-					(config.dispatch.requirement.require_trusted_provider && !route.execution.trusted))) {
+					(fallback === "same_model" && route.model_id !== primary.model_id))) {
 					selectors.push(undefined);
 					continue;
 				}

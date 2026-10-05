@@ -20,6 +20,9 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Executor policy now runs locally in Engine, with the same evaluator driving picker availability, ignored-check explanations, Start admission and live provider gates. Hosted Core supplies ACL-authorized signed facts instead of duplicating selection policy.
+- A verified direct human model/effort selection may ignore automatic quality, trust, grant-only, configured concurrency, budget-reserve and execution-limit preferences without altering catalog tiers or configured values. Exact-route and Any-provider selections retain real leases, usage accounting, scope allow/deny, credential integrity and provider exhaustion checks; children and consultants keep automatic policy.
+- Picker preview exposes exact-route and Any-provider availability plus the full current-selection check status. It is read-only, cannot mint human selection authority, and uses cached authenticated canonical facts.
 - Engine startup upgrades the drained legacy approval consumer from `resolve_tool_approval` to `resolve_approval` without resetting broker cursors. Pending or unacknowledged legacy work and incompatible delivery policies still require explicit recovery.
 - Engine `request` uses an object-root Codex/Responses tool schema with explicit non-strict free-form operation arguments. Action-specific validation remains enforced by the runtime protocol.
 - Engine preserves the original non-retryable HTTP status and error body when rejecting a nested transport fallback, including Codex zstd rejection, instead of replacing it with a transient retry error. Physical-request limits remain unchanged.

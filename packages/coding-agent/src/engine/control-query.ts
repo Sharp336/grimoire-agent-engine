@@ -46,6 +46,8 @@ import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resou
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 import { waitForEngineWake } from "./wake";
 import { runUsageProbe } from "./usage-probe";
+import { executorPolicyAdmission, executorPolicyPreview } from "./executor-policy-query";
+import { currentIdentity } from "./routing-admission";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
 
@@ -107,6 +109,8 @@ export type EngineControlQueryMethod =
 	| "approval.grant"
 	| "runtime.context"
 	| "runtime.usage"
+	| "runtime.executor_preview"
+	| "runtime.executor_admission"
 	| "runtime.queue"
 	| "runtime.history"
 	| "runtime.history.entry"
@@ -386,6 +390,10 @@ async function dispatchRequest(
 ): Promise<unknown> {
 	const params = request.params ?? {};
 	switch (request.method) {
+		case "runtime.executor_preview":
+			return executorPolicyPreview(options.runtime.store, options.deviceId, params);
+		case "runtime.executor_admission":
+			return executorPolicyAdmission(options.runtime.store, params);
 		case "usage_probe_binding.get":
 			return options.runtime.store.getUsageProbeBinding(
 				requiredString(params, "principalId"), options.deviceId, requiredString(params, "accountRef"));
@@ -550,7 +558,7 @@ async function dispatchRequest(
 					!("held" in actorReceipt.lease) || actorReceipt.lease.held !== true)
 					throw new EngineTargetError("stale_target", "Approving ancestor has no live admitted lease");
 				const dispatch = actorConfig.dispatch;
-				const current = actor.execution.executor_choice.selected;
+				const current = currentIdentity(actor.execution.executor_choice);
 				const route = actorConfig.routes.routes.find(candidate =>
 					candidate.route_ref === current.route_ref && candidate.effort === current.effort &&
 					candidate.service_tier === current.service_tier);
@@ -566,7 +574,7 @@ async function dispatchRequest(
 					? toolCapable : spawnCapable))
 					throw new EngineTargetError("stale_target", "Caller lacks the current approval ceiling");
 				ceiling_hash = `sha256:${createHash("sha256").update(storageCanonicalJson({
-					tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn, trusted,
+					tools: dispatch.tools, tools_permit: dispatch.tools_permit, spawn: dispatch.spawn,
 				})).digest("hex")}`;
 				if (params.grant === true) {
 					if (approvalRequest.requires_human || ancestorDistance !== 1 ||
@@ -997,6 +1005,8 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.restore.history",
 			"session.usage",
 			"models.reference",
+			"runtime.executor_preview",
+			"runtime.executor_admission",
 			"inbox.list",
 			"inbox.enqueue",
 			"inbox.read",
@@ -1426,6 +1436,8 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"approval.grant",
 			"runtime.context",
 			"runtime.usage",
+			"runtime.executor_preview",
+			"runtime.executor_admission",
 			"runtime.queue",
 			"runtime.history",
 			"runtime.history.entry",

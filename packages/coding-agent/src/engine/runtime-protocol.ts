@@ -6,7 +6,7 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:58d2e062de7e7c3aca418e72d0ce4b2ae77e724763fe6047d36977ab59c3ef61";
+export const RUNTIME_PROTOCOL_HASH = "sha256:28f855799b18e654b951f859f1d7882a5ca28556946b71606f910ae74cf3119e";
 export { RUNTIME_PROTOCOL_REVISION } from "./runtime-protocol.mjs";
 export const runtimeOriginIdChars = protocol.$defs.id.maxLength;
 export const runtimeLimits = protocol["x-artel"].limits;

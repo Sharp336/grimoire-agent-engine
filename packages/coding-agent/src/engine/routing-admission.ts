@@ -8,6 +8,9 @@ import {
 	type EngineSemanticBindingSnapshot,
 	EngineTargetError,
 	type ExecutorChoice,
+	type HumanSelectionProof,
+	humanSelectionMatches,
+	humanSelectedCandidate,
 	type InstructionRule,
 	type RoutingLimits,
 } from "./contracts";
@@ -195,6 +198,17 @@ async function census(tx: RuntimeTransaction, principalId: string, deviceId: str
 	}
 }
 
+/** Read-only current occupancy projection using the admission's exact demand/ceiling arithmetic. */
+export async function previewRoutingCapacity(tx: RuntimeTransaction, principalId: string, deviceId: string,
+	limits: RoutingLimits, resources: readonly SlotResources[]): Promise<string[][]> {
+	const current = await census(tx, principalId, deviceId);
+	const available = heldAvailability(limits, current.leases);
+	return resources.map(resource => [...new Set(Object.entries(demand(resource, limits))
+		.filter(([key, value]) => !(key in available) || value > available[key])
+		.map(([key]) => key.startsWith("agents:") ? "scope_concurrency" : key.startsWith("tier:") ? "tier_concurrency"
+			: key.startsWith("account:") ? "account_concurrency" : key.startsWith("provider:") ? "provider_concurrency" : "consultation_concurrency"))]);
+}
+
 type Transition = {
 	tx: RuntimeTransaction;
 	census: Census;
@@ -296,6 +310,8 @@ export interface AdmissionRequest {
 	callerAttemptId: string | null;
 	/** Resume never grows its admitted list. */
 	frozen: boolean;
+	/** Private receipt proof supplied by runtime verification, never by the Start wire payload. */
+	humanSelection?: HumanSelectionProof | null;
 }
 
 export type AdmissionOutcome =
@@ -327,6 +343,13 @@ export const candidateRef = (candidate: CandidateIdentity) =>
 export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionRequest): Promise<AdmissionOutcome> {
 	if (!Number.isSafeInteger(request.maxFrozenCandidates) || request.maxFrozenCandidates < 1)
 		throw new EngineTargetError("invalid_request", "Captured frozen candidate maximum must be a positive safe integer");
+	const human = request.humanSelection ?? null;
+	if (human !== null && (human.dispatchHash !== request.dispatchHash ||
+		request.executionKind !== "ordinary" || request.callerAttemptId !== null ||
+		request.bindingSnapshot.parentAttemptId !== null ||
+		request.candidates.some(candidate => !humanSelectionMatches(human, candidate))))
+		throw new EngineTargetError("stale_target", "Manual admission differs from its verified direct human selection");
+	const manual = human !== null;
 	const current = await census(tx, request.principalId, request.deviceId);
 	const consultation = request.executionKind === "consultation";
 	if (current.leases.some(lease => lease.attempt_id === request.attemptId))
@@ -358,26 +381,27 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 		if (retained?.state === "paused" && command?.identity.principalId === request.principalId &&
 			command.identity.deviceId === request.deviceId) paused.add(edge.waited_admission_id);
 	}
-	const proof = routingReachability(request.limits, current.leases, waiting, edges, paused);
+	const proof = manual ? undefined : routingReachability(request.limits, current.leases, waiting, edges, paused);
 	const now = heldAvailability(request.limits, current.leases);
 	const limitsOnly = ceilings(request.limits);
 	const filtered: Record<string, number> = {
 		roster: request.candidates.length,
-		permanent_capacity: resources.filter(item => !fits(demand(item, request.limits), limitsOnly)).length,
-		capacity_now: resources.filter(item => !fits(demand(item, request.limits), now)).length,
+		permanent_capacity: manual ? 0 : resources.filter(item => !fits(demand(item, request.limits), limitsOnly)).length,
+		capacity_now: manual ? 0 : resources.filter(item => !fits(demand(item, request.limits), now)).length,
 	};
 	// FIFO: an earlier eligible queued head goes first; it is woken by this store's change signal.
-	const aheadEligible = others.some(
+	const aheadEligible = !manual && others.some(
 		(row, index) => (!own || row.sequence < own.sequence) && waiting[index].candidates.some(item => fits(demand(item, request.limits), now)),
 	);
-	const selected = aheadEligible ? -1 : resources.findIndex(item => fits(demand(item, request.limits), now));
+	const selected = manual ? (resources.length ? 0 : -1) :
+		aheadEligible ? -1 : resources.findIndex(item => fits(demand(item, request.limits), now));
 	const edgeKey = tentative ? edgeId(tentative.caller_attempt_id, request.attemptId) : undefined;
 	if (selected >= 0) {
 		// Freeze only after actual selection, using reachable members of the full roster.
 		const frozen = [request.candidates[selected]];
 		for (const [index, candidate] of request.candidates.entries()) {
 			if (frozen.length === request.maxFrozenCandidates || request.frozen) break;
-			if (index !== selected && fits(demand(resources[index], request.limits), proof.available)) frozen.push(candidate);
+			if (index !== selected && (manual || fits(demand(resources[index], request.limits), proof!.available))) frozen.push(candidate);
 		}
 		if (request.frozen) frozen.push(...request.candidates.filter((_, index) => index !== selected));
 		const lease = leaseId(request.attemptId);
@@ -429,9 +453,9 @@ export async function stageAdmission(tx: RuntimeTransaction, request: AdmissionR
 	}
 	if (resources.length > 0 && filtered.permanent_capacity === resources.length)
 		throw refusal(request, own, current, "capacity_unavailable", "Configured zero or exceeded capacity", filtered);
-	if (!proof.reachable.has(request.attemptId)) {
+	if (!proof?.reachable.has(request.attemptId)) {
 		// Missing capacity is held only by callers blocked in the closed wait graph.
-		const blocking = current.leases.map(lease => lease.attempt_id).filter(id => !proof.released.has(id));
+		const blocking = current.leases.map(lease => lease.attempt_id).filter(id => !proof?.released.has(id));
 		throw refusal(request, own, current, "admission_dependency_cycle", "Awaited admission is unreachable", filtered, blocking);
 	}
 	if (own) return { status: "queued", queueId: queueId(own.sequence) };
@@ -655,7 +679,8 @@ export async function stageTransfer(
 		throw new EngineTargetError("stale_target", "Routing lease expired; new effects require admission");
 	const current = await census(tx, lease.principal_id, lease.device_id);
 	const resources = slotResources(to, limits, lease.resources.consultation);
-	if (!fits(demand(resources, limits), heldAvailability(limits, current.leases, attemptId))) return undefined;
+	if (!humanSelectedCandidate(attempt.execution.executor_choice, to) &&
+		!fits(demand(resources, limits), heldAvailability(limits, current.leases, attemptId))) return undefined;
 	const command = await tx.get<RocksCommand>("command", attempt.command_id);
 	const now = Date.now();
 	const revision = lease.lease_revision + 1;

@@ -1538,25 +1538,45 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	}, 60_000);
 
-	it.each(["verified", "missing", "mismatch", "known-below-floor"] as const)(
-		"admits a private exact human null-tier pin without extending its authority: %s", async scenario => {
+	it.each(["verified", "missing", "mismatch", "known-below-floor", "automatic-below-floor", "any-provider", "manual-policy", "scope-denied"] as const)(
+		"admits only verified human pins below automatic quality floors: %s", async scenario => {
 			const mock = createMockModel({ handler: { content: ["human-selected result"] } });
 			const ordinary = admittedExecution(mock.model, modelRegistry);
 			const originalRoute = ordinary.config.routes.routes[0]!;
 			const execution = admittedExecution(mock.model, modelRegistry, {
 				dispatch: { ...ordinary.config.dispatch, requirement: { ...ordinary.config.dispatch.requirement,
-					min_tier: 2, pin: { model_id: originalRoute.model_id, route_ref: originalRoute.route_ref,
+					min_tier: 2, pin: { model_id: originalRoute.model_id,
+						route_ref: scenario === "any-provider" ? null : originalRoute.route_ref,
 						effort: originalRoute.effort, reason: "explicit human selection" } } },
 			});
 			const route = execution.config.routes.routes[0]!;
-			route.tier = scenario === "known-below-floor" ? 1 : null;
+			route.tier = ["known-below-floor", "automatic-below-floor", "any-provider"].includes(scenario) ? 1 : null;
+			const expectedRoute = route;
+			if (scenario === "any-provider") {
+				const alternate = { ...structuredClone(route), route_ref: "gctx:2222222222222222",
+					account_ref: "gctx:3333333333333333" };
+				execution.config.routes.routes.push(alternate);
+				execution.config.routingLimits.accounts[route.account_ref] = 0;
+				execution.config.routingLimits.accounts[alternate.account_ref] = 1;
+			}
+			if (scenario === "manual-policy") {
+				route.execution.trusted = false;
+				route.autoselect = "grant_only";
+				execution.config.routingLimits.scopes[0].agents = 0;
+				execution.config.routingLimits.scopes[0].by_tier = [{ tier: 0, mode: "cumulative", value: 0 }];
+				execution.config.routingLimits.accounts[route.account_ref] = 0;
+				execution.config.routingLimits.providers[route.provider_id] = 0;
+			}
+			if (scenario === "scope-denied")
+				execution.config.policy_scopes = [{ deny: [{ kind: "model", id: route.model_id }] }];
 			route.order_match = { scope_ref: execution.taskRef, index: 0, for_tags: [] };
 			const verify = execution.optionsFor({}).verifyOriginReceipt!;
 			const { runtime, cwd } = await createRuntime(execution, (session, input) => session.prompt(input), {
 				verifyOriginReceipt: async identity => {
 					const origin = await verify(identity);
-					return { ...origin, humanSelection: scenario === "missing" ? null : {
-						modelId: route.model_id, routeRef: route.route_ref, effort: route.effort, serviceTier: route.service_tier,
+					return { ...origin, humanSelection: scenario === "missing" || scenario === "automatic-below-floor" ? null : {
+						modelId: route.model_id, routeRef: execution.config.dispatch.requirement.pin!.route_ref,
+						effort: route.effort, serviceTier: route.service_tier,
 						dispatchHash: scenario === "mismatch" ? `sha256:${"e".repeat(64)}` : origin.dispatchHash!,
 					} };
 				},
@@ -1567,7 +1587,7 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 					agentInstanceRef: `grimoire://tasks/grimoire/pin/agents/${scenario}`,
 					executionId: `human-pin-execution-${scenario}`, attemptId: `human-pin-attempt-${scenario}`,
 				}, { cwd, principalId: "owner", input: "Use the explicitly selected route" });
-				if (scenario !== "verified") {
+				if (scenario === "missing" || scenario === "mismatch" || scenario === "automatic-below-floor" || scenario === "scope-denied") {
 					await expect(admitRequest(runtime, request)).rejects.toMatchObject({
 						code: scenario === "mismatch" ? "stale_target" : "capacity_unavailable",
 					});
@@ -1577,8 +1597,16 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 				const started = await admitRequest(runtime, request);
 				await runtime.drain();
 				const choice = (await runtime.store.getAttempt(started.attemptId))!.execution!.executor_choice;
-				expect(choice.selected).toMatchObject({ basis: "user", model_id: route.model_id, route_ref: route.route_ref,
-					effort: route.effort, service_tier: route.service_tier, order_match: null });
+				if (scenario === "any-provider")
+					expect(new Set(choice.candidates.map(candidate => candidate.route_ref)))
+						.toEqual(new Set(execution.config.routes.routes.map(candidate => candidate.route_ref)));
+				const admittedRoute = scenario === "any-provider"
+					? execution.config.routes.routes.find(candidate => candidate.route_ref === choice.selected.route_ref)! : expectedRoute;
+				expect(choice.selected).toMatchObject({ basis: "user", model_id: admittedRoute.model_id,
+					route_ref: admittedRoute.route_ref, account_ref: admittedRoute.account_ref,
+					effort: admittedRoute.effort, service_tier: admittedRoute.service_tier, order_match: null });
+				expect(choice.candidates.find(candidate => candidate.route_ref === admittedRoute.route_ref)?.tier)
+					.toBe(admittedRoute.tier);
 				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 			} finally { await runtime.dispose(); }
 		}, 30_000,
@@ -1627,19 +1655,87 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 		}
 	}, 60_000);
 
-	it("stops before a second primary model iteration without counting the first iteration's tool", async () => {
+	it("keeps a manual untrusted parent's lease while its child receives full automatic policy", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const base = admittedExecution(mock.model, modelRegistry);
+		const pin = { model_id: mock.model.id, route_ref: base.config.routes.routes[0]!.route_ref,
+			effort: "none" as const, reason: "Direct human selection" };
+		const parent = admittedExecution(mock.model, modelRegistry, {
+			dispatch: { ...base.config.dispatch, limits: { timeout_seconds: 1, max_iterations: 1 },
+				spawn: { allowed: "auto", max_depth: 2, max_children: 4, on_exceed: "deny" },
+				requirement: { ...base.config.dispatch.requirement, min_tier: 2, pin } },
+			spawn: { allowed: "auto", max_depth: 2, max_children: 4, on_exceed: "deny" },
+		});
+		parent.config.routes.routes[0]!.tier = 1;
+		parent.config.routes.routes[0]!.execution.trusted = false;
+		parent.config.routingLimits.accounts[parent.config.routes.routes[0]!.account_ref] = 0;
+		const child = admittedExecution(mock.model, modelRegistry, {
+			dispatch: { ...base.config.dispatch, dispatch_id: "automatic-child",
+				requirement: { ...base.config.dispatch.requirement, min_tier: 0, require_trusted_provider: true } },
+		});
+		child.config.routes.routes[0]!.execution.trusted = false;
+		const release = Promise.withResolvers<boolean>();
+		const { runtime, cwd } = await createRuntime(parent, async () => release.promise, {
+			verifyOriginReceipt: async identity => {
+				const execution = parent.receipts.has(identity.originReceiptId) ? parent : child;
+				const origin = await execution.optionsFor({}).verifyOriginReceipt!(identity);
+				return { ...origin, humanSelection: execution === parent ? {
+					modelId: pin.model_id, routeRef: pin.route_ref, effort: pin.effort,
+					serviceTier: "standard" as const, dispatchHash: origin.dispatchHash!,
+				} : null };
+			},
+		}, [child]);
+		const parentRef = "grimoire://tasks/grimoire/policy/agents/parent";
+		try {
+			const started = await admitRequest(runtime, startRequest(parent, {
+				commandId: "manual-parent", agentInstanceId: "manual-parent", agentInstanceRef: parentRef,
+				executionId: "manual-parent-execution", attemptId: "manual-parent-attempt",
+			}, { cwd, principalId: "owner", input: "Delegate without transferring manual authority" }));
+			const receipt = await runtime.store.runtimeCommand("manual-parent", { principalId: "owner" });
+			expect(receipt).toMatchObject({ lease: { held: true, resources: { tier: 1 } } });
+			const clock = spyOn(Date, "now").mockReturnValue(Date.now() + 60_000);
+			try {
+				await runtime.store.restoreDispatchIterations(started);
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+			} finally { clock.mockRestore(); }
+			const childRef = "grimoire://tasks/grimoire/policy/agents/child";
+			const request = startRequest(child, {
+				commandId: "automatic-child", agentInstanceId: "automatic-child", agentInstanceRef: childRef,
+				executionId: "automatic-child-execution", attemptId: "automatic-child-attempt",
+			}, { cwd, principalId: "owner", input: "Child remains automatic", parentAgentInstanceId: started.agentInstanceId,
+				parentAgentInstanceRef: parentRef, bindingSnapshot: {
+					...semanticBinding(childRef, child.taskRef), parentAgentInstanceRef: parentRef,
+					parentAttemptId: started.attemptId, parentBindingRevision: started.bindingSnapshot!.bindingRevision,
+				} });
+			await expect(admitRequest(runtime, request)).rejects.toMatchObject({ code: "capacity_unavailable" });
+			expect((await runtime.store.runtimeCommand("manual-parent", { principalId: "owner" }))?.lease).toMatchObject({ held: true });
+			expect(mock.calls).toHaveLength(0);
+		} finally { release.resolve(true); await runtime.drain(); await runtime.dispose(); }
+	}, 30_000);
+
+	it.each([false, true])("applies the primary iteration cap only without verified manual selection: %s", async manual => {
 		const mock = createMockModel({ responses: [
 			{ content: [{ type: "toolCall", id: "limited-write", name: "write",
 				arguments: { path: "limited-output.txt", content: "first iteration executed" } }] },
-			{ content: ["must not reach another primary iteration"] },
+			{ content: ["second primary iteration completed"] },
 		] });
 		const limits = { timeout_seconds: null, max_iterations: 1 };
 		const ordinary = admittedExecution(mock.model, modelRegistry);
 		const execution = admittedExecution(mock.model, modelRegistry, {
-			dispatch: { ...ordinary.config.dispatch, limits },
+			dispatch: { ...ordinary.config.dispatch, limits, requirement: { ...ordinary.config.dispatch.requirement,
+				pin: manual ? { model_id: mock.model.id, route_ref: ordinary.config.routes.routes[0]!.route_ref,
+					effort: "none", reason: "Explicit human choice" } : null } },
 			continuation: { toolNames: ["write"], restrictToolNames: true, limits },
 		});
-		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity));
+		const verify = execution.optionsFor({}).verifyOriginReceipt!;
+		const { runtime, cwd } = await createRuntime(execution, (session, input, identity) => session.prompt(input, identity), {
+			verifyOriginReceipt: async identity => {
+				const origin = await verify(identity);
+				return { ...origin, humanSelection: manual ? { modelId: mock.model.id,
+					routeRef: execution.config.routes.routes[0]!.route_ref, effort: "none" as const,
+					serviceTier: "standard" as const, dispatchHash: origin.dispatchHash! } : null };
+			},
+		});
 		try {
 			const started = await admitRequest(runtime, startRequest(execution, {
 				commandId: "primary-limit", agentInstanceId: "primary-limit",
@@ -1648,10 +1744,10 @@ describe.skipIf(!(storageExecutable && storageRunRoot))("EngineRuntime", () => {
 			}, { cwd, principalId: "owner", input: "Write once, then answer" }));
 			await runtime.drain();
 			expect(fs.readFileSync(path.join(cwd, "limited-output.txt"), "utf8")).toBe("first iteration executed");
-			expect(mock.calls).toHaveLength(1);
-			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("failed");
+			expect(mock.calls).toHaveLength(manual ? 2 : 1);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe(manual ? "completed" : "failed");
 			const effects = await runtime.store.attemptToolEffects(started.attemptId);
-			expect(effects.filter(effect => effect.effect_kind === "model" && effect.tool_name === "model_dispatch_primary")).toHaveLength(1);
+			expect(effects.filter(effect => effect.effect_kind === "model" && effect.tool_name === "model_dispatch_primary")).toHaveLength(manual ? 2 : 1);
 			expect(effects.filter(effect => effect.state === "planned" || effect.state === "started")).toEqual([]);
 		} finally { await runtime.dispose(); }
 	}, 30_000);
