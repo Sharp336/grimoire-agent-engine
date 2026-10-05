@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as logger from "./logger";
+import { type PerfEnd, perfFirstFetch, perfSpan } from "./perf-trace";
 
 // Private, opt-in Artel measurement data. Never pass payloads, URLs or errors here.
 interface AuditIdentity {
@@ -113,6 +114,8 @@ export interface LatencyRequest {
 	readonly audit: LatencyAudit;
 	readonly fields: AuditFields;
 	readonly first: Set<string>;
+	/** Ends `engine.model.first_token` at the first normalized delta of this physical request. */
+	perfFirstToken?: PerfEnd;
 }
 
 export interface LatencySource {
@@ -133,13 +136,21 @@ export function latencyFetch(
 	const request = latencyPhysicalRequest.getStore();
 	if (!request) return fetch(input, init);
 	request.audit.mark("fetch_start", request.fields);
+	const perfIds = request.audit.identity;
+	const perfAttrs = { physicalRequestOrdinal: request.fields.physicalRequestOrdinal };
+	perfFirstFetch(request.audit.identity.attemptId, perfAttrs);
+	const endHeaders = perfSpan("engine.model.fetch_headers", perfIds, perfAttrs);
+	request.perfFirstToken = perfSpan("engine.model.first_token", perfIds, perfAttrs);
 	return fetch(input, init).then(
 		response => {
 			request.audit.mark("response_headers", { ...request.fields, statusCode: response.status });
+			endHeaders({ status: response.status });
 			return response;
 		},
 		error => {
 			request.audit.mark(init?.signal?.aborted ? "fetch_aborted" : "fetch_error", request.fields);
+			endHeaders({ outcome: "error" });
+			request.perfFirstToken?.({ outcome: "error" });
 			throw error;
 		},
 	);
@@ -177,6 +188,7 @@ export function latencyFirst(
 	if (!source || source.request.first.has(`${stage}:${stream}`)) return false;
 	source.request.first.add(`${stage}:${stream}`);
 	source.request.audit.mark(stage, { ...source.request.fields, stream, ...fields }, at);
+	if (stage === "normalized_first") source.request.perfFirstToken?.();
 	return true;
 }
 

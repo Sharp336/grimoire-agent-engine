@@ -8,6 +8,7 @@ import {
 	latencyPhysicalRequest,
 	latencyPreparation,
 } from "@oh-my-pi/pi-utils/latency-audit";
+import { type PerfIds, perfEnabled, perfSpan, perfWrap } from "@oh-my-pi/pi-utils/perf-trace";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import { ProviderExecutionError, parseBillingPoolProposal, type BillingPoolProposal, type ProviderExecutionIdentity } from "./provider-execution";
@@ -195,6 +196,13 @@ export function markProviderLatency(stage: string): void {
 	context?.audit?.mark(stage, { physicalRequestOrdinal: context.physicalRequestOrdinal + 1 });
 }
 
+/** Correlation of the next physical request, for perf spans that run before it is registered. */
+export function providerPerfContext(): { ids: PerfIds; ordinal: number } | undefined {
+	if (!perfEnabled) return undefined;
+	const context = providerObservationContext.getStore();
+	return context ? { ids: { ...context.audit?.identity }, ordinal: context.physicalRequestOrdinal + 1 } : undefined;
+}
+
 export class ProviderAdmissionError extends Error {
 	readonly retryable = false;
 
@@ -290,6 +298,8 @@ export class ProviderAdmissionClient {
 		send: (selected: ProviderAdmissionIdentity | ProviderApiKeyRouteIdentity) => Promise<T>,
 	): Promise<T> {
 		return withProviderBillingRequest(async () => {
+			const perf = providerPerfContext();
+			const perfAttrs = { physicalRequestOrdinal: perf?.ordinal };
 			const apiKeyRoute = apiKeyRoutes.find(route => matchesApiKeyRoute(model, route));
 			const selected = apiKeyRoute ?? (identity && model.provider === identity.providerId ? identity : undefined);
 			if (!selected) throw new ProviderAdmissionError(
@@ -304,6 +314,7 @@ export class ProviderAdmissionClient {
 				const admissionSignal = signal
 					? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
 					: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
+				const endUsage = perfSpan("engine.model.usage_fetch", perf?.ids, { ...perfAttrs, provider: identity.providerId });
 				markProviderLatency("usage_refresh_start");
 				try {
 					report = await raceWithSignal(authStorage.fetchCredentialUsageReport(identity.providerId,
@@ -318,6 +329,7 @@ export class ProviderAdmissionClient {
 					// Usage endpoint availability is telemetry, not a denial of an admitted effect.
 				}
 				markProviderLatency("usage_refresh_done");
+				endUsage({ status: report ? "ok" : "unavailable" });
 			}
 			const builtinId = Object.keys(BUILTIN_PROVIDERS).find(id => BUILTIN_PROVIDERS[id] === selected.providerId);
 			const normalized = report && usageAccount && localCredential && builtinId
@@ -343,9 +355,11 @@ export class ProviderAdmissionClient {
 					throw new ProviderAdmissionError(decision.status || "provider_admission_denied",
 						decision.reason || "Provider quota admission was denied");
 			};
+			const endBefore = perfSpan("engine.model.admission_before", perf?.ids, perfAttrs);
 			markProviderLatency("quota_before_start");
 			const decision = await this.#post(before(), signal);
 			markProviderLatency("quota_before_done");
+			endBefore({ allowed: decision.allowed, status: decision.status });
 			if (!decision.allowed) {
 				if (decision.status === "billing_pool_changed") await reask(parseBillingPoolProposal(decision.billing));
 				else throw new ProviderAdmissionError(decision.status || "provider_admission_denied",
@@ -363,7 +377,9 @@ export class ProviderAdmissionClient {
 			} finally {
 				if (selected === identity) {
 					await authStorage.invalidateUsageCache(identity.providerId).catch(() => {});
-					void this.#post({ phase: "after", ...identity, modelId: model.id }, undefined).catch(() => {});
+					const endAfter = perfSpan("engine.model.admission_after", perf?.ids, perfAttrs);
+					void this.#post({ phase: "after", ...identity, modelId: model.id }, undefined)
+						.then(() => endAfter(), () => endAfter({ outcome: "error" }));
 				}
 			}
 		});
@@ -394,13 +410,17 @@ export class ProviderAdmissionClient {
 		// One durable registration at a time per context: a concurrent request (speculative
 		// compaction beside the turn) waits for the previous ordinal instead of claiming it.
 		// A failed write sends nothing and leaves the next ordinal unclaimed.
+		const perfIds: PerfIds = { ...context.audit?.identity };
+		const registerQueuedAt = performance.now();
 		const registered = context.registration.then(async () => {
+			const endRegister = perfSpan("engine.model.register_request", perfIds, { waitMs: performance.now() - registerQueuedAt });
 			const next = (context.ordinals.get(effectId) ?? 0) + 1;
 			await record.register(effectId, next, {
 				executionDigest: identity.executionDigest,
 				routeRef: identity.routeRef,
 				accountRef: identity.providerAccountRef,
 			});
+			endRegister({ physicalRequestOrdinal: next });
 			context.ordinals.set(effectId, next);
 			if (context.effectId === effectId) context.physicalRequestOrdinal = next;
 			return next;
@@ -428,11 +448,13 @@ export class ProviderAdmissionClient {
 			result = await send(ordinal, startedAt, context, auditRequest);
 		} catch (error) {
 			if (error instanceof ProviderExecutionError || error instanceof ProviderAdmissionError) {
-				await record.settle(effectId, ordinal, "not_sent", null);
+				await perfWrap("engine.model.settle_request", perfIds, { physicalRequestOrdinal: ordinal }, () =>
+					record.settle(effectId, ordinal, "not_sent", null));
 				throw error;
 			}
 			const status = httpStatusFromError(error);
-			await record.settle(effectId, ordinal, status ? "responded" : "send_unknown", status ?? null);
+			await perfWrap("engine.model.settle_request", perfIds, { physicalRequestOrdinal: ordinal }, () =>
+				record.settle(effectId, ordinal, status ? "responded" : "send_unknown", status ?? null));
 			if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			this.#queueObservation(identity, model, context, ordinal, startedAt, {
 				outcome:
@@ -447,7 +469,8 @@ export class ProviderAdmissionClient {
 			});
 			throw error;
 		}
-		await record.settle(effectId, ordinal, result.status === null ? "send_unknown" : "responded", result.status);
+		await perfWrap("engine.model.settle_request", perfIds, { physicalRequestOrdinal: ordinal }, () =>
+			record.settle(effectId, ordinal, result.status === null ? "send_unknown" : "responded", result.status));
 		return result.value;
 	}
 

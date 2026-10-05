@@ -1,3 +1,4 @@
+import { perfCurrentScope } from "@oh-my-pi/pi-utils/perf-trace";
 import { getBlobsDir } from "@oh-my-pi/pi-utils";
 import { BlobStore } from "../session/blob-store";
 import {
@@ -336,6 +337,8 @@ export async function nativeLifecyclePage(
 	let pageMore = false;
 	const candidates: ProjectedEvent[] = [];
 	for (const id of limit > 0 ? attempts : []) {
+		const perfScope = perfCurrentScope();
+		if (perfScope) perfScope.lifecycleQueries++;
 		const page = await store.storageClient.runtimeQuery({
 			selector: {
 				type: "index",

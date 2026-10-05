@@ -1,3 +1,4 @@
+import { perfCount, perfEnabled } from "@oh-my-pi/pi-utils/perf-trace";
 import { type StorageClient, StorageClientError } from "../session/storage-client";
 import type {
 	StorageDependency,
@@ -117,8 +118,18 @@ export class RuntimeRecords {
 		work: (tx: RuntimeTransaction) => Promise<T>,
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
+		name?: string,
 	): Promise<T> {
 		const familyId = scopeId(scope);
+		const queuedAt = performance.now();
+		let works = 0;
+		let lockWaitMs = 0;
+		const counted = perfEnabled
+			? (tx: RuntimeTransaction) => {
+					works++;
+					return work(tx);
+				}
+			: work;
 		const familyPending = this.#pendingByFamily.get(familyId) ?? { required: 0, buffered: 0 };
 		if (
 			this.#pending[durability] >= PENDING_LIMITS[durability] ||
@@ -132,19 +143,22 @@ export class RuntimeRecords {
 		const run = (this.#tails.get(familyId) ?? Promise.resolve())
 			.then(() => this.#takeSlot(durability))
 			.then(async () => {
+				lockWaitMs = performance.now() - queuedAt;
 				for (let attempt = 0; attempt < 4; attempt++) {
 					// Every mutation depends on its read/check prefix. Keep those reads on the
 					// reserved lane so observer traffic cannot reject a content write midway.
 					let tx = new RuntimeTransaction(this, true);
-					let result = await work(tx);
+					let result = await counted(tx);
 					if (tx.sequenced && !releaseEvents) {
 						// The global event cursor must follow commit order, but reads need not hold it:
 						// replay the work under the chain on the rows just read, so the chain covers only
 						// numbering and the write. The owner still checks every revision. A conflict keeps
 						// the reservation, so a busy neighbor cannot starve the retry.
+						const reserveStarted = performance.now();
 						releaseEvents = await this.#reserveEvents();
+						lockWaitMs += performance.now() - reserveStarted;
 						tx = new RuntimeTransaction(this, true, tx);
-						result = await work(tx);
+						result = await counted(tx);
 					}
 					const runtime = tx.mutation();
 					if (!runtime.puts.length && !runtime.deletes.length) return result;
@@ -205,6 +219,10 @@ export class RuntimeRecords {
 		);
 		this.#tails.set(familyId, tail);
 		return run.finally(() => {
+			perfCount("engine.storage.mutation", name ?? "records.mutate", performance.now() - queuedAt, undefined, {
+				replays: Math.max(0, works - 1),
+				lockWaitMs,
+			});
 			this.#pending[durability]--;
 			familyPending[durability]--;
 			if (familyPending.required === 0 && familyPending.buffered === 0) this.#pendingByFamily.delete(familyId);

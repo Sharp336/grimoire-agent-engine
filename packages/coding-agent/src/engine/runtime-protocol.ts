@@ -1,3 +1,4 @@
+import { perfTimed } from "@oh-my-pi/pi-utils/perf-trace";
 import { type EngineSemanticBindingSnapshot, EngineTargetError } from "./contracts";
 import {
 	canonicalRuntimeJson,
@@ -145,7 +146,7 @@ export function runtimeProjectionHash(scope: RuntimeScope): string {
 
 export function validateRuntimeValue(name: string, value: unknown): void {
 	try {
-		validateSharedRuntimeValue(name, value);
+		perfTimed("engine.validate", name, undefined, () => validateSharedRuntimeValue(name, value));
 	} catch (error) {
 		if (error instanceof RuntimeProtocolError) {
 			throw new EngineTargetError(

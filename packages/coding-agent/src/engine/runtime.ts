@@ -30,6 +30,20 @@ import {
 	latencyNormalizedSource,
 	latencyPersistenceSource,
 } from "@oh-my-pi/pi-utils/latency-audit";
+import {
+	flushCounters,
+	type PerfIds,
+	perfArmFirstFetch,
+	perfCount,
+	perfCurrentScope,
+	perfEnabled,
+	perfEvent,
+	perfFirstFetch,
+	perfScopedSpan,
+	perfSpan,
+	perfWithReason,
+	perfWrap,
+} from "@oh-my-pi/pi-utils/perf-trace";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
 import { formatModelStringWithRouting } from "../config/model-resolver";
@@ -128,6 +142,7 @@ import {
 import type { ExecutionAttemptIdentity, ResolvedEngineExecution } from "./execution-resolver";
 import {
 	markProviderLatency,
+	providerPerfContext,
 	ProviderAdmissionError,
 	type ProviderRequestRecord,
 	setProviderObservationModel,
@@ -212,6 +227,20 @@ function identityAtSend(choice: ExecutorChoice, executionDigest: string) {
 // while leaving the shared AI admission defaults unchanged.
 const ENGINE_STREAM_ADMISSION_MAX_EVENT_BYTES = 16 * 1024 * 1024;
 const ENGINE_STREAM_ADMISSION_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
+
+function startPerfIds(request: EngineStartRequest): PerfIds {
+	return {
+		commandId: request.commandId,
+		clientMessageId: request.clientMessageId,
+		agentInstanceId: request.agentInstanceId,
+		agentInstanceRef: request.agentInstanceRef,
+		attemptId: request.attemptId,
+	};
+}
+
+function bindingPerfIds(binding: LiveBinding): PerfIds {
+	return { agentInstanceId: binding.agentInstanceId, attemptId: binding.attemptId, commandId: binding.commandId };
+}
 
 export interface EngineRestoreHistoryTarget {
 	agentInstanceRef: string;
@@ -1022,8 +1051,11 @@ export class EngineRuntime {
 			executionId: request.executionId,
 		});
 		audit?.mark("start_enter");
-		return this.#inLanes(laneIds, () => {
+		const startIds = startPerfIds(request);
+		const endLaneWait = perfSpan("engine.start.lane_wait", startIds);
+		return perfScopedSpan("engine.start.total", startIds, undefined, () => this.#inLanes(laneIds, () => {
 			audit?.mark("lane_ready");
+			endLaneWait();
 			return this.#startInLane(request, pending.controller.signal, audit);
 		})
 			.catch(async error => {
@@ -1042,7 +1074,7 @@ export class EngineRuntime {
 			.finally(() => {
 				this.#pendingStarts.delete(pending);
 				audit?.finish("start_settled");
-			});
+			}));
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
@@ -2450,8 +2482,10 @@ export class EngineRuntime {
 		audit?: LatencyAudit,
 	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
+		const perfIds = startPerfIds(request);
 		if (!this.#resolveExecution || !this.#verifyOriginReceipt)
 			throw new EngineTargetError("source_unavailable", "Execution resolver and verified origin are required");
+		const endVerify = perfSpan("engine.start.verify_origin_receipt", perfIds);
 		const origin = await this.#verifyOriginReceipt({
 			originReceiptId: request.originReceiptId,
 			commandId: request.commandId,
@@ -2459,9 +2493,11 @@ export class EngineRuntime {
 			attemptId: request.attemptId,
 			principalId: request.principalId,
 		});
+		endVerify();
 		if (origin.verified !== true || origin.dispatchHash !== request.dispatchHash || !origin.bindingSnapshot ||
 			!sameSemanticBinding(origin.bindingSnapshot, request.bindingSnapshot) || !origin.authContextId)
 			throw new EngineTargetError("stale_target", "Origin receipt differs from admitted dispatch or binding");
+		const endSemantic = perfSpan("engine.start.semantic_checks", perfIds);
 		await this.store.checkSemanticStart(request.agentInstanceId, request.bindingSnapshot, request.principalId);
 		let binding = this.#bindings.get(request.agentInstanceId);
 		const admitted = binding ?? await this.store.getBinding(request.agentInstanceId);
@@ -2518,6 +2554,7 @@ export class EngineRuntime {
 		if (archive && archive.state !== "restored") {
 			throw new EngineTargetError("history_expired", "Restore this archived history before starting a new Attempt");
 		}
+		endSemantic();
 		const retainedQueueBinding =
 			queuedItem?.wakeDeliveredAt === undefined
 				? binding
@@ -2669,6 +2706,7 @@ export class EngineRuntime {
 			callerAttemptId: request.bindingSnapshot.parentAttemptId,
 			frozen: false,
 		};
+		const endPreview = perfSpan("engine.start.preview_routing", perfIds);
 		let preview = await this.store.previewRouting(admission);
 		if (preview.status === "queued") {
 			try {
@@ -2679,6 +2717,7 @@ export class EngineRuntime {
 				if (preview.status === "queued") preview = await this.store.queueRouting(admission);
 			}
 		}
+		endPreview({ status: preview.status });
 		if (preview.status === "queued") {
 			return {
 				bindingId: `${engineRouteToken(request.agentInstanceId)}:${(admitted?.bindingGeneration ?? 0) + 1}`,
@@ -2768,6 +2807,7 @@ export class EngineRuntime {
 			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 		};
 		// Nothing requests a credential or issues an effect until the owner's one atomic acceptance.
+		const endAccepted = perfSpan("engine.start.commit_accepted", perfIds);
 			const events = await this.store.commitAttemptTransition(initial, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				routingAdmission: { request: admission, preview },
 				execution: {
@@ -2793,6 +2833,7 @@ export class EngineRuntime {
 				requireNew: true,
 			});
 			this.#notifyEvents(events);
+		endAccepted();
 		let leaseError: unknown;
 		let renewing = false;
 		const heartbeat = setInterval(() => {
@@ -2813,7 +2854,9 @@ export class EngineRuntime {
 		let resolved: ResolvedEngineExecution | undefined;
 		let retainedQueuedBinding = false;
 		try {
+			const endTerminate = perfSpan("engine.start.terminate_binding", perfIds, { hadLiveBinding: Boolean(binding) });
 			if (binding) await this.#terminateBinding(binding, "requested");
+			endTerminate();
 			const attempt: ExecutionAttemptIdentity = {
 				expectedPrincipalId: request.principalId,
 				agentInstanceRef: request.agentInstanceRef,
@@ -2826,15 +2869,16 @@ export class EngineRuntime {
 				originReceiptId: request.originReceiptId,
 			};
 			await this.#assertDispatchDeadline(request.attemptId, config);
-			resolved = await this.#resolveExecution(config, preview.frozen, attempt, request.cwd, pendingStartSignal);
+			resolved = await perfWrap("engine.start.resolve_execution", perfIds, undefined, () =>
+				this.#resolveExecution!(config, preview.frozen, attempt, request.cwd, pendingStartSignal));
 			const openingExecution = resolved;
 			resolved = undefined;
 			ownsPreparedSession = false;
-			binding = await this.#openBinding(
+			binding = await perfWrap("engine.start.open_binding", perfIds, undefined, () => this.#openBinding(
 				request, openingExecution, continuationDigest,
 				executionDigest, choice, preview.frozen, admitted, initial.bindingGeneration,
 				restoreReceipt, compatibilityDigest, preparedSession, pendingStartSignal, audit, approvalSettings,
-			);
+			));
 			this.#assertAttachmentSupport(binding.session, images, originals);
 			if (preparedHistory?.pendingInboxSourceSessionId)
 				binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
@@ -2849,15 +2893,18 @@ export class EngineRuntime {
 			binding.attemptState = "running";
 			if (leaseError) throw leaseError;
 			binding.leaseHeartbeat = heartbeat;
+			const endReconciled = perfSpan("engine.start.commit_reconciled", perfIds);
 			await this.#commitAttemptTransition(binding, "running", [], {
 				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
 				...(!queuedItem ? { inboxSessionId: binding.session.sessionId } : {}),
 			});
+			endReconciled();
 			if (queuedItem) {
 				retainedQueuedBinding = true;
 				const identity = await this.#queuedInputIdentity(binding, request, queuedItem, preparedAttachments?.originalAttachments);
 				await this.#sendCommandContext(binding, request.context, request.commandId);
 				await binding.session.acceptEngineQueuedInput(queuedItem.deliveryPayload, images, identity);
+				const endAck = perfSpan("engine.start.commit_reconciled", perfIds, { phase: "queued_ack" });
 				await this.#commitAttemptTransition(binding, "running", [], {
 					transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
 					inboxSessionId: binding.session.sessionId,
@@ -2867,6 +2914,7 @@ export class EngineRuntime {
 					},
 					inboxMutationCausationCommandId: request.commandId,
 				});
+				endAck();
 			}
 		} catch (error) {
 			clearInterval(heartbeat);
@@ -3061,6 +3109,7 @@ export class EngineRuntime {
 		recoverSession = false,
 	): Promise<LiveBinding> {
 		const capturedApprovalSettings = requireApprovalSettings(approvalSettings);
+		const perfIds = startPerfIds(request);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager = preparedSessionManager;
@@ -3080,6 +3129,8 @@ export class EngineRuntime {
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			let previousInboxSessionId: string | undefined;
+			const endNative = perfSpan("engine.binding.open_native", perfIds);
+			const storageBefore = perfCurrentScope()?.storageRequests ?? 0;
 			if (recoverSession && !preparedSessionManager && prior?.sessionFile)
 				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
 			if (
@@ -3094,6 +3145,7 @@ export class EngineRuntime {
 				config.continuationPolicy !== "fresh"
 			) {
 				sessionManager = await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir);
+				perfEvent("engine.start.continuation_fork", perfIds, { forked: false, sessionChanged: false, reason: "reused" });
 			} else if (!recoverSession && !preparedSessionManager) {
 				previousInboxSessionId = prior?.sessionFile
 					? await this.#conversationCarrySource(
@@ -3102,6 +3154,13 @@ export class EngineRuntime {
 							restoreReceipt,
 						)
 					: undefined;
+				perfEvent("engine.start.continuation_fork", perfIds, {
+					forked: Boolean(prior?.sessionFile && previousInboxSessionId),
+					sessionChanged: true,
+					reason: config.continuationPolicy === "fresh" ? "fresh_policy"
+						: !prior?.sessionFile ? "no_prior"
+						: prior.continuationDigest !== continuationDigest ? "continuation_digest_changed" : "other",
+				});
 				if (prior?.sessionFile && previousInboxSessionId) {
 					// A changed execution gets a fresh runtime; only the durable conversation is forked.
 					const source = this.#nativeSessionStorage(prior.sessionFile);
@@ -3122,6 +3181,10 @@ export class EngineRuntime {
 					);
 				}
 			}
+			endNative({
+				records: sessionManager?.getContextBranch().length ?? 0,
+				storageRequests: (perfCurrentScope()?.storageRequests ?? 0) - storageBefore,
+			});
 			audit?.mark("binding_history_done");
 			const id = engineAgentId(request.agentInstanceId);
 			const pauseGate = new AgentPauseGate();
@@ -3216,7 +3279,9 @@ export class EngineRuntime {
 						}
 					: undefined;
 			audit?.mark("binding_child_history_start");
+			const endChildren = perfSpan("engine.binding.retained_children", perfIds);
 			const engineHistory = await this.#retainedDirectChildHistory(request, prior);
+			endChildren({ count: engineHistory.refs.length });
 			audit?.mark("binding_child_history_done");
 			const sessionOptions: CreateAgentSessionOptions = {
 				...this.#sessionDefaults,
@@ -3243,6 +3308,9 @@ export class EngineRuntime {
 					const inner = resolved?.options.providerRequestHook ?? this.#sessionDefaults?.providerRequestHook;
 					const admitIntent = async (signal: AbortSignal | undefined) => {
 						if (!liveBinding) throw new Error("Provider boundary has no Engine binding");
+						const modelPerf = providerPerfContext();
+						const endAdmit = perfSpan("engine.model.admit_intent", { ...bindingPerfIds(liveBinding), ...modelPerf?.ids },
+							{ physicalRequestOrdinal: modelPerf?.ordinal });
 						markProviderLatency("intent_admission_start");
 						if (sideOperation.getStore() === liveBinding) {
 							signal?.throwIfAborted();
@@ -3255,6 +3323,7 @@ export class EngineRuntime {
 							);
 						}
 						markProviderLatency("intent_admission_done");
+						endAdmit();
 					};
 					return {
 						wrapFetch: (model, fetch) => {
@@ -3463,6 +3532,7 @@ export class EngineRuntime {
 							if (!liveBinding) throw new EngineTargetError("stale_target", "Escalation binding was released");
 							return this.#requestEscalation(liveBinding, toolCallId, toolName, subject, hash, signal);
 						};
+					const endMcp = perfSpan("engine.binding.mcp_connect", perfIds);
 					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
@@ -3489,16 +3559,21 @@ export class EngineRuntime {
 					}
 					sessionOptions.mcpManager = mcpManager;
 					audit?.mark("binding_mcp_connect_done");
+					endMcp();
 				}
 			}
+			const endCreate = perfSpan("engine.binding.create_session", perfIds);
 			audit?.mark("binding_session_create_start");
 			created = await createAgentSession(sessionOptions);
 			audit?.mark("binding_session_create_done");
+			endCreate();
 			if (mcpManager) {
 				const session = created.session;
+				const endRefresh = perfSpan("engine.binding.refresh_mcp_tools", perfIds);
 				audit?.mark("binding_mcp_refresh_start");
 				await session.refreshMCPTools(mcpManager.getTools());
 				audit?.mark("binding_mcp_refresh_done");
+				endRefresh();
 				mcpManager.setOnToolsChanged(async tools => {
 					if (session.isDisposed) return;
 					await session.refreshMCPTools(tools).catch(() => {
@@ -3629,7 +3704,9 @@ export class EngineRuntime {
 							binding.attemptState !== "cancel_requested";
 						// The append tap is synchronous; indexed storage may still have queued writes.
 						const checkpoint = this.#queueBindingWrite(binding, { type: "user_checkpoint" }, async () =>
-							current() ? manager.flushAndCheckpoint() : undefined,
+							current()
+								? perfWrap("engine.turn.user_checkpoint", bindingPerfIds(binding), { phase: "flush" }, () => manager.flushAndCheckpoint())
+								: undefined,
 						);
 						const failed = (error: unknown) => {
 							if (current() && !(error instanceof StreamAdmissionError)) binding.messageWriteError ??= error;
@@ -3656,10 +3733,10 @@ export class EngineRuntime {
 									}
 									await this.#inLane(target.agentInstanceId, async () => {
 										if (!durable || !current()) return;
-										await this.#commitAttemptTransition(binding, binding.attemptState, [], {
+										await perfWithReason("user_checkpoint", () => perfWrap("engine.turn.user_checkpoint", bindingPerfIds(binding), { phase: "commit" }, () => this.#commitAttemptTransition(binding, binding.attemptState, [], {
 											expectedStates: [binding.attemptState],
 											transcriptCheckpoint: durable,
-										});
+										})));
 									});
 								},
 							).catch(failed),
@@ -3669,6 +3746,8 @@ export class EngineRuntime {
 			};
 			manager.onEntryAppended = onEntryAppended;
 			const detachModelAdmission = session.agent.addBeforeModelCallHook(async signal => {
+				const endHook = perfSpan("engine.model.before_model_hook", bindingPerfIds(binding));
+				try {
 				const checkpoint = await this.#effectCheckpoint(binding);
 				await binding.traceWriteTail;
 				if (binding.messageWriteError) throw binding.messageWriteError;
@@ -3680,7 +3759,11 @@ export class EngineRuntime {
 				const turn = binding.primaryTurn;
 				const retry = turn?.attemptId === binding.attemptId && turn.admission === binding.streamAdmission &&
 					turn.retryEffectId !== undefined && turn.retryEffectId === turn.iterationEffectId;
-				const effect = this.#nextModelEffect(binding, sha256(stableStringifyJson(session.messages)), retry ? "primary_retry" : "primary");
+				const endHash = perfSpan("engine.model.conversation_hash", bindingPerfIds(binding));
+				const conversationJson = stableStringifyJson(session.messages);
+				const conversationHash = sha256(conversationJson);
+				endHash({ bytes: perfEnabled ? Buffer.byteLength(conversationJson) : 0 });
+				const effect = this.#nextModelEffect(binding, conversationHash, retry ? "primary_retry" : "primary");
 				const started = await this.#admitEffect(binding,
 					() => this.store.startModelEffect(this.#snapshot(binding), effect, checkpoint), signal);
 				binding.modelEffect = effect;
@@ -3690,6 +3773,9 @@ export class EngineRuntime {
 				}
 				setProviderObservationModel(effect);
 				this.#notifyEvents([started]);
+				} finally {
+					endHook();
+				}
 			});
 			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_start" && event.message.role === "assistant") {
@@ -3708,7 +3794,7 @@ export class EngineRuntime {
 				if (event.type === "message_end" && event.message.role === "assistant") {
 					this.#settleAssistantStream(binding, event.message);
 				}
-				if (event.type === "message_end") this.#queueHistoryCheckpoint(binding);
+				if (event.type === "message_end") this.#queueHistoryCheckpoint(binding, event.message.role);
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
 					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
 				}
@@ -5721,6 +5807,7 @@ export class EngineRuntime {
 			modelCallId,
 		});
 		audit?.mark("model_admission_start");
+		perfArmFirstFetch(binding.attemptId, bindingPerfIds(binding));
 		try {
 			if (reserved) {
 				const approved = await this.store.getEffect(effect.effectId);
@@ -5781,6 +5868,7 @@ export class EngineRuntime {
 			return dispatched;
 		} finally {
 			audit?.finish("model_settled");
+			perfFirstFetch(binding.attemptId, { outcome: "no_fetch" });
 			completed.resolve();
 			if (binding.primaryTurn === turn) binding.primaryTurn = undefined;
 			binding.activeModelCalls.delete(completed.promise);
@@ -6244,7 +6332,7 @@ export class EngineRuntime {
 		void this.#queueBindingWrite(binding, payload, () => this.#emit(binding, kind, payload));
 	}
 
-	#queueHistoryCheckpoint(binding: LiveBinding): void {
+	#queueHistoryCheckpoint(binding: LiveBinding, role: string): void {
 		const attemptId = binding.attemptId;
 		void this.#queueBindingWrite(binding, { type: "history_checkpoint" }, async () => {
 			// message_end is emitted before native persistence finishes. Only publish
@@ -6258,11 +6346,13 @@ export class EngineRuntime {
 					!["running", "pause_requested", "paused", "waiting_input"].includes(binding.attemptState)
 				)
 					return;
+				const endCheckpoint = perfSpan("engine.turn.history_checkpoint", bindingPerfIds(binding), { role });
 				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 				await this.#commitAttemptTransition(binding, binding.attemptState, [{ kind: "history_checkpoint" }], {
 					expectedStates: [binding.attemptState],
 					transcriptCheckpoint,
 				});
+				endCheckpoint();
 			});
 		});
 	}
@@ -6372,7 +6462,9 @@ export class EngineRuntime {
 		block.pendingBytes += Buffer.byteLength(wellFormed);
 		// The first text of a block is durable before the provider moves on. Later text never waits for storage:
 		// it is written once per window or byte budget, and a queued write takes everything pending when it runs.
-		if (block.revision === 0) await this.#flushAssistantBlock(binding, state, block);
+		if (block.revision === 0)
+			await perfWrap("engine.stream.first_delta_flush", bindingPerfIds(binding), { blockKind: block.stream }, () =>
+				this.#flushAssistantBlock(binding, state, block));
 		else if (block.pendingBytes >= ASSISTANT_DELTA_WINDOW_BYTES)
 			void this.#flushAssistantBlock(binding, state, block);
 		else state.flushTimer ??= setTimeout(() => this.#flushAssistantStream(binding, state), ASSISTANT_DELTA_WINDOW_MS);
@@ -6519,7 +6611,17 @@ export class EngineRuntime {
 		const admission = binding.streamAdmission?.signal.aborted ? undefined : binding.streamAdmission;
 		let write: Promise<T>;
 		try {
-			write = enqueueStreamWork(admission, binding.traceWriteTail, payload, work);
+			let queued = work;
+			if (perfEnabled) {
+				const queuedAt = performance.now();
+				queued = () => {
+					perfCount("engine.stream.write_queue_wait", "binding_write", performance.now() - queuedAt, {
+						attemptId: binding.attemptId,
+					});
+					return work();
+				};
+			}
+			write = enqueueStreamWork(admission, binding.traceWriteTail, payload, queued);
 		} catch (error) {
 			failed(error);
 			write = Promise.reject(error);
@@ -7716,10 +7818,12 @@ export class EngineRuntime {
 			binding.leaseHeartbeat = undefined;
 		} else if (options.routingResume) this.#armLeaseHeartbeat(binding);
 		this.#notifyEvents(committed);
+		if (TERMINAL_ATTEMPT_STATES.has(state)) flushCounters(binding.attemptId);
 	}
 
 	#notifyEvents(events: readonly EngineEvent[]): void {
 		for (const event of events) {
+			perfCount("engine.event.emitted", event.kind, 0, { attemptId: event.attemptId, agentInstanceId: event.agentInstanceId });
 			for (const listener of this.#listeners) {
 				try {
 					void Promise.resolve(listener(event)).catch(() => {});

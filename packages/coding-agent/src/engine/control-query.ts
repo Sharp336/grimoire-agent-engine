@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { logger, VERSION } from "@oh-my-pi/pi-utils";
+import { perfEnabled, perfScopedSpan } from "@oh-my-pi/pi-utils/perf-trace";
 import {
 	type ApprovalRequest,
 	type EngineExecutionConfiguration,
@@ -384,6 +385,30 @@ async function handleFrame(
 }
 
 async function dispatchRequest(
+	request: EngineControlQueryRequest,
+	options: ServerOptions,
+	signal?: AbortSignal,
+): Promise<unknown> {
+	const history = request.method === "runtime.history";
+	if (!perfEnabled || (!history && request.method !== "runtime.snapshot"))
+		return dispatchRequestInner(request, options, signal);
+	const ref = request.params?.agentInstanceRef;
+	return perfScopedSpan(
+		history ? "engine.query.history" : "engine.query.snapshot",
+		{ agentInstanceRef: typeof ref === "string" ? ref : undefined },
+		undefined,
+		async (scope, end) => {
+			const result = await dispatchRequestInner(request, options, signal);
+			if (history) {
+				const page = result as { entries: unknown[]; work: { bytes: number } };
+				end({ entries: page.entries.length, bytes: page.work.bytes, lifecycleQueries: scope.lifecycleQueries });
+			}
+			return result;
+		},
+	);
+}
+
+async function dispatchRequestInner(
 	request: EngineControlQueryRequest,
 	options: ServerOptions,
 	signal?: AbortSignal,

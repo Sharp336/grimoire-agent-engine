@@ -1,3 +1,4 @@
+import { type PerfEnd, perfScopedSpan } from "@oh-my-pi/pi-utils/perf-trace";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex, StorageRuntimeRecord } from "../session/storage-protocol";
@@ -799,7 +800,23 @@ export class RocksEngineStore extends RocksEngineMutations {
 			items.length,
 		);
 	}
-	async detail(
+	detail(
+		interest: RuntimeDetailInterest,
+		access: RuntimeAccess,
+		work: RuntimeQueryWork,
+		root?: string,
+	): Promise<Record<string, unknown>> {
+		return perfScopedSpan(
+			"engine.query.detail",
+			{
+				agentInstanceRef: interest.agentInstanceRef,
+				attemptId: interest.kind === "attempt" ? interest.attemptId : undefined,
+			},
+			undefined,
+			() => this.#readDetail(interest, access, work, root),
+		);
+	}
+	async #readDetail(
 		interest: RuntimeDetailInterest,
 		access: RuntimeAccess,
 		work: RuntimeQueryWork,
@@ -1007,7 +1024,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 		account(work, page.records);
 		return { rows: page.records.map(row => row.value as unknown as ProjectedEvent), more: page.nextCursor !== null };
 	}
-	async runtimeEvents(request: RuntimeEventsRequest): Promise<RuntimeEventBatch> {
+	runtimeEvents(request: RuntimeEventsRequest): Promise<RuntimeEventBatch> {
+		return perfScopedSpan("engine.query.events", undefined, undefined, (_scope, end) =>
+			this.#readRuntimeEvents(request, end),
+		);
+	}
+	async #readRuntimeEvents(request: RuntimeEventsRequest, end: PerfEnd): Promise<RuntimeEventBatch> {
 		validateRuntimeValue("nativeEventsRequest", request);
 		const work = queryWork(request.remainingWork);
 		const meta = await this.meta(work);
@@ -1156,7 +1178,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 			}
 			result.changes.push(...changes);
 		}
-		return finish("eventBatch", result, work, result.changes.length, request.maxBytes);
+		const batch = finish("eventBatch", result, work, result.changes.length, request.maxBytes);
+		end({ changes: batch.changes.length, bytes: batch.work.bytes, sources: sources.length });
+		return batch;
 	}
 	async waitRuntimeEvents(request: RuntimeEventsRequest, signal?: AbortSignal): Promise<RuntimeEventBatch> {
 		const deadline =

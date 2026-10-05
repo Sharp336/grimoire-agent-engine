@@ -1,3 +1,4 @@
+import { perfTimed } from "@oh-my-pi/pi-utils/perf-trace";
 import { createHmac } from "node:crypto";
 import {
 	AckPolicy,
@@ -541,7 +542,8 @@ export class HostedEngineBridge {
 							return;
 						}
 						if (!(await this.#deliverEvent(event))) throw new Error("Hosted Engine event was not accepted");
-						await this.#options.eventStore?.markEventDelivered(Number(event.eventId), "hosted-binding");
+						await perfTimed("engine.delivery.mark", "hosted", { attemptId: event.attemptId }, () =>
+							this.#options.eventStore?.markEventDelivered(Number(event.eventId), "hosted-binding"));
 						retries?.delete(sequence);
 						if (retries?.size === 0) this.#eventRetries.delete(agentId);
 						message.ack();

@@ -1,3 +1,4 @@
+import { perfStorage } from "@oh-my-pi/pi-utils/perf-trace";
 import {
 	assertStorageProtocolHash,
 	STORAGE_PROTOCOL_SCHEMA,
@@ -157,9 +158,9 @@ export class StorageClient {
 		const payloadHash = `sha256:${new Bun.CryptoHasher("sha256").update(canonical).digest("hex")}` as const;
 		const write: StorageWrite = { ...payload, payloadHash, requestId: crypto.randomUUID() };
 		const body = `{"schema":${JSON.stringify(STORAGE_PROTOCOL_SCHEMA)},"version":${JSON.stringify(STORAGE_PROTOCOL_VERSION)},"operation":"write","write":${canonical.slice(0, -1)},"payloadHash":${JSON.stringify(payloadHash)},"requestId":${JSON.stringify(write.requestId)}}}`;
-		return this.#reserve(control ? "control" : "write", Buffer.byteLength(body)).then(release =>
+		return perfStorage("write", () => this.#reserve(control ? "control" : "write", Buffer.byteLength(body)).then(release =>
 			this.#write(write, body).finally(release),
-		);
+		));
 	}
 
 	/**
@@ -170,7 +171,7 @@ export class StorageClient {
 		input: Omit<StorageBarrier, "requestId" | "incarnation">,
 		confirmsWrites = true,
 	): Promise<StorageBarrierSuccessResponse> {
-		return this.#request("control", "/v1/barrier", "barrier", "barrier", input, confirmsWrites).then(response => {
+		return perfStorage("barrier", () => this.#request("control", "/v1/barrier", "barrier", "barrier", input, confirmsWrites)).then(response => {
 			if (!("durableThroughSeq" in response) || response.durableThroughSeq < input.throughSeq) {
 				const message = "Storage barrier did not confirm its requested prefix";
 				throw confirmsWrites
@@ -185,19 +186,20 @@ export class StorageClient {
 		input: Omit<StorageRead, "requestId" | "incarnation">,
 		control = false,
 	): Promise<StorageReadSuccessResponse> {
-		return this.#read("range", input, control);
+		return perfStorage("other", () => this.#read("range", input, control));
 	}
 	readContext(input: Omit<StorageRead, "requestId" | "incarnation">): Promise<StorageReadSuccessResponse> {
-		return this.#read("context", input);
+		return perfStorage("readContext", () => this.#read("context", input));
 	}
 	readChildren(input: Omit<StorageRead, "requestId" | "incarnation">): Promise<StorageReadSuccessResponse> {
-		return this.#read("children", input);
+		return perfStorage("other", () => this.#read("children", input));
 	}
 	runtimeQuery(
 		input: Omit<StorageRuntimeQuery, "requestId" | "incarnation">,
 		control = false,
 	): Promise<StorageRuntimeQueryResponse> {
-		return this.#request(control ? "control" : "read", "/v1/runtime/query", "runtime_query", "query", input).then(
+		return perfStorage(input.selector.type === "records" ? "getMany" : "runtimeQuery", () =>
+			this.#request(control ? "control" : "read", "/v1/runtime/query", "runtime_query", "query", input)).then(
 			response => {
 				if (
 					!("records" in response) ||

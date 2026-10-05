@@ -1,4 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { perfSpan } from "@oh-my-pi/pi-utils/perf-trace";
 import { type CandidateIdentity, type DispatchLimits, type DispatchRequirement, type EngineExecutionConfiguration,
 	type EngineExecutionRoute, type RoutingLimits, EngineTargetError, humanSelectedCandidate } from "./contracts";
 import { type ExecutorPolicyFacts, type PolicyCheck, type PolicyEvaluation, type PolicyScope, evaluateExecutorPolicy, executionPolicyFacts,
@@ -86,8 +87,27 @@ export async function executorPolicyPreview(store: RocksEngineStore, deviceId: s
 	return response;
 }
 
-/** Called only by ClientHost after hosted ACL/credential/record attestation, before any provider effect. */
+interface AdmissionStats { parseMs: number; validateMs: number; bytes: number }
+
 export async function executorPolicyAdmission(store: RocksEngineStore, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+	const stats: AdmissionStats = { parseMs: 0, validateMs: 0, bytes: 0 };
+	const identity = isRecord(params.identity) ? params.identity : undefined;
+	const end = perfSpan("engine.policy.executor_admission", {
+		attemptId: typeof identity?.attemptId === "string" ? identity.attemptId : undefined,
+		agentInstanceRef: typeof identity?.agentInstanceRef === "string" ? identity.agentInstanceRef : undefined,
+	});
+	try {
+		const result = await admitExecutor(store, params, stats);
+		end({ ...stats, outcome: result.allowed === true ? "allowed" : "denied" });
+		return result;
+	} catch (error) {
+		end({ ...stats, outcome: "error" });
+		throw error;
+	}
+}
+
+/** Called only by ClientHost after hosted ACL/credential/record attestation, before any provider effect. */
+async function admitExecutor(store: RocksEngineStore, params: Record<string, unknown>, stats: AdmissionStats): Promise<Record<string, unknown>> {
 	if (typeof params.principalId !== "string" || !isRecord(params.identity) || !isRecord(params.verified) ||
 		params.verified.allowed !== true || !isRecord(params.verified.route))
 		throw new EngineTargetError("stale_target", "Current provider authority facts are missing");
@@ -101,13 +121,18 @@ export async function executorPolicyAdmission(store: RocksEngineStore, params: R
 		attempt.execution.dispatch_hash !== identity.dispatchHash || attempt.execution.executor_choice.execution_digest !== identity.executionDigest ||
 		!receipt || !isRecord(receipt.lease) || receipt.lease.held !== true)
 		throw new EngineTargetError("stale_target", "Provider request has no matching owned admitted Attempt and lease");
+	const parseStarted = performance.now();
 	const original = JSON.parse(command.serializedCommand) as { payload: { originReceiptId: string; executionConfiguration: EngineExecutionConfiguration } };
+	stats.parseMs = performance.now() - parseStarted;
+	stats.bytes = command.serializedCommand.length;
 	if (original.payload.originReceiptId !== identity.originReceiptId)
 		throw new EngineTargetError("stale_target", "Provider origin receipt differs");
 	const config = original.payload.executionConfiguration, choice = attempt.execution.executor_choice;
+	const validateStarted = performance.now();
 	validateRuntimeValue("engineExecutionConfiguration", config);
 	const selected = params.candidate === null ? currentIdentity(choice) : params.candidate;
 	validateRuntimeValue("candidateIdentity", selected);
+	stats.validateMs = performance.now() - validateStarted;
 	const candidate = selected as CandidateIdentity;
 	const captured = config.routes.routes.find(route => candidateRef(route) === candidateRef(candidate) && route.account_ref === candidate.account_ref);
 	if (!captured || !choice.candidates.some(route => candidateRef(route) === candidateRef(candidate)) ||

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { perfCallerName } from "@oh-my-pi/pi-utils/perf-trace";
 import type { ExtensionAskDialogQuestion } from "../extensibility/extensions/types";
 import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import { SessionManager, type SessionDurabilityCheckpoint } from "../session/session-manager";
@@ -51,6 +52,7 @@ import {
 	eventReadKeys,
 	nativeCommandReceipt,
 	projectionId,
+	perfInvalidations,
 	projectedDetail,
 	type RocksProjection,
 	type RequestConsumption,
@@ -337,6 +339,7 @@ export class RocksEngineMutations {
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
+		const mutationName = perfCallerName(2);
 		await (this.#bindingTracking ??= this.#loadBindingTracking());
 		// Conflicts replay `work` on a fresh transaction; only the last one is committed.
 		let committed: RuntimeTransaction | undefined;
@@ -372,6 +375,7 @@ export class RocksEngineMutations {
 			},
 			dependencies,
 			durability,
+			mutationName,
 		).catch(error => {
 			for (const [id, cached] of this.#primaryIterations)
 				if (cached.agentId === scope) this.#primaryIterations.delete(id);
@@ -382,6 +386,7 @@ export class RocksEngineMutations {
 		if (iterations) this.#primaryIterations.set(iterations.attemptId, iterations);
 		if (mutation && (mutation.puts.length || mutation.deletes.length)) {
 			this.#rememberBindingRows(mutation.puts);
+			perfInvalidations(mutation.puts);
 			for (const row of mutation.puts)
 				if (row.kind === "attempt" && terminal.has((row.value as unknown as RocksAttempt).state))
 					this.#primaryIterations.delete(row.id);

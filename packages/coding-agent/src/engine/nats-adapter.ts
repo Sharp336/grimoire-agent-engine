@@ -1,3 +1,4 @@
+import { perfTimed } from "@oh-my-pi/pi-utils/perf-trace";
 import {
 	AckPolicy,
 	type ConsumerMessages,
@@ -831,7 +832,8 @@ export class NatsEngineAdapter {
 				// Only broker-acknowledged events enter this FULL transaction. A crash
 				// before it commits replays the same msgIDs through JetStream dedup.
 				// A failed publish commits its acknowledged prefix, never the suffix.
-				await this.runtime.store.markEventsDelivered(delivered, sinkId);
+				await perfTimed("engine.delivery.mark", "nats", undefined, () =>
+					this.runtime.store.markEventsDelivered(delivered, sinkId));
 			}
 			// Advance only after every pending row in this bounded scan is committed.
 			// A failed ACK/transaction retries the page; a fresh adapter scans from zero.

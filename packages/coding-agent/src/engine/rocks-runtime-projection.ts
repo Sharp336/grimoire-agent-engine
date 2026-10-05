@@ -1,4 +1,5 @@
-import type { StorageRuntimeIndex, StorageRuntimeKey } from "../session/storage-protocol";
+import { perfEnabled, perfEvent, perfReason } from "@oh-my-pi/pi-utils/perf-trace";
+import type { StorageRuntimeIndex, StorageRuntimeKey, StorageRuntimeMutation } from "../session/storage-protocol";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { canonicalRuntimeJson } from "./runtime-protocol.mjs";
 import {
@@ -1046,4 +1047,42 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		projection_payload: changes,
 		lifecycle_summary: lifecycleSummary(event),
 	});
+}
+
+/**
+ * Diagnostic only. A mutation may replay its work, so invalidations are reported once, from the events it
+ * committed: the reason comes from the source event kind (or an enclosing labelled commit).
+ */
+export function perfInvalidations(puts: StorageRuntimeMutation["puts"]): void {
+	if (!perfEnabled) return;
+	for (const row of puts) {
+		if (row.kind !== "event") continue;
+		const event = row.value as unknown as {
+			kind: string;
+			attemptId: string;
+			agentInstanceId: string;
+			projection_payload?: Array<{ kind: string; agentInstanceRef?: string; value: Record<string, unknown> }>;
+		};
+		for (const change of event.projection_payload ?? []) {
+			if (change.kind !== "invalidate") continue;
+			const resource = String(change.value.resource);
+			perfEvent(
+				"engine.event.invalidate",
+				{ attemptId: event.attemptId, agentInstanceId: event.agentInstanceId, agentInstanceRef: change.agentInstanceRef },
+				{ resource, reason: invalidationReason(event.kind, resource), eventKind: event.kind },
+			);
+		}
+	}
+}
+
+function invalidationReason(kind: string, resource: string): string {
+	if (resource === "history") {
+		const labelled = perfReason();
+		if (labelled) return labelled;
+	}
+	if (kind === "reconciled") return "reconciled";
+	if (kind === "history_checkpoint") return "history_checkpoint";
+	if (kind === "request_waiting") return "request_waiting";
+	if (terminal.has(kind)) return "terminal";
+	return "other";
 }

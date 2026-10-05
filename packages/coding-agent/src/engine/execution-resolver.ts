@@ -17,6 +17,7 @@ import { extractCursorAccessTokenUserId } from "@oh-my-pi/pi-ai/oauth/cursor";
 import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { type PerfIds, perfSpan, perfWrap } from "@oh-my-pi/pi-utils/perf-trace";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "../config/model-registry";
@@ -125,8 +126,9 @@ export class EngineExecutionResolver {
 		if (local && !this.providerExecutionClient) throw new Error("Owner-local credential proof is unavailable");
 		// Every Engine provider request must be admitted and recorded; there is no unobserved fallback.
 		if (!this.providerAdmissionClient) throw new Error("Provider quota admission is unavailable");
-		const localDescriptor = local ? await this.providerExecutionClient!.describe(
-			{ ...attempt, ...routeIdentity(primary), modelId: primary.modelId }, signal) : undefined;
+		const perfIds: PerfIds = { attemptId: attempt.attemptId, agentInstanceRef: attempt.agentInstanceRef };
+		const localDescriptor = local ? await perfWrap("engine.resolve.describe", perfIds, { local: true }, () =>
+			this.providerExecutionClient!.describe({ ...attempt, ...routeIdentity(primary), modelId: primary.modelId }, signal)) : undefined;
 		const localOAuth = localDescriptor?.localOAuth;
 		const localProviderKind = LOCAL_OAUTH_PROVIDER_KINDS[primary.provider];
 		if (local && (!localOAuth || localDescriptor?.mode !== "owner_local" || !localProviderKind))
@@ -140,8 +142,9 @@ export class EngineExecutionResolver {
 						accountBindingId: primary.execution.account_binding_id,
 					}
 				: undefined;
-		if (admission) admission.executionPin = await this.providerAdmissionClient.pin(admission, primary.modelId, signal);
-		const sessionSettings = await Settings.loadReadOnly({
+		if (admission) admission.executionPin = await perfWrap("engine.resolve.pin", perfIds, undefined, () =>
+			this.providerAdmissionClient!.pin(admission, primary.modelId, signal));
+		const sessionSettings = await perfWrap("engine.resolve.settings_load", perfIds, undefined, () => Settings.loadReadOnly({
 			cwd,
 			overrides: {
 				disabledProviders: settings.disabledCapabilityProviders,
@@ -150,7 +153,7 @@ export class EngineExecutionResolver {
 				// The SSE transport sends every model request through the observed fetch boundary.
 				"providers.openaiWebsockets": "off",
 			},
-		});
+		}));
 		const attemptDir = path.join(this.credentialRoot, attempt.attemptId);
 		await fs.mkdir(attemptDir, { recursive: true });
 		const external = new Map<string, ProviderExecutionBinding>();
@@ -171,7 +174,8 @@ export class EngineExecutionResolver {
 			resolveProviderExecutionCredential(value, external, gatedMaterial, valueSignal);
 		let authStorage: AuthStorage;
 		if (localOAuth) {
-			const store = await SqliteAuthCredentialStore.open(getAgentDbPath(localOAuth.agentDir));
+			const store = await perfWrap("engine.resolve.credential_store_open", perfIds, undefined, () =>
+				SqliteAuthCredentialStore.open(getAgentDbPath(localOAuth.agentDir)));
 			const credential = store.listAuthCredentials(primary.provider).find(item =>
 				item.credential.type === "oauth" && item.id === localOAuth.credentialId &&
 				isClaimedOAuthCredential(primary.provider, item.credential, localOAuth.accountId));
@@ -185,16 +189,19 @@ export class EngineExecutionResolver {
 			});
 		} else {
 			authStorage = new AuthStorage(
-				externalCredentialOverlay(await SqliteAuthCredentialStore.open(path.join(attemptDir, "credentials.sqlite"))),
+				externalCredentialOverlay(await perfWrap("engine.resolve.credential_store_open", perfIds, undefined, () =>
+					SqliteAuthCredentialStore.open(path.join(attemptDir, "credentials.sqlite")))),
 				{ configValueResolver },
 			);
 		}
-		await authStorage.reload();
+		await perfWrap("engine.resolve.auth_reload", perfIds, undefined, () => authStorage.reload());
 		try {
+			const endRegistry = perfSpan("engine.resolve.model_registry", perfIds);
 			const modelRegistry = new ModelRegistry(authStorage, path.join(attemptDir, "models.yml"), {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(attemptDir, "models.sqlite"),
 			});
+			endRegistry();
 			const apiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
 			const externalProviders = new Map<string, ProviderExecutionBinding>();
 			const selectors: Array<string | undefined> = [];
@@ -202,6 +209,7 @@ export class EngineExecutionResolver {
 			const tierByModel = new Map<string, ServiceTier | undefined>();
 			let model: Model | undefined;
 			let thinkingLevel: ResolvedThinkingLevel | undefined;
+			const endRoutes = perfSpan("engine.resolve.route_models", perfIds);
 			for (const [index, route] of frozen.entries()) {
 				signal?.throwIfAborted();
 				const fallback = config.dispatch.requirement.fallback_mode;
@@ -225,7 +233,8 @@ export class EngineExecutionResolver {
 							throw new Error(`Credential method ${execution.credential.method} is unsupported for this route`);
 						if (!this.providerExecutionClient) throw new Error("Provider execution material is unavailable");
 						const identity = Object.freeze({ ...attempt, ...routeIdentity(route), modelId: route.modelId });
-						if (index === 0) material = await this.providerExecutionClient.describe(identity, signal);
+						if (index === 0) material = await perfWrap("engine.resolve.describe", perfIds, { local: false }, () =>
+							this.providerExecutionClient!.describe(identity, signal));
 						const marker = `clientexec://sha256:${createHash("sha256").update(stableStringifyJson(identity), "utf8").digest("hex")}`;
 						const binding: ProviderExecutionBinding = {
 							identity, execution,
@@ -278,6 +287,7 @@ export class EngineExecutionResolver {
 					selectors.push(undefined);
 				}
 			}
+			endRoutes();
 			const quotaHook = this.providerAdmissionClient.createHook(
 				admission, authStorage, primary.execution.base_url, apiKeyRoutes,
 				localOAuth ? { accountId: localOAuth.accountId, credentialId: localOAuth.credentialId } : undefined,
