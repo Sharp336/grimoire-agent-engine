@@ -126,6 +126,7 @@ export type EngineControlQueryMethod =
 	| "session.archive.restore"
 	| "chat.lifecycle"
 	| "chat.archived.list"
+	| "chat.absence"
 	| "storage.reclaim"
 	| "session.restore.stage"
 	| "attachments.stage"
@@ -791,6 +792,8 @@ async function dispatchRequest(
 		case "session.restore.stage":
 		case "storage.reclaim":
 			throw nativeArchiveUnsupported();
+		case "chat.absence":
+			return { absent: await options.runtime.store.chatAbsent(requiredString(params, "agentInstanceRef")) };
 		case "chat.lifecycle": {
 			const action = requiredString(params, "action");
 			if (!(["status", "archive", "unarchive", "delete"] as string[]).includes(action))
@@ -998,6 +1001,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.archive.restore",
 			"chat.lifecycle",
 			"chat.archived.list",
+			"chat.absence",
 			"storage.reclaim",
 			"session.restore.stage",
 			"attachments.stage",
@@ -1453,6 +1457,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.archive.restore",
 			"chat.lifecycle",
 			"chat.archived.list",
+			"chat.absence",
 			"storage.reclaim",
 			"session.restore.stage",
 			"attachments.stage",

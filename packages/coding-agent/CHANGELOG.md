@@ -20,6 +20,7 @@
 - `omp gc --blobs` no longer scans native storage or refuses to run beside a ClientHost binding; it sweeps only the interactive flat blob root, as upstream.
 
 ### Fixed
+- Closing a canonical chat with no native session can now distinguish true local absence from an inaccessible retained native identity; existing chats remain protected from an incorrect close.
 - Executor policy now runs locally in Engine, with the same evaluator driving picker availability, ignored-check explanations, Start admission and live provider gates. Hosted Core supplies ACL-authorized signed facts instead of duplicating selection policy.
 - A verified direct human model/effort selection may ignore automatic quality, trust, grant-only, configured concurrency, budget-reserve and execution-limit preferences without altering catalog tiers or configured values. Exact-route and Any-provider selections retain real leases, usage accounting, scope allow/deny, credential integrity and provider exhaustion checks; children and consultants keep automatic policy.
 - Picker preview exposes exact-route and Any-provider availability plus the full current-selection check status. It is read-only, cannot mint human selection authority, and uses cached authenticated canonical facts.

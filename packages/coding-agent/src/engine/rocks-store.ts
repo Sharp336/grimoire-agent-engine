@@ -825,6 +825,12 @@ export class RocksEngineMutations {
 		const row = (await this.records.get("binding", id)).value as unknown as RocksBinding | null;
 		return row ? bindingSnapshot(row) : undefined;
 	}
+	async chatAbsent(ref: string): Promise<boolean> {
+		validateRuntimeValue("agi", ref);
+		// Control-query only: absence must not be inferred from an owner-filtered lookup.
+		const page = await this.records.query("identity_ref", [ref], undefined, 1);
+		return page.records.length === 0;
+	}
 	async chatIdentityId(ref: string, principalId: string): Promise<string> {
 		const page = await this.records.query("identity_ref", [ref], undefined, 2);
 		const identity = page.records[0]?.value as unknown as RocksIdentity | null;

@@ -29,6 +29,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 			const generation = await store.nextEngineGeneration();
 			const suffix = crypto.randomUUID();
 			const agent = fixtureIdentity(suffix, undefined, "fixture-owner");
+			expect(await store.chatAbsent(agent.agentInstanceRef)).toBe(true);
 			const execution = admittedExecutionFixture();
 			const binding = await admittedFixtureStart(
 				store, { ...nativeBinding(suffix), engineGeneration: generation },
@@ -40,6 +41,8 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING && !(workerExecutable && testR
 				command.agentInstanceId,
 			);
 			await expect(store.chatIdentityId(command.agentInstanceRef!, "other-owner")).rejects.toThrow();
+			// An authorization miss must never be mistaken for absence by canonical close.
+			expect(await store.chatAbsent(command.agentInstanceRef!)).toBe(false);
 			await expect(
 				store.chatIdentityId(`${command.agentInstanceRef}-other`, command.principalId!),
 			).rejects.toThrow();
