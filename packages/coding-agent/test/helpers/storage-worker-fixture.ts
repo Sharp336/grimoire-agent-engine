@@ -1,5 +1,6 @@
 import { afterEach, beforeEach } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { readStorageBinding, StorageClient } from "../../src/session/storage-client";
 
@@ -65,8 +66,16 @@ export async function startStorageWorker(executable: string, root: string, token
 
 export const storageTestExecutable = process.env.ARTEL_STORAGE_TEST_RUNTIME_EXE;
 export const storageTestRunRoot = process.env.ARTEL_STORAGE_TEST_RUN_ROOT;
-/** Real-owner Engine tests run only when the caller supplies a runtime copy and an existing run root. */
+/** Real-owner Engine tests require a runtime copy and a run root below the system temp directory. */
 export const storageWorkerUnavailable = !(storageTestExecutable && storageTestRunRoot);
+
+export async function removeStorageTestRoot(root: string | undefined): Promise<void> {
+	if (!root) return;
+	const relative = path.relative(await fs.realpath(os.tmpdir()), await fs.realpath(root));
+	if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+		throw new Error("Refusing to remove a storage test root outside the system temp directory");
+	await fs.rm(root, { recursive: true, force: true, maxRetries: 5 });
+}
 
 /**
  * Give every test in the enclosing scope its own real Rust owner. Each EngineRuntime the test creates,
@@ -74,10 +83,17 @@ export const storageWorkerUnavailable = !(storageTestExecutable && storageTestRu
  * Tests must dispose their runtimes before they finish.
  */
 export function bindTestsToStorageWorker(): { readonly blobsDir: () => string } {
-	let root = "";
+	let root: string | undefined;
 	let worker: { stop(): Promise<void> } | undefined;
 	let saved: { binding?: string; blobs?: string } = {};
 	beforeEach(async () => {
+		root = undefined;
+		saved = { binding: process.env.GRIMOIRE_STORAGE_BINDING, blobs: process.env.PI_BLOBS_DIR };
+		if (!storageTestRunRoot) throw new Error("ARTEL_STORAGE_TEST_RUN_ROOT is required");
+		const relative = path.relative(path.resolve(os.tmpdir()), path.resolve(storageTestRunRoot));
+		if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+			throw new Error("ARTEL_STORAGE_TEST_RUN_ROOT must be below the system temp directory");
+		await fs.mkdir(storageTestRunRoot, { recursive: true });
 		root = await fs.mkdtemp(path.join(storageTestRunRoot!, "engine-test-"));
 		const started = await startStorageWorker(
 			storageTestExecutable!,
@@ -86,7 +102,6 @@ export function bindTestsToStorageWorker(): { readonly blobsDir: () => string } 
 			1,
 		);
 		worker = started;
-		saved = { binding: process.env.GRIMOIRE_STORAGE_BINDING, blobs: process.env.PI_BLOBS_DIR };
 		process.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(started.binding);
 		process.env.PI_BLOBS_DIR = storageBlobsDir(root);
 	});
@@ -100,7 +115,11 @@ export function bindTestsToStorageWorker(): { readonly blobsDir: () => string } 
 			if (value === undefined) delete process.env[name];
 			else process.env[name] = value;
 		}
-		await fs.rm(root, { recursive: true, force: true, maxRetries: 5 });
+		await removeStorageTestRoot(root);
+		root = undefined;
 	});
-	return { blobsDir: () => storageBlobsDir(root) };
+	return { blobsDir: () => {
+		if (!root) throw new Error("Storage test root has not been created");
+		return storageBlobsDir(root);
+	} };
 }
